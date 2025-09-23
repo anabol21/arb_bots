@@ -11,29 +11,6 @@ import os
 
 logger = logging.getLogger('spread_monitor')
 logger.setLevel(logging.INFO)
-try:
-    config_path = os.path.join(os.path.dirname(__file__), 'config.json')
-    with open(config_path, 'r', encoding='utf-8') as f:
-        cfg = json.load(f)
-    bybit_cfg = (cfg.get('exchanges') or {}).get('bybit') or {}
-    bybit_api_key = bybit_cfg.get('apiKey')
-    bybit_api_secret = bybit_cfg.get('secret')
-    okx_cfg = (cfg.get('exchanges') or {}).get('okx') or {}
-    okx_api_key = okx_cfg.get('apiKey')
-    okx_api_secret = okx_cfg.get('secret')
-    okx_passphrase = okx_cfg.get('passphrase')
-    if not bybit_api_key or not bybit_api_secret:
-            raise RuntimeError('BYBIT credentials not set (config.json)')
-    if not okx_api_key or not okx_api_secret:
-            raise RuntimeError('OKX credentials not set (config.json)')
-except Exception as e:
-    print(e)
-    pass
-
-def _okx_sign_ws(timestamp: str, secret: str) -> str:
-    prehash = f"{timestamp}GET/users/self/verify"
-    digest = hmac.new(secret.encode(), prehash.encode(), hashlib.sha256).digest()
-    return base64.b64encode(digest).decode()
 
 file_handler = logging.FileHandler('spread.log')
 formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s', datefmt='%y-%m-%d %H:%M:%S')
@@ -45,8 +22,6 @@ console_handler.setFormatter(formatter)
 # Добавляем оба обработчика
 logger.addHandler(file_handler)
 logger.addHandler(console_handler)
-
-DRY_RUN = False
 
 okx_ask_price = None
 okx_ask_size = None 
