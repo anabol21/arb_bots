@@ -1,0 +1,26 @@
+{
+    "exchanges": {
+        "okx": {
+            "apiKey": "",
+            "secret": "",
+            "passphrase": "",
+            "options": {
+                "defaultType": "swap"
+            }
+        },
+        "bybit": {
+            "apiKey": "",
+            "secret": "",
+            "options": {
+                "defaultType": "swap"
+            }
+        },
+        "hyperliquid": {
+            "apiKey": "",
+            "secret": "",
+            "options": {
+                "defaultType": "swap"
+            }
+        }
+    }
+}
