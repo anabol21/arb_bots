@@ -15,7 +15,7 @@ def on_message(ws, message):
 def on_open(ws):
     sub_msg = {
         "op": "subscribe",
-        "args": ["tickers.BTCUSDT"]
+        "args":["tickers.BTCUSDT"]
     }
     ws.send(json.dumps(sub_msg))
 
