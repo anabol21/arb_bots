@@ -61,9 +61,9 @@ bybit_ask_price = None
 bybit_ask_size = None # количество XPL
 
 
-long_open_threshold = 0.5
+long_open_threshold = 0.8
 long_close_threshold = 0
-short_open_threshold = 0.5
+short_open_threshold = 0.8
 short_close_threshold = 0
 
 okx_long_position = False
@@ -215,8 +215,6 @@ async def trade_manager(okx_cmd_queue, bybit_cmd_queue):
     await asyncio.sleep(3)
     while True:
         if bybit_bid_price and okx_ask_price and okx_bid_price and bybit_ask_price:
-                spread_long = (bybit_bid_price - okx_ask_price) * 100 / bybit_bid_price
-                spread_short = (okx_bid_price - bybit_ask_price) * 100 / okx_bid_price
                 spread_long_ma.append(spread_long)
                 spread_short_ma.append(spread_short)
                 long_ma = (spread_long_ma[-1] + spread_long_ma[-2] + spread_long_ma[-3] + spread_long_ma[-4] + spread_long_ma[-5])/5
@@ -383,15 +381,15 @@ async def trade_manager(okx_cmd_queue, bybit_cmd_queue):
                 continue
     
 async def main():
-    symbol = 'W-USDT'
+    symbol = 'XPL-USDT'
     bybit_cmd_queue = asyncio.Queue()
     okx_cmd_queue = asyncio.Queue()
     await asyncio.gather(
         okx_listener(symbol),
-        #okx_private_listener(okx_cmd_queue),
-        #bybit_private_listener(bybit_cmd_queue),
+        okx_private_listener(okx_cmd_queue),
+        bybit_private_listener(bybit_cmd_queue),
         bybit_listener(symbol),
-        #trade_manager(okx_cmd_queue, bybit_cmd_queue)
+        trade_manager(okx_cmd_queue, bybit_cmd_queue)
     )
 
 if __name__ == "__main__":
