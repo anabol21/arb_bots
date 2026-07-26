@@ -4,8 +4,11 @@ import json
 import time
 import logging
 import csv
-import pickle
 from pathlib import Path
+
+import pandas as pd
+import pyarrow as pa
+import pyarrow.parquet as pq
 
 
 runtime_logger = logging.getLogger("runtime")
@@ -27,16 +30,24 @@ if not runtime_logger.handlers:
     runtime_logger.addHandler(console_handler)
 
 
-UNIVERSE_PATH = "/Users/mishatrubik/Desktop/spread/output/bybit_okx_universe.csv"
+UNIVERSE_PATH = "bybit_okx_universe.csv"
 ROW_START = 0
 ROW_END = 337
 
 OUTPUT_DIR = Path("output")
 OUTPUT_DIR.mkdir(exist_ok=True)
 
-PERSIST_EVERY_N = 10000
+PARQUET_DIR = OUTPUT_DIR / "spreads_parquet_by_coins"
+PARQUET_DIR.mkdir(parents=True, exist_ok=True)
+
+PERSIST_EVERY_N = 100_000
+SUBSCRIBE_BATCH_SIZE = 30
+SUBSCRIBE_BATCH_PAUSE_SEC = 3
+
 opportunities_buffer = []
 saved_records_count = 0
+saved_files_count = 0
+batch_seq = 0
 
 
 def load_pairs_from_csv(path, row_start=0, row_end=10):
@@ -92,23 +103,131 @@ quotes = {
 
 
 def persist_opportunities():
-    global saved_records_count
+    global saved_records_count, saved_files_count, batch_seq
 
     if not opportunities_buffer:
         return
 
-    ts = int(time.time())
-    file_path = OUTPUT_DIR / f"spreads_2.pkl"
+    df = pd.DataFrame(opportunities_buffer)
+    if df.empty:
+        opportunities_buffer.clear()
+        return
 
-    with file_path.open("ab") as f:
-        pickle.dump(opportunities_buffer, f, protocol=pickle.HIGHEST_PROTOCOL)
+    num_cols = [
+        "spread_long",
+        "spread_short",
+        "okx_latency_ms",
+        "bybit_latency_ms",
+        "calc_local_ts_ms",
+        "okx_local_recv_ts_ms",
+        "okx_ts_ms",
+        "bybit_local_recv_ts_ms",
+        "bybit_ts_ms",
+        "okx_bid_price",
+        "okx_bid_size",
+        "okx_ask_price",
+        "okx_ask_size",
+        "bybit_bid_price",
+        "bybit_bid_size",
+        "bybit_ask_price",
+        "bybit_ask_size",
+    ]
+    for col in num_cols:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
 
-    saved_now = len(opportunities_buffer)
+    if "base_coin" not in df.columns:
+        runtime_logger.warning("persist_opportunities | no base_coin column, dropping batch")
+        opportunities_buffer.clear()
+        return
+
+    df["base_coin"] = df["base_coin"].astype(str).str.strip()
+    df = df[df["base_coin"] != ""]
+    if df.empty:
+        opportunities_buffer.clear()
+        return
+
+    df["okx_freshness_ms"] = df["calc_local_ts_ms"] - df["okx_local_recv_ts_ms"]
+    df["bybit_freshness_ms"] = df["calc_local_ts_ms"] - df["bybit_local_recv_ts_ms"]
+
+    df["event_local_ts_ms"] = df["okx_local_recv_ts_ms"]
+    if "trigger" in df.columns:
+        mask_bybit = df["trigger"].eq("bybit")
+        df.loc[mask_bybit, "event_local_ts_ms"] = df.loc[mask_bybit, "bybit_local_recv_ts_ms"]
+
+    df["event_dt"] = pd.to_datetime(df["event_local_ts_ms"], unit="ms", errors="coerce")
+    df = df[df["event_dt"].notna()]
+    if df.empty:
+        opportunities_buffer.clear()
+        return
+
+    df["event_date"] = df["event_dt"].dt.strftime("%Y-%m-%d")
+    df["max_freshness_ms"] = df[["okx_freshness_ms", "bybit_freshness_ms"]].max(axis=1)
+    df["max_latency_ms"] = df[["okx_latency_ms", "bybit_latency_ms"]].max(axis=1)
+
+    keep_cols = [
+        "event_dt",
+        "event_local_ts_ms",
+        "event_date",
+        "base_coin",
+        "trigger",
+        "spread_long",
+        "spread_short",
+        "okx_latency_ms",
+        "bybit_latency_ms",
+        "okx_freshness_ms",
+        "bybit_freshness_ms",
+        "max_freshness_ms",
+        "max_latency_ms",
+        "calc_local_ts_ms",
+        "okx_local_recv_ts_ms",
+        "okx_ts_ms",
+        "bybit_local_recv_ts_ms",
+        "bybit_ts_ms",
+        "okx_bid_price",
+        "okx_bid_size",
+        "okx_ask_price",
+        "okx_ask_size",
+        "bybit_bid_price",
+        "bybit_bid_size",
+        "bybit_ask_price",
+        "bybit_ask_size",
+    ]
+    keep_cols = [c for c in keep_cols if c in df.columns]
+    df = df[keep_cols].copy()
+
+    saved_now = 0
+    files_now = 0
+
+    for (base_coin, event_date), sub in df.groupby(["base_coin", "event_date"], sort=False):
+        sub = sub.sort_values("event_dt").reset_index(drop=True)
+
+        part_dir = PARQUET_DIR / f"base_coin={base_coin}" / f"event_date={event_date}"
+        part_dir.mkdir(parents=True, exist_ok=True)
+
+        file_path = part_dir / f"batch_{batch_seq:09d}.parquet"
+        batch_seq += 1
+
+        table = pa.Table.from_pandas(
+            sub.drop(columns=["event_date"]),
+            preserve_index=False
+        )
+        pq.write_table(
+            table,
+            file_path,
+            compression="zstd"
+        )
+
+        saved_now += len(sub)
+        files_now += 1
+
     saved_records_count += saved_now
+    saved_files_count += files_now
     opportunities_buffer.clear()
 
     runtime_logger.info(
-        f"Persisted spread records: {saved_now} | total_saved={saved_records_count} | file={file_path}"
+        f"Persisted spread records: {saved_now} | files_written={files_now} | "
+        f"total_saved={saved_records_count} | total_files={saved_files_count} | dir={PARQUET_DIR}"
     )
 
 
@@ -124,6 +243,14 @@ def write_spread_record(
     okx_ts_ms,
     bybit_local_recv_ts_ms,
     bybit_ts_ms,
+    okx_bid_price,
+    okx_bid_size,
+    okx_ask_price,
+    okx_ask_size,
+    bybit_bid_price,
+    bybit_bid_size,
+    bybit_ask_price,
+    bybit_ask_size,
 ):
     record = {
         "base_coin": base_coin,
@@ -137,6 +264,14 @@ def write_spread_record(
         "okx_ts_ms": okx_ts_ms,
         "bybit_local_recv_ts_ms": bybit_local_recv_ts_ms,
         "bybit_ts_ms": bybit_ts_ms,
+        "okx_bid_price": okx_bid_price,
+        "okx_bid_size": okx_bid_size,
+        "okx_ask_price": okx_ask_price,
+        "okx_ask_size": okx_ask_size,
+        "bybit_bid_price": bybit_bid_price,
+        "bybit_bid_size": bybit_bid_size,
+        "bybit_ask_price": bybit_ask_price,
+        "bybit_ask_size": bybit_ask_size,
     }
 
     opportunities_buffer.append(record)
@@ -176,6 +311,14 @@ def calc_and_store_spread(base_coin, trigger_exchange):
         okx_ts_ms=float(okx["ts_exchange"]),
         bybit_local_recv_ts_ms=bybit["local_recv_ts_ms"],
         bybit_ts_ms=float(bybit["ts_exchange"]),
+        okx_bid_price=okx["bid_price"],
+        okx_bid_size=okx["bid_size"],
+        okx_ask_price=okx["ask_price"],
+        okx_ask_size=okx["ask_size"],
+        bybit_bid_price=bybit["bid_price"],
+        bybit_bid_size=bybit["bid_size"],
+        bybit_ask_price=bybit["ask_price"],
+        bybit_ask_size=bybit["ask_size"],
     )
 
 
@@ -305,12 +448,19 @@ async def okx_listener(base_coin, okx_symbol):
             runtime_logger.error(f"{base_coin} | OKX error: {e}")
             await asyncio.sleep(10)
 
+
 async def heartbeat():
     while True:
         runtime_logger.info(
-            f"heartbeat | pairs={len(pairs)} | buffer_size={len(opportunities_buffer)} | total_saved={saved_records_count}"
+            f"heartbeat | pairs={len(pairs)} | buffer_size={len(opportunities_buffer)} | "
+            f"total_saved={saved_records_count} | total_files={saved_files_count}"
         )
         await asyncio.sleep(30)
+
+
+def chunked(seq, size):
+    for i in range(0, len(seq), size):
+        yield seq[i:i + size]
 
 
 async def main():
@@ -323,13 +473,31 @@ async def main():
 
     tasks = [asyncio.create_task(heartbeat(), name="heartbeat")]
 
-    for row in pairs:
-        base_coin = row["base_coin"]
-        okx_symbol = row["okx_symbol"]
-        bybit_symbol = row["bybit_symbol"]
+    pair_batches = list(chunked(pairs, SUBSCRIBE_BATCH_SIZE))
+    runtime_logger.info(
+        f"Starting subscriptions in batches | batch_size={SUBSCRIBE_BATCH_SIZE} | "
+        f"pause_sec={SUBSCRIBE_BATCH_PAUSE_SEC} | batches={len(pair_batches)}"
+    )
 
-        tasks.append(asyncio.create_task(okx_listener(base_coin, okx_symbol), name=f"okx:{base_coin}"))
-        tasks.append(asyncio.create_task(bybit_listener(base_coin, bybit_symbol), name=f"bybit:{base_coin}"))
+    for batch_idx, pair_batch in enumerate(pair_batches, start=1):
+        runtime_logger.info(
+            f"Subscription batch {batch_idx}/{len(pair_batches)} | "
+            f"coins_in_batch={len(pair_batch)}"
+        )
+
+        for row in pair_batch:
+            base_coin = row["base_coin"]
+            okx_symbol = row["okx_symbol"]
+            bybit_symbol = row["bybit_symbol"]
+
+            tasks.append(asyncio.create_task(okx_listener(base_coin, okx_symbol), name=f"okx:{base_coin}"))
+            tasks.append(asyncio.create_task(bybit_listener(base_coin, bybit_symbol), name=f"bybit:{base_coin}"))
+
+        if batch_idx < len(pair_batches):
+            runtime_logger.info(
+                f"Subscription batch {batch_idx} scheduled | sleeping {SUBSCRIBE_BATCH_PAUSE_SEC}s before next batch"
+            )
+            await asyncio.sleep(SUBSCRIBE_BATCH_PAUSE_SEC)
 
     try:
         await asyncio.gather(*tasks)
@@ -340,9 +508,7 @@ async def main():
             task.cancel()
 
         await asyncio.gather(*tasks, return_exceptions=True)
-
         await asyncio.sleep(0.25)
-
         raise
     finally:
         runtime_logger.info("main | flushing opportunities buffer before exit")
