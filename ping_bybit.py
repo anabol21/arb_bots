@@ -1,21 +1,24 @@
 import websocket
 import json
 import time
-from datetime import datetime
 
 def on_message(ws, message):
     data = json.loads(message)
-    if "topic" in data and "tickers" in data["topic"]:
-        ts_exchange = data["ts"]
-        ts_local = int(time.time() * 1000)
 
-        latency = ts_local - ts_exchange
-        print(f"Market data latency: {latency} ms")
+    if "topic" in data and data["topic"].startswith("orderbook.1."):
+        ts_exchange = int(data["ts"])          # market-data timestamp
+        cts_exchange = int(data.get("cts", ts_exchange))  # matching engine ts, если есть
+        ts_local = time.time_ns() // 1_000_000
+
+        age_ts = ts_local - ts_exchange
+        age_cts = ts_local - cts_exchange
+
+        print(f"Bybit orderbook age ts: {age_ts} ms, cts: {age_cts} ms")
 
 def on_open(ws):
     sub_msg = {
         "op": "subscribe",
-        "args":["tickers.BTCUSDT"]
+        "args": ["orderbook.1.XRPUSDT"]  # или BTCUSDT / ETHUSDT
     }
     ws.send(json.dumps(sub_msg))
 

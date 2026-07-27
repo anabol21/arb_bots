@@ -15,7 +15,12 @@ def on_message(ws, message):
 def on_open(ws):
     sub_msg = {
         "op": "subscribe",
-        "args":[{"channel": "tickers", "instId": "BTC-USDT-SWAP"}]
+        "args": [
+            {
+            "channel": "books5",
+            "instId": "BTC-USDT-SWAP"
+            }
+        ]
     }
     ws.send(json.dumps(sub_msg))
 
