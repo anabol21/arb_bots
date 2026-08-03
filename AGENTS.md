@@ -117,12 +117,18 @@ Use these as starting points. Add more targeted commands only when required by t
   - `app/utils/`
 - Validation logic belongs in `validation/`
 - Documentation and operational instructions belong in `docs/`
-- Strategy gear roadmap (parallel to storage reliability): `docs/strategy-gears.md`
+- Strategy gear roadmap: `docs/strategy-gears.md`
 - Research and offline analysis belong in `research/`
 - Keep runtime code and offline research code separate
-- Strategy documentation does not replace the storage-reliability priority; treat them as parallel tracks
 - Prefer structured logs over ad-hoc print debugging
 - Keep path handling explicit and centralized when possible
+
+## Development tracks (lines of work, not necessarily git branches)
+1. **Data collection / storage reliability** — VPS, mount, persistence (`app/screaner_b_o.py`). Current reliability priority.
+2. **Model** — build and tune the strategy on **simulated historical runs** only (`model.ipynb`, gear ladder in `docs/strategy-gears.md`). **Gear 1.0 is closed** in this track (simulator contour; see `gear1.svg`). Validation remains **backtest / historical simulation**, not live trading. An async live trading bot is **out of scope** for the model track.
+3. **Glue (future)** — one architecture joining collection, training history, live model metrics, and trades.
+
+Strategy documentation does not replace the storage-reliability priority. Live-bot integration belongs to track 3; gear 1.0 closure was simulator-only.
 
 ## Architectural Decision Discipline
 For storage architecture tasks, do not jump directly to implementation.
