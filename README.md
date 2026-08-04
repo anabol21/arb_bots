@@ -1,49 +1,66 @@
-#  Crypto Arbitrage Bots — OKX / Bybit / Hyperliquid
+# Три трека разработки
 
-A repository dedicated to **arbitrage trading bots** across **OKX**, **Bybit**, and **Hyperliquid**.  
-In addition to the core trading modules, the project includes **utility scripts** for data collection, latency testing, and WebSocket connectivity diagnostics.
+В репозитории параллельно ведутся три линии работ: модель и проверка на истории (симуляция), публичный сборщик данных на удалённом сервере с резервным хранением, и будущий торговый бот со склейкой контуров. Закрытие гира в треке модели — это не готовность живого бота. Архитектура хранения в треке сборщика пока не зафиксирована окончательно.
 
----
-
-##  Repository Structure
-
-| File | Description |
-|------|------------|
-| `bybit_ws.py` | Arbitrage bot using **market orders** on the **Bybit / OKX** pair, operating during the **pre-market of perpetual futures**. |
-| `config_example.json` | Example config file containing API credentials and exchange connection parameters. |
-| `data_collector_okx_bybit.py` | Spread **data collection script** for the **OKX / Bybit** pair. |
-| `okx_hyper.py` | Multi-pair **spread collector** for **Hyperliquid / OKX**, potentially extendable to a **scanner module for arbitrage opportunities**. |
-| `ping_bybit.py`, `ping_hyper.py`, `ping_okx.py` | **Latency benchmark scripts** to measure market data response time for each exchange. |
+Это зоны ответственности, а не обязательно отдельные ветки `git`.
 
 ---
 
-##  Project Goals
+## 1. Модель и бэктест (симуляция)
 
-- Develop **low-latency arbitrage strategies**
-- Connect to exchanges via **WebSocket and REST API**
-- Execute **market-order based arbitrage logic**
-- Collect and analyze **orderbook spreads**
-- Build infrastructure for **historical data storage & real-time monitoring**
+Фокус этой ветки: стратегия и её проверка только в симуляторе на истории.
 
----
+Дорожная карта гиров (кратко): `0.8` → `1.0` (закрыт как симуляторный контур) → `2` (обучение и тест вокруг чёрного ящика гира 1) → `2.5` (`position_frac`) → позже `3` (портфельная симуляция). Подробности: [`docs/strategy-gears.md`](docs/strategy-gears.md).
 
-##  Stack & Exchanges
+Проверка здесь — историческая симуляция и протокол обучения/теста. Живой контур и сделки в этот трек не входят.
 
-- **Exchanges:** Bybit, OKX, Hyperliquid  
-- **API Layers:** WebSocket
-- **Utilities:** latency benchmarking, spread logging, data streaming diagnostics  
+Опорные артефакты:
 
----
+- `model.ipynb` — код модели и симулятора
+- `gear1.svg` — схема закрытого контура гира 1
+- [`docs/strategy-gears.md`](docs/strategy-gears.md) — лестница гиров
+- [`docs/data-format-model.md`](docs/data-format-model.md) — **запрос** данных со стороны модели (не спецификация сборщика)
 
-##  Roadmap / Planned Features
+Спреды и амплитуду модель считает по сохранённым тикам `L1`. При необходимости запрашивает пятиминутные бары объёма (`volume`); семантика объёма принадлежит треку сборщика.
 
-- Real-time **spread dashboard / GUI monitor**
-- **Asynchronous execution engine** for order handling
-- Basic **risk management module**
-- **Arbitrage scanner** for opportunity detection across multiple markets
+Заморожено для удобства модели: не менять приём котировок, разбор бирж и расчёт спреда без явного разрешения.
+
+В зоне: симулятор, гиры, запрос полей, санитария прогонов. Вне зоны: живой бот, приватные каналы, изменение публичного контура сбора «под модель».
 
 ---
 
-##  Configuration
+## 2. Сборщик данных (сервер) и резервное хранение
 
-Create your own `config.json` based on the example
+Публичные каналы, максимально быстрые публичные ленты, валидные данные → резервное хранение.
+
+Точка входа среды исполнения: `app/screaner_b_o.py`. К этому треку относятся модули хранения и схемы, проверки и операционные документы — детали ведутся в ветке сборщика; здесь только границы.
+
+Всегда различать:
+
+1. локальная разработка
+2. среда исполнения на удалённом сервере
+3. смонтированное удалённое хранилище
+
+Успех локально ≠ успех на сервере ≠ подтверждённая запись в резерв. Как именно писать (напрямую на монтирование, локальный буфер и отложенная выгрузка, гибрид) — открытый вопрос; фиксировать дизайн рано нельзя.
+
+---
+
+## 3. Торговый бот и склейка (будущее)
+
+Пока только планы: связать логику модели со скриптом данных, приватные каналы, сделки, портфель. Как приоритет не начат. Закрытие гира `1.0` в симуляторе этот трек не закрывает.
+
+Приватные поля не смешивать с публичным датасетом сборщика.
+
+---
+
+## Что не смешивать
+
+| Ось | Разделение |
+|-----|------------|
+| Каналы | публичный сборщик ≠ приватный бот |
+| Проверка | симуляция на истории ≠ живая торговля |
+| Схема | запрос модели (`docs/data-format-model.md`) ≠ контракт хранения сборщика |
+
+---
+
+В этом файле нумерация: 1 — модель, 2 — сборщик, 3 — бот. В [`AGENTS.md`](AGENTS.md) порядок другой (1 — сборщик, 2 — модель, 3 — склейка); речь о тех же трёх зонах, не о разных проектах.
