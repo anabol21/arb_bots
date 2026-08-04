@@ -125,7 +125,7 @@ Use these as starting points. Add more targeted commands only when required by t
 
 ## Development tracks (lines of work, not necessarily git branches)
 1. **Data collection / storage reliability** — VPS, mount, persistence (`app/screaner_b_o.py`). Current reliability priority.
-2. **Model** — build and tune the strategy on **simulated historical runs** only (`model.ipynb`, gear ladder in `docs/strategy-gears.md`). **Gear 1.0 is closed** in this track (simulator contour; see `gear1.svg`). Validation remains **backtest / historical simulation**, not live trading. An async live trading bot is **out of scope** for the model track.
+2. **Model** — build and validate the strategy on **simulated historical runs** only (`model.ipynb`, gear ladder in `docs/strategy-gears.md`: **1.0** closed → **1.5** regime screener → **2** multi-coin fixed model → **2.5** size policy → **3** parameter search on anomaly episodes). Validation remains **backtest / historical simulation**, not live trading. An async live trading bot is **out of scope** for the model track.
 3. **Glue (future)** — one architecture joining collection, training history, live model metrics, and trades.
 
 Strategy documentation does not replace the storage-reliability priority. Live-bot integration belongs to track 3; gear 1.0 closure was simulator-only.
