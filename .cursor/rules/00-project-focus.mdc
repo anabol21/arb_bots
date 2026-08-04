@@ -1,0 +1,36 @@
+---
+description: Defines the three project tracks, current priority, and frozen boundaries
+alwaysApply: true
+---
+
+# Project Focus
+
+Work belongs to one functional track:
+
+1. **Collection and storage** — `app/screaner_b_o.py`, schema, persistence, VPS, mount, compaction, backup. Current priority.
+2. **Historical model** — `model.ipynb` and `docs/strategy-gears.md`. Simulation only.
+3. **Glue** — future architecture joining collection, model metrics, and trades. Specification only until explicitly opened.
+
+Before acting:
+
+- name the track and pipeline block;
+- assign one implementing agent per file;
+- define the independent review or validation gate;
+- prefer a narrow, falsifiable step over a broad rewrite.
+
+Frozen unless explicitly unlocked:
+
+- WebSocket ingest
+- exchange parsing
+- spread calculation
+- trading logic
+
+Environment claims must distinguish local development, VPS runtime, and mounted remote storage.
+
+Do not claim:
+
+- storage correctness without a VPS-oriented mounted-storage validation plan;
+- model profitability from a short historical run;
+- live-bot readiness from completion of a model gear.
+
+Use `.cursor/agents/orchestrator.md` for routing and `AGENTS.md` for repository-wide safety policy.

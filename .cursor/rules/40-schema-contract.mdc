@@ -1,0 +1,34 @@
+---
+description: Protects parquet schema, partitioning, versioning, and producer-consumer compatibility
+globs: app/schema/**/*.py,app/storage/writer.py,docs/storage-contract.md,docs/data-format-*.md,model.ipynb
+alwaysApply: false
+---
+
+# Schema Contract
+
+Before changing persisted data, define:
+
+- producer and consumers;
+- current and target contract version;
+- required and optional fields;
+- types, units, timestamps, and field semantics;
+- partition fields versus parquet body fields;
+- backward compatibility or explicit migration;
+- rejection behavior for incompatible data.
+
+Project invariants:
+
+- ticks use `base_coin=<COIN>/event_date=<YYYY-MM-DD>/`;
+- lean ticks and `bar_5m` remain separate logical datasets;
+- complete L1 allows spreads to be computed when reading;
+- `volume` semantics come from the collector/source contract;
+- silent fallback must not hide a missing required field.
+
+Required handoff:
+
+1. Schema Contract Agent fixes the contract.
+2. Runtime Storage Agent implements writer changes.
+3. Validation Agent checks a real published parquet file.
+4. Integration Validator Agent smoke-reads a sample when model input changes.
+
+Do not combine a schema change, storage redesign, and model behavior change in one unreviewable step.

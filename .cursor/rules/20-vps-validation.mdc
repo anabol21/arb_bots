@@ -1,0 +1,36 @@
+---
+description: Requires environment-specific evidence for VPS and mounted-storage claims
+alwaysApply: true
+---
+
+# VPS Validation Discipline
+
+For runtime, persistence, shutdown, compaction, backup, or storage claims:
+
+- treat `app/screaner_b_o.py` as the production entrypoint;
+- treat `app/screaner_local_lean.py` as a local experiment only;
+- treat storage correctness as unproven until the claimed environment is validated.
+
+Before a production conclusion, identify:
+
+- VPS runtime command
+- runtime log path
+- mounted storage target path
+- first materialization path
+- durable destination
+- expected file-state transitions
+- observation window
+
+Validation must observe:
+
+- accepted/published/spooled/quarantined/pending accounting;
+- backlog count, size, and age;
+- final versus temporary files;
+- parquet readability;
+- shutdown and restart outcome;
+- mount latency spike or disappearance when relevant;
+- compaction and backup confirmation when claimed.
+
+Start with read-only inspection and existing scripts in `validation/`. Never delete backlog, truncate logs, or change mount/service configuration without explicit approval.
+
+A local check proves only local behavior. A VPS check without mounted-storage evidence does not prove remote durability. State untested failure modes and keep the verdict no stronger than the evidence.

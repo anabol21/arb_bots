@@ -1,0 +1,29 @@
+---
+description: Enforces historical-only model work, gear order, reproducibility, and anti-overfitting gates
+globs: model.ipynb,**/model/**/*.py,docs/strategy-gears.md,docs/data-format-model.md,gear*.svg
+alwaysApply: false
+---
+
+# Historical Model Gears
+
+The model track is historical simulation only. Do not implement live order routing, private channels, or asynchronous trading here.
+
+Gear order:
+
+1. Gear 1.0 is closed: one coin, fixed vector, explicit execution approximations.
+2. Gear 1.5: fixed expert regime screener; no PnL optimization.
+3. Gear 2: multi-coin simulation using 1.0 + 1.5, limit `K`, equal capital per slot.
+4. Gear 2.5: separate position-size policy.
+5. Gear 3: parameter search only after 1.5–2.5 and a catalog of independent anomaly episodes.
+
+For each change:
+
+- name exactly one gear and its acceptance criterion;
+- preserve the baseline when new flags are off;
+- keep `VARIATION` separate from frozen simulator `HYPER`;
+- model signal and fill consistently, including `Trade_Lat`, pending state, fees, and open-at-end positions;
+- run from a clean configuration without notebook state leakage;
+- distinguish code validation from evidence of trading advantage;
+- keep train/test separation once parameter selection exists.
+
+Handoff: Model Simulator Agent implements; Integration Validator Agent independently checks baseline, trades, metrics, markers, and notebook state. Review Critic Agent joins when the simulator contract or metrics change.

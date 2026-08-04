@@ -1,0 +1,42 @@
+---
+description: Enforces storage invariants and narrow design comparison for persistence changes
+globs: app/screaner_b_o.py,app/screaner_local_lean.py,app/storage/**/*.py,deploy/**/*,docs/*storage*.md,docs/*runbook*.md
+alwaysApply: false
+---
+
+# Storage Scope
+
+The current production path is hybrid: publisher/writer → target storage, durable local spool on failure, recovery, compaction, and backup transfer.
+
+Do not restart an abstract architecture comparison for every patch. Compare up to three candidates only when the affected boundary is genuinely undecided.
+
+Candidate patterns:
+
+1. direct write to mounted storage
+2. local staging + background uploader
+3. hybrid / fallback model
+
+For a storage change:
+
+- name the exact stage and failure mode;
+- state the accounting and durability invariants;
+- identify hot-path blocking, timeout, backlog, shutdown, and restart behavior;
+- distinguish attempted write, published file, and durable confirmation;
+- require structured logs and inspectable file states;
+- keep ingest, parsing, spread calculation, and strategy unchanged.
+
+When comparing candidates, evaluate:
+
+- failure modes
+- runtime blocking
+- observability
+- restart recovery
+- mount dependency
+- silent-loss and duplicate risk
+- operational and validation complexity
+
+Handoff:
+
+1. Runtime Storage Agent implements.
+2. Review Critic Agent reviews failure modes.
+3. Validation Agent verifies in the correct environment.

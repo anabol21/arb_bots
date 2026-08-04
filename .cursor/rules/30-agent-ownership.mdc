@@ -1,0 +1,29 @@
+---
+description: Assigns one implementing agent per file and defines cross-track handoffs
+alwaysApply: true
+---
+
+# Agent Ownership
+
+Route work through `.cursor/agents/orchestrator.md`.
+
+Primary ownership:
+
+- Runtime Storage Agent: persistence hooks in `app/screaner_b_o.py`, `app/storage/*`, storage-related `deploy/*`.
+- Schema Contract Agent: `app/schema/*`, `docs/storage-contract.md`, `docs/data-format-*.md`.
+- Validation Agent: storage checks in `validation/*`, VPS acceptance evidence and runbooks.
+- Model Simulator Agent: `model.ipynb`, model modules, gear meaning in `docs/strategy-gears.md`.
+- Integration Validator Agent: independent model regression; does not implement the feature.
+- Review Critic Agent: independent design/patch review; does not implement the patch.
+- Text Stylist Agent: wording and structure in `docs/*`; does not alter technical meaning.
+
+Rules:
+
+- One implementing agent owns a file during an implementation stage.
+- Review and validation agents do not silently repair the patch they assess.
+- Schema changes flow Schema Contract → Runtime Storage → Validation → model smoke when applicable.
+- Model changes flow Model Simulator → Integration Validator.
+- Storage changes flow Runtime Storage → Review Critic → Validation.
+- Shared docs require a single semantic owner; Text Stylist runs only after meaning is fixed.
+- Frozen ingest, parsing, spread calculation, and trading logic require explicit user approval.
+- Track 3 has no implementation agent until a glue specification is approved.
