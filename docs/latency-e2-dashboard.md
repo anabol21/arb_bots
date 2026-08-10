@@ -6,8 +6,8 @@
 |------|----------|
 | Трек | (D) сбор / хранение — подзадача задержки; трек (B) не трогать |
 | Контрольная точка | [`program-roadmap.md`](program-roadmap.md) §3, `gate #1` — слой хвостов vs ping |
-| Статус E2 | `running` / `blocked` / `done` — см. блок «Состояние прогона» ниже |
-| Окно | 1–2 ч wall-clock (цель **2 ч** = `7200` с) |
+| Статус E2 | `running` — см. блок «Состояние прогона» ниже |
+| Окно | `2026-08-10T17:19:55Z` → `19:19:55Z` (2 ч) |
 | Код | локальный репозиторий → VPS `/root/spread_staging` (без патча ingest) |
 | Выполнение | VPS `root@38.244.198.42`, **отдельный** процесс shadow (не `systemd` prod) |
 | Журналы shadow | `/var/log/spread/e2_n1_xrp_runtime.log` |
@@ -22,13 +22,14 @@
 
 | Поле | Значение |
 |------|----------|
-| Статус | `running` (заполнить при старте) |
-| Start UTC | _(заполнить)_ |
-| Expected end UTC | start + 2h |
-| Shadow PID | `/var/log/spread/e2_n1_xrp_shadow.pid` |
-| Ping PID | `/var/log/spread/e2_n1_xrp_ping.pid` |
-| Prod `spread-collector` | **не стартовать** ради E2; на момент подготовки E2 unit был `inactive` — это факт среды, не часть дизайна H1 |
+| Статус | `running` (smoke OK ~2 мин: `Loaded pairs: 1`, XRP subscribed, ping ~20–30 мс) |
+| Start UTC | `2026-08-10T17:19:55Z` |
+| Expected end UTC | `2026-08-10T19:19:55Z` |
+| Shadow PID | `1255179` → `/var/log/spread/e2_n1_xrp_shadow.pid` |
+| Ping PID | `1255182` → `/var/log/spread/e2_n1_xrp_ping.pid` |
+| Prod `spread-collector` | **не стартовать** ради E2; unit был и остаётся `inactive` — факт среды, не часть дизайна H1 |
 | Universe slice | `SPREAD_ROW_START=329` `SPREAD_ROW_END=330` → одна строка `base_coin=XRP` |
+| Smoke facts | `collect_bars=false`; `schema_mode=lean`; `parquet_root=/data/experiments/e2_n1_xrp/live`; heartbeat `buffer_size` растёт (~500/30 с) |
 
 ---
 
