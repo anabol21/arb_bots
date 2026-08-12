@@ -1,0 +1,111 @@
+# Curated non-crypto base_coin denylist for Bybit/OKX USDT perps.
+# Used by research/is_crypto.py. One ticker per line; # comments ok.
+# Seeded from bybit_okx_universe.csv equity/ETF/commodity-like listings (2026-08).
+# Maintain when the universe gains new stock/ETF/metal perps.
+#
+# False-positive risk (crypto marked non-crypto): ticker collision with a listed
+# equity (e.g. add COMP here by mistake → Compound crypto excluded).
+# False-negative risk (equity marked crypto): new stock/ETF perp not yet listed
+# here → is_crypto defaults True. Prefer updating this file over heuristics.
+
+# Equities / ADR-style stock perps
+AAOI
+AAPL
+ADBE
+ALAB
+AMAT
+AMZN
+ARM
+ASML
+ASTS
+AVGO
+AXTI
+BE
+BILL
+BMNR
+BZ
+CC
+CIEN
+CL
+COHR
+COIN
+COST
+CRCL
+CRDO
+CRWD
+CRWV
+CSCO
+CVX
+DELL
+DRAM
+F
+FLNC
+GEV
+GLW
+GOOGL
+HIMS
+HOOD
+HPE
+HYUNDAI
+IBM
+INTC
+IREN
+KLAC
+LITE
+LLY
+LRCX
+META
+MRVL
+MSFT
+MSTR
+MU
+NBIS
+NFLX
+NOW
+NVDA
+O
+ONDS
+ORCL
+PLTR
+POET
+QCOM
+RDW
+RKLB
+SAMSUNG
+SKHY
+SKHYNIX
+SMCI
+SNDK
+SONY
+TER
+TSLA
+TSM
+TTWO
+USAR
+VRT
+W
+WDC
+
+# ETFs / leveraged & volatility products
+EWJ
+EWY
+IWM
+KORU
+MUU
+MVLL
+QQQ
+ROBO
+SLX
+SMH
+SOXL
+SPCX
+SPY
+SQQQ
+TQQQ
+UVXY
+XBI
+XLE
+
+# Precious-metal proxies (not crypto)
+XAG
+XAU
