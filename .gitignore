@@ -1,0 +1,15 @@
+.DS_Store
+.vscode/
+.pytest_cache/
+__pycache__/
+*.pyc
+venv/
+spread_venv/
+output/
+good_shit/
+else/
+*.pkl
+bye
+chmod
+mkdir
+put

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import importlib
 import json
 import logging
@@ -9,6 +10,8 @@ import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
+
+import pyarrow.parquet as pq
 
 from app.storage.mount_state import MountFailureState
 from app.storage.spool import DurableSpool
@@ -68,6 +71,27 @@ class P0StorageTests(unittest.TestCase):
             1,
         )
 
+    def test_publisher_uses_local_tmp_then_final_parquet(self) -> None:
+        root = Path(self.temp_dir.name)
+        local_primary = root / "data" / "live"
+        publisher = ParquetPublisher(
+            parquet_root=local_primary,
+            logger=self.logger,
+            failed_batches_logger=self.logger,
+            mount_failure_state=self.mount_state,
+            spool=self.spool,
+            max_queue=1,
+        )
+
+        publisher.start()
+        self.assertTrue(publisher.enqueue_records([valid_record()]))
+        publisher.shutdown()
+
+        finals = list(local_primary.rglob("*.parquet"))
+        self.assertEqual(len(finals), 1)
+        self.assertEqual(pq.ParquetFile(finals[0]).metadata.num_rows, 1)
+        self.assertEqual(list((local_primary / ".tmp").glob("*")), [])
+
     def test_force_spool_accounts_valid_and_rejected_records_durably(self) -> None:
         records = [valid_record(), {"base_coin": "", "trigger": "okx"}]
 
@@ -111,7 +135,7 @@ class P0StorageTests(unittest.TestCase):
         }
         with (
             mock.patch(
-                "app.storage.writer.assert_storage_mount_writable",
+                "app.storage.writer.assert_storage_root_writable",
                 return_value=None,
             ),
             mock.patch(
@@ -160,6 +184,111 @@ class P0StorageTests(unittest.TestCase):
                     logger.removeHandler(handler)
                     handler.close()
             sys.modules.pop("app.screaner_b_o", None)
+
+    def _runtime_path_env(self, root: Path) -> dict[str, str]:
+        return {
+            "SPREAD_PARQUET_ROOT": str(root / "runtime-mount"),
+            "SPREAD_RUNTIME_LOG": str(root / "runtime.log"),
+            "SPREAD_FAILED_BATCHES_LOG": str(root / "failed.log"),
+            "SPREAD_SPOOL_ROOT": str(root / "spool"),
+        }
+
+    def _cleanup_runtime(self, runtime: object) -> None:
+        publisher = getattr(runtime, "publisher", None)
+        if publisher is not None:
+            publisher.shutdown()
+        bars_publisher = getattr(runtime, "bars_publisher", None)
+        if bars_publisher is not None:
+            bars_publisher.shutdown()
+        recovery_worker = getattr(runtime, "recovery_worker", None)
+        if recovery_worker is not None:
+            recovery_worker.shutdown()
+        bars_recovery_worker = getattr(runtime, "bars_recovery_worker", None)
+        if bars_recovery_worker is not None:
+            bars_recovery_worker.shutdown()
+        runtime.publisher = None
+        runtime.bars_publisher = None
+        runtime.recovery_worker = None
+        runtime.bars_recovery_worker = None
+        runtime.spool = None
+        runtime.bars_spool = None
+        runtime.opportunities_buffer.clear()
+        if hasattr(runtime, "bar_buffer"):
+            runtime.bar_buffer.clear()
+        if hasattr(runtime, "seen_bar_keys"):
+            runtime.seen_bar_keys.clear()
+        for logger in (runtime.runtime_logger, runtime.failed_batches_logger):
+            for handler in list(logger.handlers):
+                logger.removeHandler(handler)
+                handler.close()
+        sys.modules.pop("app.screaner_b_o", None)
+
+    async def _wait_until_main_ready(self, runtime: object, timeout_sec: float = 2.0) -> None:
+        deadline = asyncio.get_running_loop().time() + timeout_sec
+        while asyncio.get_running_loop().time() < deadline:
+            if (
+                getattr(runtime, "publisher", None) is not None
+                and getattr(runtime, "spool", None) is not None
+                and getattr(runtime, "recovery_worker", None) is not None
+            ):
+                return
+            await asyncio.sleep(0.01)
+        raise TimeoutError("main() did not finish storage startup in time")
+
+    def test_expected_cancel_after_successful_flush_exits_cleanly(self) -> None:
+        root = Path(self.temp_dir.name)
+        env = self._runtime_path_env(root)
+        # Keep path envs for import AND main(): DurableSpool resolves SPREAD_SPOOL_ROOT
+        # at construction time, not at module import.
+        with mock.patch.dict(os.environ, env):
+            sys.modules.pop("app.screaner_b_o", None)
+            runtime = importlib.import_module("app.screaner_b_o")
+
+            async def _exercise() -> None:
+                runtime.pairs = []
+                runtime.opportunities_buffer.clear()
+                runtime.mount_failure_state = MountFailureState()
+                with mock.patch.object(runtime, "assert_storage_root_writable"):
+                    main_task = asyncio.create_task(runtime.main())
+                    await self._wait_until_main_ready(runtime)
+                    main_task.cancel()
+                    await main_task
+
+            try:
+                asyncio.run(_exercise())
+            finally:
+                self._cleanup_runtime(runtime)
+
+    def test_cancel_with_mount_failure_still_exits_nonzero(self) -> None:
+        root = Path(self.temp_dir.name)
+        env = self._runtime_path_env(root)
+        with mock.patch.dict(os.environ, env):
+            sys.modules.pop("app.screaner_b_o", None)
+            runtime = importlib.import_module("app.screaner_b_o")
+
+            async def _exercise() -> None:
+                runtime.pairs = []
+                runtime.opportunities_buffer.clear()
+                runtime.mount_failure_state = MountFailureState()
+                with mock.patch.object(runtime, "assert_storage_root_writable"):
+                    main_task = asyncio.create_task(runtime.main())
+                    # Wait until monitor_primary_storage_failure is running so
+                    # mark_dead cannot race startup before the watcher exists.
+                    await self._wait_until_main_ready(runtime)
+                    # Give the monitor one poll interval to be parked in sleep.
+                    await asyncio.sleep(0.12)
+                    runtime.mount_failure_state.mark_dead(
+                        source="test",
+                        reason="synthetic_primary_failure",
+                    )
+                    with self.assertRaises(RuntimeError) as raised:
+                        await asyncio.wait_for(main_task, timeout=2.0)
+                    self.assertIn("primary storage failure", str(raised.exception))
+
+            try:
+                asyncio.run(_exercise())
+            finally:
+                self._cleanup_runtime(runtime)
 
 
 if __name__ == "__main__":

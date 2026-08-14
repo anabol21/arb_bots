@@ -1,7 +1,7 @@
-"""Absolute storage paths for Design A direct-to-mount writes.
+"""Absolute local-primary storage paths.
 
-Defaults target the VPS + mounted storage layout. Overrides must be absolute
-paths (no cwd-relative values).
+The live writer publishes only to the VPS-local filesystem. Secondary backup
+transport is handled by a separate process and is never mounted in this path.
 """
 
 from __future__ import annotations
@@ -12,11 +12,14 @@ import time
 from pathlib import Path
 
 DEFAULT_STORAGE_MOUNT = Path("/mnt/storage")
-DEFAULT_PARQUET_ROOT = Path("/mnt/storage/spreads_parquet_by_coins")
+DEFAULT_PARQUET_ROOT = Path("/data/live")
+# Sibling of ticks: hive under <root>/bar_5m/base_coin=…/event_date=…
+DEFAULT_BARS_ROOT = Path("/data/bars")
 DEFAULT_RUNTIME_LOG = Path("/root/runtime.log")
 DEFAULT_FAILED_BATCHES_LOG = Path("/root/failed_batches.log")
 
 _ENV_PARQUET_ROOT = "SPREAD_PARQUET_ROOT"
+_ENV_BARS_ROOT = "SPREAD_BARS_ROOT"
 _ENV_RUNTIME_LOG = "SPREAD_RUNTIME_LOG"
 _ENV_FAILED_BATCHES_LOG = "SPREAD_FAILED_BATCHES_LOG"
 
@@ -97,6 +100,45 @@ def assert_storage_mount_writable(
             ) from exc
 
 
+def assert_storage_root_writable(
+    storage_root: Path,
+    *,
+    probe_write: bool = True,
+) -> None:
+    """Fail fast unless an absolute local-primary directory is writable."""
+    storage_root = _require_absolute(storage_root, "storage_root")
+    if not storage_root.exists():
+        raise StorageMountError(f"storage root is missing: {storage_root}")
+    if not storage_root.is_dir():
+        raise StorageMountError(f"storage root is not a directory: {storage_root}")
+    if not os.access(storage_root, os.W_OK | os.X_OK):
+        raise StorageMountError(f"storage root is not writable: {storage_root}")
+    if not probe_write:
+        return
+
+    probe_path = storage_root / (
+        f".spread_primary_probe_{os.getpid()}_{time.time_ns()}"
+    )
+    fd: int | None = None
+    try:
+        fd = os.open(probe_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        os.write(fd, b"spread-primary-probe\n")
+        os.fsync(fd)
+    except OSError as exc:
+        raise StorageMountError(
+            f"storage root write probe failed: {storage_root}: {exc}"
+        ) from exc
+    finally:
+        if fd is not None:
+            os.close(fd)
+        try:
+            probe_path.unlink(missing_ok=True)
+        except OSError as exc:
+            raise StorageMountError(
+                f"storage root probe cleanup failed: {probe_path}: {exc}"
+            ) from exc
+
+
 def is_mount_failure_error(exc: BaseException) -> bool:
     """Classify mount-loss I/O separately from schema/data corruption."""
     current: BaseException | None = exc
@@ -119,6 +161,23 @@ def resolve_parquet_root() -> Path:
     if raw:
         return _require_absolute(Path(raw).expanduser(), _ENV_PARQUET_ROOT)
     return DEFAULT_PARQUET_ROOT
+
+
+def resolve_bars_root() -> Path:
+    """Root for 5m bar parquet (not mixed into the tick hive).
+
+    Default ``/data/bars``. Publisher uses ``<root>/bar_5m`` as its parquet root
+    so partitions stay ``bar_5m/base_coin=…/event_date=…``.
+    """
+    raw = os.environ.get(_ENV_BARS_ROOT)
+    if raw:
+        return _require_absolute(Path(raw).expanduser(), _ENV_BARS_ROOT)
+    return DEFAULT_BARS_ROOT
+
+
+def bars_parquet_root(bars_root: Path | None = None) -> Path:
+    root = bars_root if bars_root is not None else resolve_bars_root()
+    return root / "bar_5m"
 
 
 def resolve_runtime_log_path() -> Path:
@@ -145,19 +204,11 @@ def partition_dir(parquet_root: Path, base_coin: str, event_date: str) -> Path:
 
 
 def ensure_storage_dirs(parquet_root: Path | None = None) -> Path:
-    """Create storage directories only beneath a verified mounted filesystem."""
+    """Create and verify the VPS-local live parquet and temp directories."""
     root = parquet_root if parquet_root is not None else resolve_parquet_root()
     root = _require_absolute(root, "parquet_root")
-    try:
-        root.relative_to(DEFAULT_STORAGE_MOUNT)
-    except ValueError as exc:
-        raise RuntimeError(
-            f"parquet_root must be beneath {DEFAULT_STORAGE_MOUNT}; "
-            "no fallback/staging mode is enabled"
-        ) from exc
-
-    assert_storage_mount_writable()
     staging = tmp_dir(root)
-    root.mkdir(exist_ok=True)
+    root.mkdir(parents=True, exist_ok=True)
     staging.mkdir(parents=True, exist_ok=True)
+    assert_storage_root_writable(root)
     return root

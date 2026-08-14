@@ -2,7 +2,7 @@
 
 Дизайн-заметка + статус интеграции.
 
-**Production lean path (Option B):** код в `app/screaner_b_o.py` / `app/storage/writer.py` умеет lean ticks + OKX `candle5m` bars, но только за флагами (`SPREAD_LEAN_SCHEMA`, `SPREAD_COLLECT_BARS`), default **OFF**. Пока canary пишет v1 — флаги не включать. Операционка: [`docs/local-lean-collector.md`](local-lean-collector.md).
+**Production lean path (Option B):** код в `app/screaner_b_o.py` / `app/storage/writer.py` пишет lean ticks + OKX `candle5m` bars за флагами (`SPREAD_LEAN_SCHEMA`, `SPREAD_COLLECT_BARS`), default **OFF**. Контракт заморожен в [`docs/storage-contract.md`](storage-contract.md). Для накопления — новый процесс с флагами ON (unit в `deploy/systemd/spread-collector.service`). Операционка: [`docs/local-lean-collector.md`](local-lean-collector.md), [`docs/prod-unit-snippets.md`](prod-unit-snippets.md).
 
 Канон тиков v1: [`app/schema/spread_event.py`](../app/schema/spread_event.py), [`docs/storage-contract.md`](storage-contract.md).  
 Lean body: [`app/schema/lean_event.py`](../app/schema/lean_event.py).  
@@ -181,7 +181,7 @@ bybit_bid_price, bybit_bid_size, bybit_ask_price, bybit_ask_size
 | A | Документ gap + решение по семантике `volume` / единицам L1 size | нулевой |
 | B | Model reader: dual-path — если нет `spread_*`, считать из L1 | нулевой на writer |
 | C | **Сделано в коде:** bars writer/root + `SPREAD_COLLECT_BARS` (default off); lean ticks + `SPREAD_LEAN_SCHEMA` (default off) | нулевой, пока флаги off |
-| D | После закрытия canary: включить флаги на новом запуске + version-aware validation/compaction dual-read | только по явному unlock |
+| D | **Unlocked:** включить флаги на новом запуске после soak; unit несёт lean+bars; не смешивать с v1 day partition | операционный (диск, cutover) |
 
 Чтение истории:
 

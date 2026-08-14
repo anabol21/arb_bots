@@ -1,0 +1,12 @@
+/var/log/spread/*.log
+/var/log/spread/*.out
+{
+    daily
+    rotate 7
+    size 50M
+    missingok
+    notifempty
+    compress
+    delaycompress
+    copytruncate
+}

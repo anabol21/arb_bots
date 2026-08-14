@@ -1,4 +1,4 @@
-"""Background parquet publisher for Design A (direct write to mount).
+"""Background parquet publisher for the VPS-local live dataset.
 
 Hot path only enqueues raw record batches. Normalization, partitioning, disk
 I/O, read-back validation, and atomic rename run in a dedicated worker thread.
@@ -20,9 +20,13 @@ import pandas as pd
 import pyarrow as pa
 import pyarrow.parquet as pq
 
+from app.schema.lean_event import LEAN_BAR_5M_BODY_COLS, LEAN_TICK_BODY_COLS
+from app.schema.parquet_layout import PARTITION_DATE_COL
+from app.schema.spread_event import SPREAD_EVENT_BODY_COLS, lean_schema_enabled
+
 from .mount_state import MountFailureState
 from .paths import (
-    assert_storage_mount_writable,
+    assert_storage_root_writable,
     ensure_storage_dirs,
     is_mount_failure_error,
     partition_dir,
@@ -31,6 +35,19 @@ from .paths import (
 from .spool import DurableSpool
 
 _SENTINEL = object()
+
+# Tick schemas: "v1" (canary default) | "lean". Bars: "bar_5m".
+SchemaMode = str
+
+_LEAN_TS_COLS: tuple[str, ...] = (
+    "event_local_ts_ms",
+    "calc_local_ts_ms",
+    "okx_local_recv_ts_ms",
+    "okx_ts_ms",
+    "bybit_local_recv_ts_ms",
+    "bybit_ts_ms",
+)
+_BAR_TS_COLS: tuple[str, ...] = ("bar_start_ts_ms", "bar_end_ts_ms")
 
 
 @dataclass
@@ -59,8 +76,56 @@ class NormalizedBatch:
     rejected: list[dict[str, Any]]
 
 
-def normalize_records(records: list[dict[str, Any]]) -> NormalizedBatch:
-    """Normalize raw records while preserving every rejected source record."""
+def _truthy_env(name: str) -> bool:
+    return os.environ.get(name, "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def resolve_tick_schema_mode() -> SchemaMode:
+    """Env-driven tick mode; default ``v1`` for canary continuity."""
+    return "lean" if lean_schema_enabled() else "v1"
+
+
+def collect_bars_enabled() -> bool:
+    """Bar channel collection; default OFF (independent of lean tick schema)."""
+    return _truthy_env("SPREAD_COLLECT_BARS")
+
+
+def _finalize_normalized(
+    records: list[dict[str, Any]],
+    accepted: pd.DataFrame,
+    reasons: list[list[str]],
+    body_cols: tuple[str, ...],
+) -> NormalizedBatch:
+    keep_cols = [PARTITION_DATE_COL, *body_cols]
+    if not accepted.empty:
+        accepted = accepted[[col for col in keep_cols if col in accepted.columns]]
+    else:
+        accepted = pd.DataFrame(columns=list(keep_cols))
+    rejected = [
+        {"record": records[index], "reasons": row_reasons}
+        for index, row_reasons in enumerate(reasons)
+        if row_reasons
+    ]
+    if len(accepted) + len(rejected) != len(records):
+        raise AssertionError(
+            "normalization accounting mismatch: "
+            f"raw={len(records)} accepted={len(accepted)} rejected={len(rejected)}"
+        )
+    return NormalizedBatch(accepted, rejected)
+
+
+def _cast_int64_ms(df: pd.DataFrame, cols: tuple[str, ...]) -> pd.DataFrame:
+    for col in cols:
+        if col not in df.columns:
+            continue
+        numeric = pd.to_numeric(df[col], errors="coerce")
+        # nullable Int64 avoids float display noise for model consumers
+        df[col] = numeric.round().astype("Int64")
+    return df
+
+
+def normalize_v1_records(records: list[dict[str, Any]]) -> NormalizedBatch:
+    """Full canary v1 body (spread_*, freshness, event_dt, latencies)."""
     if not records:
         return NormalizedBatch(pd.DataFrame(), [])
 
@@ -129,20 +194,21 @@ def normalize_records(records: list[dict[str, Any]]) -> NormalizedBatch:
             ["okx_latency_ms", "bybit_latency_ms"]
         ].max(axis=1)
 
-    keep_cols = [
-        "event_dt",
+    return _finalize_normalized(records, accepted, reasons, SPREAD_EVENT_BODY_COLS)
+
+
+def normalize_lean_tick_records(records: list[dict[str, Any]]) -> NormalizedBatch:
+    """Lean 16-column tick body; derive event_date from ms stamps (no event_dt)."""
+    if not records:
+        return NormalizedBatch(pd.DataFrame(), [])
+
+    df = pd.DataFrame(records)
+    if df.empty:
+        return NormalizedBatch(pd.DataFrame(), [])
+
+    reasons: list[list[str]] = [[] for _ in records]
+    num_cols = [
         "event_local_ts_ms",
-        "event_date",
-        "base_coin",
-        "trigger",
-        "spread_long",
-        "spread_short",
-        "okx_latency_ms",
-        "bybit_latency_ms",
-        "okx_freshness_ms",
-        "bybit_freshness_ms",
-        "max_freshness_ms",
-        "max_latency_ms",
         "calc_local_ts_ms",
         "okx_local_recv_ts_ms",
         "okx_ts_ms",
@@ -157,18 +223,125 @@ def normalize_records(records: list[dict[str, Any]]) -> NormalizedBatch:
         "bybit_ask_price",
         "bybit_ask_size",
     ]
-    accepted = accepted[[col for col in keep_cols if col in accepted.columns]]
-    rejected = [
-        {"record": records[index], "reasons": row_reasons}
-        for index, row_reasons in enumerate(reasons)
-        if row_reasons
-    ]
-    if len(accepted) + len(rejected) != len(records):
-        raise AssertionError(
-            "normalization accounting mismatch: "
-            f"raw={len(records)} accepted={len(accepted)} rejected={len(rejected)}"
-        )
-    return NormalizedBatch(accepted, rejected)
+    for col in num_cols:
+        if col not in df.columns:
+            df[col] = None
+        df[col] = pd.to_numeric(df[col], errors="coerce")
+
+    if "base_coin" not in df.columns:
+        df["base_coin"] = None
+    valid_base_coin = df["base_coin"].notna() & df["base_coin"].astype(str).str.strip().ne("")
+    for index in df.index[~valid_base_coin]:
+        reasons[int(index)].append("invalid_base_coin")
+    df["base_coin"] = df["base_coin"].astype(str).str.strip()
+
+    if "trigger" not in df.columns:
+        df["trigger"] = None
+    df["trigger"] = df["trigger"].astype(str)
+
+    # Prefer caller event_local_ts_ms; fall back to trigger recv like v1.
+    if "event_local_ts_ms" not in df.columns or df["event_local_ts_ms"].isna().all():
+        df["event_local_ts_ms"] = df["okx_local_recv_ts_ms"]
+        mask_bybit = df["trigger"].eq("bybit")
+        df.loc[mask_bybit, "event_local_ts_ms"] = df.loc[
+            mask_bybit, "bybit_local_recv_ts_ms"
+        ]
+    else:
+        missing = df["event_local_ts_ms"].isna()
+        df.loc[missing, "event_local_ts_ms"] = df.loc[missing, "okx_local_recv_ts_ms"]
+        mask_bybit = missing & df["trigger"].eq("bybit")
+        df.loc[mask_bybit, "event_local_ts_ms"] = df.loc[
+            mask_bybit, "bybit_local_recv_ts_ms"
+        ]
+
+    event_dt = pd.to_datetime(df["event_local_ts_ms"], unit="ms", errors="coerce")
+    valid_ts = event_dt.notna()
+    for index in df.index[~valid_ts]:
+        reasons[int(index)].append("invalid_event_local_ts_ms")
+
+    accepted_mask = valid_base_coin & valid_ts
+    accepted = df.loc[accepted_mask].copy()
+    if not accepted.empty:
+        accepted["event_date"] = event_dt.loc[accepted_mask].dt.strftime("%Y-%m-%d")
+        accepted = _cast_int64_ms(accepted, _LEAN_TS_COLS)
+
+    return _finalize_normalized(records, accepted, reasons, LEAN_TICK_BODY_COLS)
+
+
+def normalize_bar_records(records: list[dict[str, Any]]) -> NormalizedBatch:
+    """Closed 5m bar volume rows (LEAN_BAR_5M_BODY_COLS)."""
+    if not records:
+        return NormalizedBatch(pd.DataFrame(), [])
+
+    df = pd.DataFrame(records)
+    if df.empty:
+        return NormalizedBatch(pd.DataFrame(), [])
+
+    reasons: list[list[str]] = [[] for _ in records]
+    for col in ("bar_start_ts_ms", "bar_end_ts_ms", "volume"):
+        if col not in df.columns:
+            df[col] = None
+        df[col] = pd.to_numeric(df[col], errors="coerce")
+
+    if "base_coin" not in df.columns:
+        df["base_coin"] = None
+    valid_base_coin = df["base_coin"].notna() & df["base_coin"].astype(str).str.strip().ne("")
+    for index in df.index[~valid_base_coin]:
+        reasons[int(index)].append("invalid_base_coin")
+    df["base_coin"] = df["base_coin"].astype(str).str.strip()
+
+    if "ref_exchange" not in df.columns:
+        df["ref_exchange"] = None
+    valid_ref = df["ref_exchange"].notna() & df["ref_exchange"].astype(str).str.strip().ne("")
+    for index in df.index[~valid_ref]:
+        reasons[int(index)].append("invalid_ref_exchange")
+    df["ref_exchange"] = df["ref_exchange"].astype(str).str.strip()
+
+    valid_start = df["bar_start_ts_ms"].notna()
+    for index in df.index[~valid_start]:
+        reasons[int(index)].append("invalid_bar_start_ts_ms")
+    valid_volume = df["volume"].notna()
+    for index in df.index[~valid_volume]:
+        reasons[int(index)].append("invalid_volume")
+
+    accepted_mask = valid_base_coin & valid_ref & valid_start & valid_volume
+    accepted = df.loc[accepted_mask].copy()
+    if not accepted.empty:
+        starts = pd.to_datetime(accepted["bar_start_ts_ms"], unit="ms", errors="coerce")
+        accepted["event_date"] = starts.dt.strftime("%Y-%m-%d")
+        accepted = _cast_int64_ms(accepted, _BAR_TS_COLS)
+
+    return _finalize_normalized(records, accepted, reasons, LEAN_BAR_5M_BODY_COLS)
+
+
+def normalize_records(
+    records: list[dict[str, Any]],
+    *,
+    schema_mode: SchemaMode | None = None,
+) -> NormalizedBatch:
+    """Normalize raw records while preserving every rejected source record.
+
+    ``schema_mode``:
+    - ``None`` / omitted: env-driven tick mode (``v1`` default, ``lean`` if flagged)
+    - ``v1`` / ``lean``: tick bodies
+    - ``bar_5m``: closed candle volume rows
+    """
+    mode = resolve_tick_schema_mode() if schema_mode is None else schema_mode
+    if mode == "bar_5m":
+        return normalize_bar_records(records)
+    if mode == "lean":
+        return normalize_lean_tick_records(records)
+    if mode == "v1":
+        return normalize_v1_records(records)
+    raise ValueError(f"unsupported schema_mode: {mode!r}")
+
+
+def _sort_column_for_mode(schema_mode: SchemaMode) -> str:
+    if schema_mode == "bar_5m":
+        return "bar_start_ts_ms"
+    if schema_mode == "lean":
+        return "event_local_ts_ms"
+    return "event_dt"
 
 
 class ParquetPublisher:
@@ -184,11 +357,15 @@ class ParquetPublisher:
         *,
         max_queue: int = 4,
         shutdown_timeout_sec: float = 120.0,
+        schema_mode: SchemaMode | None = None,
+        name: str = "parquet-publisher",
     ) -> None:
         if not parquet_root.is_absolute():
             raise ValueError(f"parquet_root must be absolute, got: {parquet_root}")
         if max_queue < 1:
             raise ValueError("max_queue must be >= 1")
+        if schema_mode is not None and schema_mode not in {"v1", "lean", "bar_5m"}:
+            raise ValueError(f"unsupported schema_mode: {schema_mode!r}")
 
         self.parquet_root = parquet_root
         self.logger = logger
@@ -196,6 +373,9 @@ class ParquetPublisher:
         self.mount_failure_state = mount_failure_state
         self.spool = spool
         self.shutdown_timeout_sec = shutdown_timeout_sec
+        # None => resolve tick mode from env at each normalize (Option B).
+        self.schema_mode = schema_mode
+        self.name = name
 
         self._queue: queue.Queue[Any] = queue.Queue(maxsize=max_queue)
         self._metrics = PublisherMetrics()
@@ -208,6 +388,11 @@ class ParquetPublisher:
         self._retained_failed_jobs: list[dict[str, Any]] = []
         self._backpressure_active = False
 
+    def effective_schema_mode(self) -> SchemaMode:
+        if self.schema_mode is not None:
+            return self.schema_mode
+        return resolve_tick_schema_mode()
+
     def start(self) -> None:
         if self._started:
             return
@@ -217,14 +402,16 @@ class ParquetPublisher:
             self._metrics.orphan_tmp_cleaned = cleaned
         self._thread = threading.Thread(
             target=self._worker_loop,
-            name="parquet-publisher",
+            name=self.name,
             daemon=True,
         )
         self._thread.start()
         self._started = True
         self.logger.info(
-            "publisher_started | root=%s | tmp=%s | max_queue=%s | "
-            "orphan_tmp_cleaned=%s",
+            "publisher_started | name=%s | schema_mode=%s | root=%s | tmp=%s | "
+            "max_queue=%s | orphan_tmp_cleaned=%s",
+            self.name,
+            self.effective_schema_mode(),
             self.parquet_root,
             tmp_dir(self.parquet_root),
             self._queue.maxsize,
@@ -514,8 +701,9 @@ class ParquetPublisher:
     ) -> str:
         records = job["records"]
         raw_count = len(records)
+        mode = self.effective_schema_mode()
         try:
-            normalized = normalize_records(records)
+            normalized = normalize_records(records, schema_mode=mode)
         except Exception as exc:
             self._record_failure(f"normalization_error:{type(exc).__name__}")
             return self._quarantine_records(
@@ -552,11 +740,17 @@ class ParquetPublisher:
             )
             return "durably_quarantined"
 
+        sort_col = _sort_column_for_mode(mode)
+        if sort_col not in df.columns:
+            raise AssertionError(
+                f"normalized batch missing sort column {sort_col!r} for mode={mode}"
+            )
+
         outcome = "published"
         for (base_coin, event_date), sub in df.groupby(
             ["base_coin", "event_date"], sort=False
         ):
-            sub = sub.sort_values("event_dt").reset_index(drop=True)
+            sub = sub.sort_values(sort_col).reset_index(drop=True)
             batch_id = self._next_batch_id()
             if force_spool or self.mount_failure_state.is_dead():
                 partition_outcome = self._spool_partition(
@@ -742,7 +936,7 @@ class ParquetPublisher:
         )
 
         try:
-            assert_storage_mount_writable(probe_write=False)
+            assert_storage_root_writable(self.parquet_root, probe_write=False)
             part_dir = final_path.parent
             part_dir.mkdir(parents=True, exist_ok=True)
             if final_path.exists():
@@ -787,16 +981,19 @@ class ParquetPublisher:
         except Exception as exc:
             reason = f"publish_error:{type(exc).__name__}"
             self._record_failure(reason)
-            mount_failure = is_mount_failure_error(exc)
-            if not mount_failure:
+            storage_failure = is_mount_failure_error(exc)
+            if not storage_failure:
                 try:
-                    assert_storage_mount_writable(probe_write=False)
+                    assert_storage_root_writable(
+                        self.parquet_root,
+                        probe_write=False,
+                    )
                 except Exception:
-                    mount_failure = True
+                    storage_failure = True
 
-            if mount_failure:
+            if storage_failure:
                 self.logger.critical(
-                    "mount_lost | source=writer | batch_id=%s | job_id=%s | "
+                    "primary_storage_lost | source=writer | batch_id=%s | job_id=%s | "
                     "error=%r | tmp_cleanup=skipped",
                     batch_id,
                     job_id,
@@ -813,7 +1010,7 @@ class ParquetPublisher:
                     base_coin=base_coin,
                     event_date=event_date,
                     sub=sub,
-                    reason=f"mount_publish_error:{type(exc).__name__}",
+                    reason=f"primary_publish_error:{type(exc).__name__}",
                 )
 
             self.logger.error(

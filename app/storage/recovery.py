@@ -1,4 +1,4 @@
-"""Periodic recovery of durable local spool files to mounted storage."""
+"""Periodic recovery of durable spool files to VPS-local primary storage."""
 
 from __future__ import annotations
 
@@ -13,7 +13,7 @@ import pyarrow.parquet as pq
 
 from .mount_state import MountFailureState
 from .paths import (
-    assert_storage_mount_writable,
+    assert_storage_root_writable,
     is_mount_failure_error,
     partition_dir,
     tmp_dir,
@@ -90,7 +90,7 @@ class SpoolRecoveryWorker:
             return
 
         try:
-            assert_storage_mount_writable()
+            assert_storage_root_writable(self.parquet_root)
         except Exception as exc:
             self.spool.mark_recovery_failed()
             self.mount_failure_state.mark_dead(
@@ -98,7 +98,7 @@ class SpoolRecoveryWorker:
                 reason=repr(exc),
             )
             self.logger.critical(
-                "mount_lost | source=recovery | error=%r",
+                "primary_storage_lost | source=recovery | error=%r",
                 exc,
             )
             return
@@ -150,7 +150,7 @@ class SpoolRecoveryWorker:
             )
             return final_path, batch_id
 
-        assert_storage_mount_writable(probe_write=False)
+        assert_storage_root_writable(self.parquet_root, probe_write=False)
         final_path.parent.mkdir(parents=True, exist_ok=True)
         recovery_tmp = (
             tmp_dir(self.parquet_root)

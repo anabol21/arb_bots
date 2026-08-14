@@ -1,0 +1,17 @@
+[Unit]
+Description=Spread bars v2 one-hour compacted layout (one output)
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=root
+WorkingDirectory=/root/spread_staging
+ExecStartPre=/usr/bin/mkdir -p /var/log/spread /data/bars_compacted_v2/bar_5m /data/bars_compacted_v2/archive/bar_5m
+ExecStart=/root/venv/bin/python -m app.storage.bars_compactor --source-root /data/bars/bar_5m --output-root /data/bars_compacted_v2/bar_5m --archive-root /data/bars_compacted_v2/archive/bar_5m --grace-seconds 600 --retention-hours 168 --lookback-days 1 --lock-path /run/spread-bars-compactor-v2.lock
+StandardOutput=append:/var/log/spread/bars-compactor.log
+StandardError=append:/var/log/spread/bars-compactor.log
+MemoryMax=1200M
+OOMPolicy=stop
+Nice=10
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7

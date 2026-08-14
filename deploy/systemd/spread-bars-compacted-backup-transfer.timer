@@ -1,0 +1,11 @@
+[Unit]
+Description=Transfer compacted spread bars every minute
+
+[Timer]
+OnCalendar=*-*-* *:*:00
+AccuracySec=5s
+Persistent=true
+Unit=spread-bars-compacted-backup-transfer.service
+
+[Install]
+WantedBy=timers.target

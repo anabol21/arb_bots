@@ -1,6 +1,7 @@
 # Запрос данных для трека модели (гир 1–3)
 
-Документ — **запрос со стороны модели**: какие поля могут понадобиться симулятору, скринеру режима и (позже) поиску параметров. Это **не** проект реализации сборщика. Лестница гиров: [`docs/strategy-gears.md`](strategy-gears.md).
+Документ — **запрос со стороны модели**: какие поля могут понадобиться симулятору, скринеру режима и (позже) поиску параметров. Это **не** проект реализации сборщика. Лестница гиров: [`docs/strategy-gears.md`](strategy-gears.md).  
+Где лежат файлы и какой формат сейчас на backup/VPS: [`docs/model-data-sources.md`](model-data-sources.md).
 
 Канон имён по возможности совпадает с уже собираемыми тиками и [`docs/storage-contract.md`](storage-contract.md). Список колонок тика в коде: [`app/schema/spread_event.py`](../app/schema/spread_event.py).
 
@@ -76,10 +77,23 @@
 ### Ожидаемый путь (логическое размещение)
 
 ```text
-<BARS_ROOT>/bar_5m/base_coin=<COIN>/event_date=<YYYY-MM-DD>/….parquet
+# collector source (не model durable root)
+/data/bars/bar_5m/base_coin=<COIN>/event_date=<YYYY-MM-DD>/batch_*.parquet
+
+# durable model root: isolated compacted v2, immutable one-hour files
+/data/bars_compacted_v2/bar_5m/base_coin=<COIN>/event_date=<YYYY-MM-DD>/
+  bar_5m_<window-start>_<window-end>_inputset=<16-hex>.parquet
 ```
 
 Не смешивать с тиковыми batch’ами.
+
+Для model smoke reader должен принимать **один** явно выбранный root; production
+handoff — `/data/bars_compacted_v2/bar_5m` (и backup
+`backup1tb:spread-bars-compacted-v2`). Нельзя union source и compacted roots:
+это создаёт дубли одного `bar_start_ts_ms`. Body, hive keys и семантика
+`volume` не меняются; проверка reader требует ровно пять колонок bar layer.
+Legacy v1 `/data/bars_compacted` и его remote prefix read-only и не являются
+model input: migration/deletion этих артефактов отсутствует в v2 rollout.
 
 ### Минимальный набор полей бара
 
@@ -101,6 +115,7 @@
 - амплитуда / OHLC mid из тиков за 5m или любой lookback;
 - `volume / median(volume)`, перцентили `volume` за часы–дни;
 - флаги / ранг аномального режима (**гир 1.5**); гейт входа для гира 2.
+  Канон метрик: [`docs/regime-metrics-v0.md`](regime-metrics-v0.md).
 
 ---
 

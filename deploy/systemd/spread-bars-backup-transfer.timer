@@ -1,0 +1,13 @@
+[Unit]
+Description=Run spread bars backup transfer every 20 minutes (offset from ticks)
+
+[Timer]
+# Offset from tick backup (~70s after tick timer's 190s boot offset family).
+OnBootSec=260s
+OnUnitActiveSec=20min
+AccuracySec=30s
+Persistent=true
+Unit=spread-bars-backup-transfer.service
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,36 @@
+[Unit]
+Description=Spread collector (staging/prod paths)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/root/spread_staging
+Environment=SPREAD_PARQUET_ROOT=/data/live
+Environment=SPREAD_BARS_ROOT=/data/bars
+Environment=SPREAD_RUNTIME_LOG=/var/log/spread/runtime.log
+Environment=SPREAD_FAILED_BATCHES_LOG=/var/log/spread/failed_batches.log
+Environment=SPREAD_SPOOL_ROOT=/data/spool
+Environment=SPREAD_LEAN_SCHEMA=1
+Environment=SPREAD_COLLECT_BARS=1
+Environment=BACKUP_RCLONE_BINARY=/opt/rclone-1.74.4/rclone
+Environment=BACKUP_RCLONE_REMOTE=backup1tb
+Environment=BACKUP_RCLONE_PATH=spread-compacted
+Environment=BACKUP_SFTP_KEY_PATH=/root/.ssh/id_ed25519_uploader
+Environment=BACKUP_RCLONE_SFTP_CONCURRENCY=8
+Environment=BACKUP_RCLONE_SFTP_CHUNK_SIZE=128k
+ExecStartPre=/usr/bin/mkdir -p /data/live /data/bars /data/spool /data/compacted /var/log/spread
+ExecStart=/root/venv/bin/python app/screaner_b_o.py
+LimitNOFILE=65535
+Restart=always
+RestartSec=5
+StartLimitIntervalSec=300
+StartLimitBurst=20
+KillSignal=SIGTERM
+TimeoutStopSec=120
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

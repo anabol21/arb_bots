@@ -1,0 +1,35 @@
+[Unit]
+Description=Spread bars hive backup transfer (one-shot)
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=root
+WorkingDirectory=/root/spread_staging
+Environment=BACKUP_COMPACTED_DIR=/data/bars
+Environment=BACKUP_LAYOUT=hive
+Environment=BACKUP_RCLONE_BINARY=/opt/rclone-1.74.4/rclone
+Environment=BACKUP_RCLONE_REMOTE=backup1tb
+Environment=BACKUP_RCLONE_PATH=spread-bars
+Environment=BACKUP_SFTP_KEY_PATH=/root/.ssh/id_ed25519_uploader
+Environment=BACKUP_RCLONE_SFTP_CONCURRENCY=8
+Environment=BACKUP_RCLONE_SFTP_CHUNK_SIZE=128k
+Environment=BACKUP_TRANSFER_LOCK_PATH=/run/spread-bars-backup.lock
+# The bars-only lock prevents overlapping timer/service invocations. Bars does
+# not acquire the compactor's shared heavy-storage lock on this 16 GiB VPS.
+Environment=BACKUP_HIVE_BATCH_SIZE=32
+Environment=BACKUP_SENT_RETENTION_HOURS=12
+# Hive bars are tiny; skip SHA download_verify under threshold (size match still required).
+Environment=BACKUP_SKIP_SHA_VERIFY_BELOW_BYTES=1048576
+Environment=BACKUP_MAX_FILES=500
+MemoryMax=1500M
+OOMPolicy=stop
+ExecStartPre=/usr/bin/mkdir -p /var/log/spread /data/bars
+# A 32-file persistent rclone micro-batch runs concurrently with compaction.
+# Each file keeps its own temporary→final→verified lifecycle.
+ExecStart=/root/venv/bin/python -m app.storage.backup_transfer --compacted-dir /data/bars --layout hive --remote-path spread-bars --sent-retention-hours 12 --max-files 500 --hive-batch-size 32 --skip-sha-verify-below-bytes 1048576
+StandardOutput=append:/var/log/spread/bars-backup-transfer.log
+StandardError=append:/var/log/spread/bars-backup-transfer.log
+Nice=10
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7

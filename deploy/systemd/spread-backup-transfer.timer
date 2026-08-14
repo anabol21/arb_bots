@@ -1,0 +1,13 @@
+[Unit]
+Description=Run spread backup transfer every 5 minutes (offset)
+
+[Timer]
+# Offset from compactor: first fire ~70s after boot relative to OnBootSec=2min+70s
+OnBootSec=190s
+OnUnitActiveSec=5min
+AccuracySec=30s
+Persistent=true
+Unit=spread-backup-transfer.service
+
+[Install]
+WantedBy=timers.target

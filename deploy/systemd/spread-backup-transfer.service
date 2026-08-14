@@ -1,0 +1,26 @@
+[Unit]
+Description=Spread compacted backup transfer (one-shot)
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=root
+WorkingDirectory=/root/spread_staging
+Environment=BACKUP_COMPACTED_DIR=/data/compacted
+Environment=BACKUP_RCLONE_BINARY=/opt/rclone-1.74.4/rclone
+Environment=BACKUP_RCLONE_REMOTE=backup1tb
+Environment=BACKUP_RCLONE_PATH=spread-compacted
+Environment=BACKUP_SFTP_KEY_PATH=/root/.ssh/id_ed25519_uploader
+Environment=BACKUP_RCLONE_SFTP_CONCURRENCY=8
+Environment=BACKUP_RCLONE_SFTP_CHUNK_SIZE=128k
+Environment=BACKUP_TRANSFER_LOCK_PATH=/run/spread-backup.lock
+Environment=BACKUP_SENT_RETENTION_HOURS=12
+ExecStartPre=/usr/bin/mkdir -p /var/log/spread
+ExecStart=/root/venv/bin/python -m app.storage.backup_transfer \
+  --compacted-dir /data/compacted \
+  --sent-retention-hours 12
+StandardOutput=append:/var/log/spread/backup-transfer.log
+StandardError=append:/var/log/spread/backup-transfer.log
+Nice=10
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7

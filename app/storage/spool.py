@@ -21,10 +21,19 @@ DEFAULT_SPOOL_ROOT = Path("/root/spool")
 DEFAULT_SPOOL_MAX_BYTES = 20 * 1024 * 1024 * 1024
 DEFAULT_SPOOL_MAX_FILES = 100_000
 DEFAULT_SPOOL_TTL_HOURS = 6.0
+_ENV_SPOOL_ROOT = "SPREAD_SPOOL_ROOT"
 
 
 class SpoolQuotaExceeded(RuntimeError):
     """Writing another durable spool file would exceed configured limits."""
+
+
+def resolve_spool_root() -> Path:
+    raw = os.environ.get(_ENV_SPOOL_ROOT)
+    root = DEFAULT_SPOOL_ROOT if raw is None else Path(raw).expanduser()
+    if not root.is_absolute():
+        raise ValueError(f"{_ENV_SPOOL_ROOT} must be absolute, got: {root}")
+    return root
 
 
 def _positive_env_int(name: str, default: int) -> int:
@@ -51,8 +60,9 @@ class DurableSpool:
         logger: logging.Logger,
         mount_failure_state: MountFailureState,
         *,
-        root: Path = DEFAULT_SPOOL_ROOT,
+        root: Path | None = None,
     ) -> None:
+        root = resolve_spool_root() if root is None else root
         if not root.is_absolute():
             raise ValueError(f"spool root must be absolute, got: {root}")
         self.root = root

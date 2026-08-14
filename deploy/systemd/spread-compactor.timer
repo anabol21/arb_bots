@@ -1,0 +1,15 @@
+[Unit]
+Description=Run spread compactor every 2 minutes for bounded catch-up
+
+[Timer]
+OnBootSec=2min
+# One bounded window per process avoids cross-window Arrow RSS accumulation.
+# A 2-minute cadence provides catch-up capacity while a normal window takes
+# 16–44 seconds on the 16 GiB VPS; the service locks still serialize bars.
+OnUnitActiveSec=2min
+AccuracySec=15s
+Persistent=true
+Unit=spread-compactor.service
+
+[Install]
+WantedBy=timers.target

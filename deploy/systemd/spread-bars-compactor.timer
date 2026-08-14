@@ -1,0 +1,11 @@
+[Unit]
+Description=Run one compacted bars output every 10 seconds
+
+[Timer]
+OnCalendar=*-*-* *:*:0/10
+AccuracySec=1s
+Persistent=true
+Unit=spread-bars-compactor.service
+
+[Install]
+WantedBy=timers.target

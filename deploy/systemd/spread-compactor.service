@@ -1,0 +1,26 @@
+[Unit]
+Description=Spread parquet compactor (one-shot)
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=root
+WorkingDirectory=/root/spread_staging
+Environment=SPREAD_PARQUET_ROOT=/data/live
+Environment=SPREAD_RUNTIME_LOG=/var/log/spread/runtime.log
+Environment=SPREAD_FAILED_BATCHES_LOG=/var/log/spread/failed_batches.log
+Environment=SPREAD_SPOOL_ROOT=/data/spool
+# Cap RSS; thick 1k-file windows still need headroom above Arrow write buffers.
+MemoryMax=2500M
+OOMPolicy=stop
+# Prefer system allocator so freed Arrow slabs return to the OS faster than jemalloc.
+Environment=ARROW_DEFAULT_MEMORY_POOL=system
+ExecStartPre=/usr/bin/mkdir -p /var/log/spread
+# Tick compaction has priority: wait briefly for bars, never terminate it.
+# The nested service lock still prevents overlapping compactor invocations.
+ExecStart=/bin/sh -c 'rc=0; /usr/bin/flock -w 90 -E 75 /run/spread-heavy-storage.lock /usr/bin/flock -n /run/spread-compactor.lock /root/venv/bin/python -m app.storage.compactor --live /data/live --compacted /data/compacted --interval 300 --retention-hours 12 --max-windows 1 || rc=$?; if [ "$rc" -eq 75 ]; then printf "%s\n" "{\"event\":\"compactor_skipped_heavy_storage_busy\",\"lock_path\":\"/run/spread-heavy-storage.lock\",\"wait_seconds\":90}"; exit 0; fi; exit "$rc"'
+StandardOutput=append:/var/log/spread/compactor.log
+StandardError=append:/var/log/spread/compactor.log
+Nice=10
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7

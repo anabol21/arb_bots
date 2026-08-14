@@ -1,0 +1,29 @@
+[Unit]
+Description=Spread v2 compacted bars backup transfer (one-shot)
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=root
+WorkingDirectory=/root/spread_staging
+Environment=BACKUP_COMPACTED_DIR=/data/bars_compacted_v2/bar_5m
+Environment=BACKUP_LAYOUT=hive
+Environment=BACKUP_RCLONE_BINARY=/opt/rclone-1.74.4/rclone
+Environment=BACKUP_RCLONE_REMOTE=backup1tb
+Environment=BACKUP_RCLONE_PATH=spread-bars-compacted-v2
+Environment=BACKUP_SFTP_KEY_PATH=/root/.ssh/id_ed25519_uploader
+Environment=BACKUP_RCLONE_SFTP_CONCURRENCY=8
+Environment=BACKUP_RCLONE_SFTP_CHUNK_SIZE=128k
+Environment=BACKUP_TRANSFER_LOCK_PATH=/run/spread-bars-compacted-v2-backup.lock
+Environment=BACKUP_HIVE_BATCH_SIZE=8
+Environment=BACKUP_SENT_RETENTION_HOURS=168
+Environment=BACKUP_MAX_FILES=8
+ExecStartPre=/usr/bin/mkdir -p /var/log/spread /data/bars_compacted_v2/bar_5m
+ExecStart=/root/venv/bin/python -m app.storage.backup_transfer --compacted-dir /data/bars_compacted_v2/bar_5m --layout hive --remote-path spread-bars-compacted-v2 --sent-retention-hours 168 --max-files 8 --hive-batch-size 8
+StandardOutput=append:/var/log/spread/bars-compacted-backup-transfer.log
+StandardError=append:/var/log/spread/bars-compacted-backup-transfer.log
+MemoryMax=1200M
+OOMPolicy=stop
+Nice=10
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7

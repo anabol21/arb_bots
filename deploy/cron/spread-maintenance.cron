@@ -1,0 +1,25 @@
+# Spread maintenance (alternative to systemd timers).
+# Install: sudo cp deploy/cron/spread-maintenance.cron /etc/cron.d/spread-maintenance
+# Absolute env paths match production packaging plan.
+
+SHELL=/bin/bash
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+
+# Compactor every 5 minutes under flock.
+*/5 * * * * root cd /root/spread_staging && /usr/bin/flock -n /run/spread-compactor.lock /root/venv/bin/python -m app.storage.compactor --live /data/live --compacted /data/compacted --interval 300 --retention-hours 24 >> /var/log/spread/compactor.log 2>&1
+
+# Backup transfer every 5 minutes, offset by 2 minutes; uses internal /run/spread-backup.lock.
+2-59/5 * * * * root cd /root/spread_staging && \
+  BACKUP_COMPACTED_DIR=/data/compacted \
+  BACKUP_RCLONE_BINARY=/opt/rclone-1.74.4/rclone \
+  BACKUP_RCLONE_REMOTE=backup1tb \
+  BACKUP_RCLONE_PATH=spread-compacted \
+  BACKUP_SFTP_KEY_PATH=/root/.ssh/id_ed25519_uploader \
+  BACKUP_RCLONE_SFTP_CONCURRENCY=8 \
+  BACKUP_RCLONE_SFTP_CHUNK_SIZE=128k \
+  BACKUP_TRANSFER_LOCK_PATH=/run/spread-backup.lock \
+  /root/venv/bin/python -m app.storage.backup_transfer --compacted-dir /data/compacted --sent-retention-hours 12 \
+  >> /var/log/spread/backup-transfer.log 2>&1
+
+# Disk/backlog/compactor alerts every 5 minutes.
+*/5 * * * * root /root/venv/bin/python /root/spread_staging/validation/ops_alerts.py --once >> /var/log/spread/ops-alerts.log 2>&1
