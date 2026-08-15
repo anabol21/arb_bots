@@ -1,6 +1,6 @@
-# Метрики режима v0 (гир 1.5)
+# Метрики режима v0 (гир 1.5, **закрыт**)
 
-Дизайн признаков **аномального режима** по барам объёма `5m` и амплитуде mid из L1. Пороги **экспертные**, без подбора под PnL (поиск — гир 3). Лестница: [`strategy-gears.md`](strategy-gears.md). Источники данных: [`model-data-sources.md`](model-data-sources.md).
+Дизайн признаков **более волатильного кластера** по барам объёма `5m` и амплитуде mid из L1. Гир 1.5 **закрыт** как скринер Top‑N / кластера, не как булев гейт `regime_on`. Пороги **экспертные**, без подбора под PnL (поиск — гир 3). Лестница: [`strategy-gears.md`](strategy-gears.md). Источники данных: [`model-data-sources.md`](model-data-sources.md).
 
 Код формул: [`research/regime_metrics.py`](../research/regime_metrics.py).  
 Композитный score / скринер: [`research/regime_composite.py`](../research/regime_composite.py) (`z_rank`) и [`research/regime_ma_ratio.py`](../research/regime_ma_ratio.py) (`ma_ratio`); CLI [`research/rank_volatile_coins.py`](../research/rank_volatile_coins.py).  
@@ -13,9 +13,10 @@
 | | |
 |--|--|
 | Вход | ряд `volume` по монете (`bar_5m`); опционально mid из тиков L1 в тех же окнах `5m` |
-| Выход | `regime_on` (bool) и вспомогательные колонки (`z_vol`, `z_vol_smooth`, …) |
-| Использование | гейт входа для модели гира 1.0 / мультимонеты гира 2 |
-| Не входит | размер позиции от z (гир 2.5); оптимизация `Z`/`W` под метрику сделки (гир 3) |
+| Выход (канон 1.5) | числовой score и Top‑N / кластер более волатильных монет на срезе `t` |
+| Выход (опция позже) | `regime_on` (bool) и вспомогательные колонки (`z_vol`, `z_vol_smooth`, …) — **не** критерий закрытия гира 1.5 |
+| Использование | пометить более волатильные монеты, чтобы искать возможности позиции в этом кластере (гир 2) |
+| Не входит | жёсткий булев гейт как долг 1.5; размер позиции от z (гир 2.5); оптимизация `Z`/`W` под метрику сделки (гир 3); попарно «выше score ⇒ строго волатильнее»; живая торговля |
 
 ---
 
@@ -65,7 +66,9 @@ amp_5m = (mid_high − mid_low) / mid_open   # за то же окно bar_start
 z_amp — тот же rolling z-score с окном W
 ```
 
-### Политика `regime_on` в v0
+### Политика `regime_on` в v0 (опция, не закрытие 1.5)
+
+Булев флаг ниже — справочная политика v0 и возможный вход гира 2. **Канон закрытого гира 1.5** — score / Top‑N / кластер, не обязательный `regime_on`.
 
 **Базовый (volume-only):** гистерезис по `z_vol_smooth` (+ опционально persistence).
 
@@ -108,13 +111,13 @@ z_amp — тот же rolling z-score с окном W
 
 ## Типы логики (как метрика вмешивается в торговлю)
 
-1. **Жёсткий гейт входа** (канон 1.5→2): `allow_open = regime_on`; модель 1.0 без изменений.
-2. **Гистерезис / min duration** — режет пилу на пороге.
-3. **Ранг / топ-K слотов** (гир 2) — score для очереди капитала.
+1. **Ранг / Top‑N / кластер** (канон закрытого гира 1.5): score помечает более волатильные монеты; гир 2 ищет возможности в этом кластере.
+2. **Жёсткий гейт входа** (опция позже, не критерий 1.5): `allow_open = regime_on`; модель 1.0 без изменений.
+3. **Гистерезис / min duration** — режет пилу на пороге, если булев флаг всё же используют.
 4. **Двухключевой замок** — режим ∧ уже расширенный спред.
 5. **Раздельные роли** — volume / amp / spread confirm не смешивать в один порог без явной политики.
 
-Отложить: размер от z (2.5); подбор Z/W под PnL (3); «вход только на нарастании z» — итерация после простого гейта.
+Отложить: булев `regime_on` как обязательный гейт; размер от z (2.5); подбор Z/W под PnL (3); «вход только на нарастании z».
 
 ---
 
@@ -298,5 +301,5 @@ composite = √(r_vol · r_atr)   # default variant = geom
 - **v0 + hist** — offline дампы `output/okx_bar5m_hist_regime` и `output/bybit_bar5m_hist_regime` (OHLC + volume) для калибровки на 336 монетах и сравнения бирж; окно по умолчанию `[2026-07-08, 2026-08-08)`.
 - **v0 + composite** — default: cross-sectional mean rank of `z_vol` + `z_amp` (равные веса, то же `W`); `delta_vol` / own-history pct — диагностики; CLI топ‑K (`--include-delta-vol` = legacy 3-way).
 - **v0 + composite heatmap** — панель `composite(coin,t)`, plotly heatmap и график OHLC вокруг перехода в top‑1: [`research/regime_composite_heatmap.ipynb`](../research/regime_composite_heatmap.ipynb).
-- **v0 + ma_ratio** — канонический screener гира 1.5: causal `(α·EMA+(1−α)·MA)/MA_long` (α≈0.75, `numerator=blend`) по volume и ATR/TR; варианты composite `geom|mean|min|log_mean|vol_only|atr_only`; heatmap / Top‑N по raw composite; CLI `--score-mode ma_ratio --numerator blend --blend-alpha 0.75`. Ablation: `--numerator ema|ma`.
+- **v0 + ma_ratio** — канон **закрытого** гира 1.5 (скринер кластера, не `regime_on`): causal `(α·EMA+(1−α)·MA)/MA_long` (α≈0.75, `numerator=blend`) по volume и ATR/TR; варианты composite `geom|mean|min|log_mean|vol_only|atr_only`; heatmap / Top‑N по raw composite; CLI `--score-mode ma_ratio --numerator blend --blend-alpha 0.75`. Ablation: `--numerator ema|ma`. `regime_on` остаётся опцией позже.
 - Валидация глазом: [`research/regime_anomaly_validation.ipynb`](../research/regime_anomaly_validation.ipynb) — **scrollable** TradingView Lightweight Charts (`lightweight-charts` / `JupyterChart`): pan/zoom, volume, `z_vol_smooth`, заливка `regime_on` (OKX/Bybit). Ядро — `venv` репозитория.

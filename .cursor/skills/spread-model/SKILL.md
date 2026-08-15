@@ -10,10 +10,10 @@ Use `.cursor/agents/model-simulator-agent.md` for implementation and `.cursor/ag
 ## 1. Name one gear
 
 - 1.0: closed fixed-vector simulator for one coin.
-- 1.5: fixed expert regime screener; no PnL optimization.
+- 1.5: closed; fixed expert volatility screener (Top-N / cluster); no PnL optimization; `regime_on` is not a close criterion.
 - 2: multi-coin simulation using 1.0 + 1.5, limit `K`, equal capital per slot.
 - 2.5: separate position-size policy.
-- 3: parameter search after 1.5–2.5 and an anomaly-episode catalog.
+- 3: parameter search after 2–2.5 and an anomaly-episode catalog.
 
 Do not skip gears or implement live trading in this workflow.
 

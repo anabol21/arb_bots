@@ -78,7 +78,7 @@ flowchart TB
 | # | Gate | Критерий done | Статус |
 |---|------|---------------|--------|
 | 1 | Природа высоких задержек входящих данных | Измеримые хвосты (p95/хвост) и классификация слоя (сеть / parse / event-loop / publish) в сравнении с ping-скриптами; не «кажется нормально» | `in_progress` — r1 A/B/C `measurement-limited`; planned raw r2 artifacts ещё не проверены. Production verdict запрещён: [`pre-production gap dashboard`](latency-pre-production-gap-dashboard.md), [`r2 status`](latency-ws-fanout-three-arm-r2-results.md), [`контракт приёмки`](latency-production-acceptance-contract.md) |
-| 2 | Прототип стратегии на бэктесте в модельной ветви | Закрытый гир 1.0 + прототип метрики/скринера режима (гир 1.5) на истории; baseline 1.0 не сломан | `gate_pending` — гир 1.0 закрыт; канон score 1.5 зафиксирован (soft short blend `α≈0.75`, Top‑N); до закрытия 1.5 — гейт `regime_on` + санитария ([`strategy-gears.md`](strategy-gears.md), [`regime-metrics-v0.md`](regime-metrics-v0.md)) |
+| 2 | Прототип стратегии на бэктесте в модельной ветви | Закрытый гир 1.0 + закрытый скринер гира 1.5 на истории; baseline 1.0 не сломан | `done` — гир 1.0 закрыт; гир 1.5 закрыт как скринер более волатильных монет (soft short blend `α≈0.75`, Top‑N / кластер); `regime_on` не критерий закрытия 1.5 ([`strategy-gears.md`](strategy-gears.md), [`regime-metrics-v0.md`](regime-metrics-v0.md)) |
 | 3 | Автономный устойчивый публичный контур | Collector + compaction + backup без повторения vacation-класса: OOM compactor → остановка `archive_retention` → ENOSPC; алерты и доказанный free disk | `in_progress` — первопричина в [`vacation-break-forensics-20260810.md`](vacation-break-forensics-20260810.md); hardening ещё не закрыт |
 
 Блок-схему рабочей стратегии (B) рисуем **после** устаканивания (D)+(M). Модельные схемы до этого валидируем параметрами симулятора, не private WS.
@@ -102,10 +102,10 @@ flowchart TB
 |--------|--------|--------------|--------------------------|
 | Гир 1.0 | `done` | — | Закрыт в [`strategy-gears.md`](strategy-gears.md) |
 | Метрика аномалий + прототип скринера | `done` (канон score) | Model Simulator → Integration Validator | Канон: soft short blend `(α·EMA+(1−α)·MA)/MA_long`, `α≈0.75`; Top‑N кластер (crypto default); код `research/regime_ma_ratio.py` + heatmap/CLI; [`regime-metrics-v0.md`](regime-metrics-v0.md). **Без** оптимизации PnL |
-| Гир 1.5 | `in_progress` | метрика зафиксирована; дальше гейт `regime_on` + санитария | Фиксированные экспертные пороги; не закрыт, пока нет гейта входа |
-| Гир 2 | `blocked` | ждёт 1.5 | Мультимонета + гейт 1.5; `K` слотов |
+| Гир 1.5 | `done` | — | Закрыт: скринер более волатильных монет (Top‑N / кластер, blend `α≈0.75`). `regime_on` — опция позже, не критерий закрытия |
+| Гир 2 | `blocked` | 1.5 закрыт; каркас не начат | Мультимонета; возможности в кластере 1.5; `K` слотов |
 | Гир 2.5 | `blocked` | ждёт 2 | Политика размера |
-| Гир 3 | `blocked` | ждёт 1.5–2.5 + каталог эпизодов | Поиск параметров |
+| Гир 3 | `blocked` | ждёт 2–2.5 + каталог эпизодов | Поиск параметров |
 
 ### (B) Склейка / боевая стратегия
 
@@ -124,7 +124,7 @@ flowchart TB
 |------------|---------------|-----------------|
 | **(D) compaction/backup** | Hardening после vacation: compactor OOM / retention / disk / backup_transfer | Latency-патчи; private WS; ingest |
 | **(D) latency** | Измерение хвостов vs ping; классификация слоя | `compactor.py`, `backup_transfer.py`, retention reclaim; private WS; переписывание ingest |
-| **(M)** | Гир 1.5: гейт `regime_on` + санитария поверх канона blend | Гиры 2 / 2.5 / 3; оптимизация PnL скринера; смена канона метрики без docs |
+| **(M)** | Гир 2: мультимонета в кластере закрытого скринера 1.5 | Гиры 2.5 / 3; оптимизация PnL скринера; смена канона метрики без docs; `regime_on` как долг закрытия 1.5 |
 | **(B)** | Нет реализации | Любой код исполнения |
 
 Обновление WIP: править эту таблицу при старте новой задачи; старую либо `done`/`gate_pending`, либо явно отложить.
@@ -137,7 +137,7 @@ flowchart TB
 
 1. **(D) compaction/backup** — vacation → fix plan: memory/chunking compactor, alert на отсутствие `archive_retention_complete`, disk free. Gate: Validation + Review Critic.
 2. **(D) latency** — production vs ping; числа по слоям. Ingest frozen. Gate: Validation.
-3. **(M)** довести гир 1.5 (`regime_on` / санитария) поверх зафиксированного blend-score; Integration Validator проверяет, что гир 1.0 при выключенных новых флагах не регрессирует.
+3. **(M)** каркас гира 2: мультимонета вокруг чёрного ящика 1.0 в кластере скринера 1.5; Integration Validator проверяет, что гир 1.0 при выключенных новых флагах не регрессирует.
 4. **(D)/(M)** handoff backtest-данных: Schema Contract + Validation читаемости parquet; Model Simulator только потребляет.
 
 Не стартовать одновременно гиры 2 / 2.5 / 3. Не стартовать private WS.
@@ -179,6 +179,7 @@ Gate: ...
 
 | Дата | Трек | Задача | Вердикт | Ссылка |
 |------|------|--------|---------|--------|
+| 2026-08-15 | M | Гир 1.5 | принять (закрыт как скринер кластера; `regime_on` не критерий) | [`strategy-gears.md`](strategy-gears.md), [`regime-metrics-v0.md`](regime-metrics-v0.md) |
 | 2026-08-10 | D | Vacation break forensics | принять (диагноз); hardening — следующий шаг | [`vacation-break-forensics-20260810.md`](vacation-break-forensics-20260810.md) |
 | 2026-08-05 | D | Unattended readiness | принять с условиями | [`unattended-readiness-20260805.md`](unattended-readiness-20260805.md) |
 | — | M | Гир 1.0 | принять (закрыт) | [`strategy-gears.md`](strategy-gears.md) |
