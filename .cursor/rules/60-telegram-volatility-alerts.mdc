@@ -1,0 +1,27 @@
+---
+description: Enforces causal alert-only volatility detection and reliable Telegram delivery
+globs: alerts/**/*.py,docs/telegram-volatility-alerts-*.md
+alwaysApply: false
+---
+
+# Telegram Volatility Alerts
+
+This is an alert-only consumer of published data. Do not modify collector
+ingest, parsing, spread calculation, storage lifecycle, `model.ipynb`,
+private APIs or order routing from this scope.
+
+Use only complete data available at the decision time:
+
+- construct decisions on closed 5m windows;
+- require 48-bar warmup, hysteresis, cooldown and explicit missing-data
+  states;
+- separate `manual_anomaly_label` from future `persistence_30m`;
+- split offline evaluation by time and independent episode with embargo;
+- prioritize event precision and false alerts per asset-day over accuracy.
+
+ML is shadow-only until a locked holdout proves improvement over the
+rule-only baseline. It must not silently change user delivery.
+
+Telegram delivery requires a versioned idempotency key, append-only outbox,
+observable `queued/sent/failed` accounting, retry-after handling and restart
+recovery. Do not claim low latency before measuring closed-bar-to-send.
