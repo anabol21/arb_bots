@@ -10,6 +10,7 @@
 Основная спецификация: [`telegram-volatility-alerts-spec.md`](telegram-volatility-alerts-spec.md).  
 Рыночный контекст: [`telegram-volatility-alerts-market-research.md`](telegram-volatility-alerts-market-research.md).
 Provenance входных данных: [`telegram-alert-data-provenance.md`](telegram-alert-data-provenance.md).
+Карта склейки скринера: [`telegram-alert-screener-sources.md`](telegram-alert-screener-sources.md).
 
 ## Зависимости старшего проекта
 
