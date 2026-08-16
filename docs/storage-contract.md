@@ -1,24 +1,24 @@
 # Контракт хранения спредов (трек сбора)
 
-Единый список колонок тела parquet и раскладки партиций.
+Единый список колонок тела `parquet` и раскладки партиций.
 
 Источники правды в коде:
 
 - тики v1: [`app/schema/spread_event.py`](../app/schema/spread_event.py)
-- тики lean + бары `bar_5m`: [`app/schema/lean_event.py`](../app/schema/lean_event.py)
-- hive-раскладка: [`app/schema/parquet_layout.py`](../app/schema/parquet_layout.py)
+- тики `lean` + бары `bar_5m`: [`app/schema/lean_event.py`](../app/schema/lean_event.py)
+- раскладка `hive`: [`app/schema/parquet_layout.py`](../app/schema/parquet_layout.py)
 
 Взгляд модели (гир 1–2): [`docs/data-format-model.md`](data-format-model.md).  
-Gap ingest ↔ модель: [`docs/data-format-ingest-gap.md`](data-format-ingest-gap.md).  
-Операционка lean: [`docs/local-lean-collector.md`](local-lean-collector.md).
+Разрыв между приёмом котировок и моделью: [`docs/data-format-ingest-gap.md`](data-format-ingest-gap.md).  
+Операционное описание `lean`: [`docs/local-lean-collector.md`](local-lean-collector.md).
 
-Рантайм-вход: `app/screaner_b_o.py` → нормализация/запись: `app/storage/writer.py`.
+Вход среды исполнения: `app/screaner_b_o.py` → нормализация/запись: `app/storage/writer.py`.
 
-Флаги режима (default **OFF** → v1; production accumulation → lean+bars):
+Флаги режима (по умолчанию **выкл.** → v1; производственное накопление → `lean` + бары):
 
-| Env | Эффект |
-|-----|--------|
-| `SPREAD_LEAN_SCHEMA=1` | тиковый body = lean |
+| Флаг | Эффект |
+|------|--------|
+| `SPREAD_LEAN_SCHEMA=1` | тело тика = `lean` |
 | `SPREAD_COLLECT_BARS=1` | слой OKX `candle5m` → `bar_5m` |
 
 ---
@@ -29,14 +29,21 @@ Gap ingest ↔ модель: [`docs/data-format-ingest-gap.md`](data-format-inge
 <SPREADS_ROOT>/base_coin=<COIN>/event_date=<YYYY-MM-DD>/<batch_or_part>.parquet
 ```
 
-- `base_coin`, `event_date` — hive-партиции в пути.
-- В теле lean/`bar_5m` колонка `base_coin` дублируется для удобства чтения; `event_date` в body **нет** (writer отбрасывает).
+- `base_coin`, `event_date` — `hive`-партиции в пути.
+- В теле `lean` / `bar_5m` колонка `base_coin` дублируется для удобства чтения; `event_date` в теле **нет** (`writer` отбрасывает).
 
-Default roots: `SPREAD_PARQUET_ROOT=/data/live`, `SPREAD_BARS_ROOT=/data/bars`.
+Корни по умолчанию: `SPREAD_PARQUET_ROOT=/data/live`, `SPREAD_BARS_ROOT=/data/bars`.
+
+**Конечная копия (решение 2026-08-16, основа склейки):**
+
+- **Тики:** удалённо `backup1tb:spread-compacted` (`live` → `compact` → выгрузка). Каталог `/data/live` на сервере — первая запись, не конечная копия.
+- **Бары:** `/data/bars` на сервере (~1.5 ГиБ на срезе 2026-08-16). Удалённая выгрузка баров и таймеры уплотнения баров **не** обязательны для этого перехода. Одна копия: потеря сервера = потеря истории баров. Тики от этого не зависят.
+
+Сводка готовности сбора: [`d-track-ready-for-b.md`](d-track-ready-for-b.md).
 
 ---
 
-## Body-колонки — полный контракт v1 (canary / legacy)
+## Колонки тела — полный контракт v1 (`canary` / устаревший)
 
 Порядок как в `SPREAD_EVENT_BODY_COLS`:
 
@@ -69,14 +76,14 @@ Default roots: `SPREAD_PARQUET_ROOT=/data/live`, `SPREAD_BARS_ROOT=/data/bars`.
 Производные при нормализации v1:
 
 - `okx_freshness_ms` = `calc_local_ts_ms − okx_local_recv_ts_ms` (аналогично Bybit)
-- `event_local_ts_ms` = recv триггера (`okx` или `bybit` по `trigger`)
-- `max_freshness_ms` / `max_latency_ms` = max по двум биржам
+- `event_local_ts_ms` = `recv` триггера (`okx` или `bybit` по `trigger`)
+- `max_freshness_ms` / `max_latency_ms` = максимум по двум биржам
 
-L1 book: публичный лучший bid/ask (цена + размер). Суффикс объёма — `_size`.
+Публичная книга `L1`: лучший `bid`/`ask` (цена + размер). Суффикс объёма — `_size`.
 
 ---
 
-## Body-колонки — lean ticks (production target)
+## Колонки тела — тики `lean` (целевой производственный формат)
 
 Версия контракта: **lean** (включается `SPREAD_LEAN_SCHEMA=1`).  
 Порядок как в `LEAN_TICK_BODY_COLS`. Все временные метки — **int64 ms**.
@@ -100,20 +107,20 @@ L1 book: публичный лучший bid/ask (цена + размер). Су
 
 **Не пишутся** (считать при чтении):
 
-- `spread_long` / `spread_short` — из L1  
+- `spread_long` / `spread_short` — из `L1`  
   - long = `(bybit_bid − okx_ask) / bybit_bid × 100`  
   - short = `(okx_bid − bybit_ask) / okx_bid × 100`
 - `*_latency_ms`, `*_freshness_ms`, `max_*`, `event_dt`
 
-Единицы lot/tick/min-size — **не** в parquet; join из [`bybit_okx_universe.csv`](../bybit_okx_universe.csv) по `base_coin`.
+Единицы лота / тика / минимального размера — **не** в `parquet`; соединение из [`bybit_okx_universe.csv`](../bybit_okx_universe.csv) по `base_coin`.
 
-Не смешивать lean и v1 в одной дневной партиции без dual-read ридера.
+Не смешивать `lean` и v1 в одной дневной партиции без ридера с двойным чтением.
 
 ---
 
-## Body-колонки — `bar_5m` v0
+## Колонки тела — `bar_5m` v0
 
-Отдельный dataset, не смешивать с тиковыми batch:
+Отдельный набор данных, не смешивать с пакетами тиков:
 
 ```text
 <BARS_ROOT>/bar_5m/base_coin=<COIN>/event_date=<YYYY-MM-DD>/….parquet
@@ -129,83 +136,83 @@ L1 book: публичный лучший bid/ask (цена + размер). Су
 
 ### Семантика `volume` (зафиксировано)
 
-| Биржа | WS | Канал | Persist when | Поле | Единица |
-|-------|-----|-------|--------------|------|---------|
-| OKX (канон) | business `wss://ws.okx.com:8443/ws/v5/business` | `candle5m` | `confirm == "1"` | `volCcy` | base coin (SWAP) |
-| Bybit (опц.) | linear public | `kline.5.{symbol}` | `confirm == true` | `volume` | base coin |
+| Биржа | Точка входа | Канал | Когда писать | Поле | Единица |
+|-------|-------------|-------|--------------|------|---------|
+| OKX (канон) | `business` `wss://ws.okx.com:8443/ws/v5/business` | `candle5m` | `confirm == "1"` | `volCcy` | базовая монета (`SWAP`) |
+| Bybit (опц.) | `linear public` | `kline.5.{symbol}` | `confirm == true` | `volume` | базовая монета |
 
-Не включать: OHLC, amplitude, spreads, `n_updates`, unit-колонки.
+Не включать: `OHLC`, амплитуду, спреды, `n_updates`, колонки единиц.
 
 ---
 
-## Durable `bar_5m` v2 — compacted layout
+## Устойчивые `bar_5m` v2 — уплотнённая раскладка
 
-**Producer:** frozen collector продолжает писать source-batch в
-`/data/bars/bar_5m`. **Compactor:** отдельный one-shot process. **Consumers:**
-backup и историческая модель (gear 1.5+). Это изменение layout, а не полей
-свечи: parquet body остаётся ровно `LEAN_BAR_5M_BODY_COLS` из пяти колонок
+**Источник:** замороженный сборщик по-прежнему пишет исходные пакеты в
+`/data/bars/bar_5m`. **Уплотнитель:** отдельный разовый процесс. **Потребители:**
+резервная копия и историческая модель (гир 1.5 и выше). Это смена раскладки, а не полей
+свечи: тело `parquet` остаётся ровно `LEAN_BAR_5M_BODY_COLS` из пяти колонок
 выше, с теми же типами, UTC и семантикой `volume`.
 
 ```text
-# mutable local source; collector only
+# изменяемый локальный источник; только сборщик
 /data/bars/bar_5m/base_coin=<COIN>/event_date=<UTC-date>/batch_*.parquet
 
-# compacted v2 publication; one COIN × closed one-hour UTC window
+# уплотнённая публикация v2; одна монета × закрытое часовое окно UTC
 /data/bars_compacted_v2/bar_5m/base_coin=<COIN>/event_date=<UTC-date>/
   bar_5m_<YYYYMMDDTHHMMSSZ>_<YYYYMMDDTHHMMSSZ>_inputset=<16-hex>.parquet
 ```
 
-- Hive keys остаются `base_coin`, `event_date`; они в пути, `event_date` не
-  добавляется в body. `base_coin` остаётся body-колонкой.
-- Окно имеет `[window_start, window_end)` в UTC, по умолчанию 3600 s. Оно
-  eligible только после `window_end + grace`, а source batch должен быть
-  неизменным до этой же границы; текущий/open час не compact-ится. Первый
-  manifest замораживает точный список source path/bytes/rows/SHA-256. Поздний
-  batch для уже замороженного часа не добавляется и не создаёт второй
-  model-visible output: он остаётся на source root и получает quarantine
-  record/alert. Batch, пересекающий границу окна, пропускается.
-- Публикация: `.inprogress` → fsync/read-back (rows + schema) → atomic rename
-  в final. Имя final включает digest замороженного input set, поэтому remote
-  identity не коллидирует между разными наборами input. Sidecar manifest
-  содержит версию layout, source paths/sizes/SHA-256, row count, output
-  SHA-256/bytes и lifecycle status. Existing final принимается только при
-  exact checksum match; другой checksum переводится в quarantine, без overwrite.
-- После локальной публикации source переносится только в локальный archive.
-  Его retention разрешён лишь когда отдельный transfer manifest подтвердил
-  final object на `backup1tb:spread-bars-compacted-v2` (`sent` после
-  temporary→final, remote-size и SHA verification). Локальная compaction сама
-  по себе **не** является durable remote boundary.
-- Временные/partial `.inprogress`, `.tmp` и incomplete manifests не являются
-  модельным входом и не передаются как final.
+- Ключи `hive` остаются `base_coin`, `event_date`; они в пути, `event_date` не
+  добавляется в тело. `base_coin` остаётся колонкой тела.
+- Окно имеет `[window_start, window_end)` в UTC, по умолчанию 3600 с. Оно
+  допускается только после `window_end + grace`, а исходный пакет должен быть
+  неизменным до этой же границы; текущий/открытый час не уплотняется. Первый
+  манифест замораживает точный список путей, размеров, строк и SHA-256 исходников. Поздний
+  пакет для уже замороженного часа не добавляется и не создаёт второй
+  выход, видимый модели: он остаётся в корне источника и получает запись
+  карантина / оповещение. Пакет, пересекающий границу окна, пропускается.
+- Публикация: `.inprogress` → `fsync` / повторное чтение (строки + схема) → атомарное переименование
+  в конечный файл. Имя конечного файла включает дайджест замороженного набора входов, поэтому
+  удалённый идентификатор не сталкивается между разными наборами входов. Сопровождающий манифест
+  содержит версию раскладки, пути/размеры/SHA-256 источников, число строк, SHA-256/байты
+  выхода и статус жизненного цикла. Существующий конечный файл принимается только при
+  точном совпадении контрольной суммы; другая сумма уходит в карантин, без перезаписи.
+- После локальной публикации источник переносится только в локальный архив.
+  Его срок хранения разрешён лишь когда отдельный манифест выгрузки подтвердил
+  конечный объект на `backup1tb:spread-bars-compacted-v2` (`sent` после
+  `temporary` → `final`, удалённый размер и проверка SHA). Локальное уплотнение само
+  по себе **не** является границей устойчивого удалённого хранения.
+- Временные и неполные `.inprogress`, `.tmp` и незавершённые манифесты не являются
+  входом модели и не передаются как конечные файлы.
 
 ### Совместимость и миграция
 
-Это additive layout version **2**, обратимо совместимый на уровне parquet:
-existing model reader, который рекурсивно читает hive `*.parquet`, получает те
-же обязательные bar columns. Reader должен явно выбрать один root:
-legacy source `/data/bars/bar_5m` или durable compacted v2
+Это добавочная версия раскладки **2**, обратимо совместимая на уровне `parquet`:
+существующий читатель модели, который рекурсивно читает `hive` `*.parquet`, получает те
+же обязательные колонки баров. Читатель должен явно выбрать один корень:
+устаревший источник `/data/bars/bar_5m` или устойчивое уплотнение v2
 `/data/bars_compacted_v2/bar_5m`; нельзя читать оба одновременно, иначе будут
-дубликаты. Legacy remote `backup1tb:spread-bars` остаётся историческим,
-disabled и не drain/delete без отдельного approval. Ранее созданные v1
+дубликаты. Устаревшее удалённое `backup1tb:spread-bars` остаётся историческим,
+выключено и не очищается и не удаляется без отдельного разрешения. Ранее созданные v1
 `/data/bars_compacted` и `backup1tb:spread-bars-compacted` остаются
-read-only: v2 не выполняет их миграцию, удаление, перезапись или bulk-move.
-Новые compacted objects идут только в
+только для чтения: v2 не выполняет их миграцию, удаление, перезапись или массовое перемещение.
+Новые уплотнённые объекты идут только в
 `/data/bars_compacted_v2/bar_5m` и `backup1tb:spread-bars-compacted-v2`.
 
 ---
 
 ## Вне контракта
 
-- Приватные каналы (latency ордера, аккаунт).
-- L2+, trades tape, funding, OI.
+- Приватные каналы (задержка заявки, аккаунт).
+- `L2+`, лента сделок, `funding`, `OI`.
 - Переименование `_size` → `_quantity`.
 
 ---
 
-## Legacy
+## Устаревшее
 
-Файлы без 8 book-колонок допустимы как исторический хвост, но **не** как целевой продакшен-формат.  
-Проверка бэкапа v1 canary: [`validation/check_backup_validity.py`](../validation/check_backup_validity.py) ожидает полный `EXPECTED_BODY_COLS` (= body v1 выше).
+Файлы без 8 колонок книги допустимы как исторический хвост, но **не** как целевой производственный формат.  
+Проверка резервной копии v1 `canary`: [`validation/check_backup_validity.py`](../validation/check_backup_validity.py) ожидает полный `EXPECTED_BODY_COLS` (= тело v1 выше).
 
 ---
 
@@ -213,9 +220,9 @@ read-only: v2 не выполняет их миграцию, удаление, �
 
 | Версия | Когда | Статус |
 |--------|-------|--------|
-| **v1** | canary / флаги off | заморожен; полный tick body |
-| **lean** | `SPREAD_LEAN_SCHEMA=1` | production target для накопления |
-| **bar_5m** v0 | `SPREAD_COLLECT_BARS=1` | additive слой; отсутствие не ломает тики |
-| **bar_5m compacted** v2 | отдельный compactor + transfer | durable layout; body = bar_5m v0; frozen input-set identity |
+| **v1** | `canary` / флаги выкл. | заморожен; полное тело тика |
+| **lean** | `SPREAD_LEAN_SCHEMA=1` | целевой производственный формат для накопления |
+| **bar_5m** v0 | `SPREAD_COLLECT_BARS=1` | добавочный слой; отсутствие не ломает тики |
+| **bar_5m compacted** v2 | отдельный уплотнитель + выгрузка | устойчивая раскладка; тело = `bar_5m` v0; замороженный идентификатор набора входов |
 
-Миграция: новый процесс с флагами lean+bars; не переключать mid-run на том же дневном корне без dual-read. Compaction/backup тиков и баров — раздельные корни/префиксы. Для durable bars source и compacted roots разделены; legacy backlog не мигрируется массово.
+Миграция: новый процесс с флагами `lean` + бары; не переключать посреди прогона на том же дневном корне без двойного чтения. Уплотнение и выгрузка тиков и баров — раздельные корни/префиксы. Для устойчивых баров корни источника и уплотнения разделены; устаревший хвост очереди не мигрируется массово.

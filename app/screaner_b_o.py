@@ -34,6 +34,19 @@ from storage.writer import (
     ParquetPublisher,
     collect_bars_enabled,
 )
+from utils.tick_validity import (  # noqa: E402
+    TickValidityGate,
+    book_l1_complete,
+)
+from utils.ws_reconnect import (  # noqa: E402
+    BOOK_CONNECT_PRIORITY,
+    CANDLE_CONNECT_PRIORITY,
+    ExchangeConnectScheduler,
+    ReconnectController,
+    connect_per_sec,
+    reconnect_v2_enabled,
+    subscribe_batch_size,
+)
 
 
 RUNTIME_LOG_PATH = resolve_runtime_log_path()
@@ -95,8 +108,8 @@ ROW_END = int(os.environ.get("SPREAD_ROW_END", "337"))
 
 # Default keeps canary-scale batching; lower via env for soak / disk pressure.
 PERSIST_EVERY_N = int(os.environ.get("SPREAD_PERSIST_EVERY", "100000"))
-SUBSCRIBE_BATCH_SIZE = 30
-SUBSCRIBE_BATCH_PAUSE_SEC = 3
+SUBSCRIBE_BATCH_SIZE = subscribe_batch_size(v2=reconnect_v2_enabled())
+SUBSCRIBE_BATCH_PAUSE_SEC = float(os.environ.get("SPREAD_SUBSCRIBE_BATCH_PAUSE_SEC", "3"))
 PUBLISHER_MAX_QUEUE = 4
 
 opportunities_buffer: list[dict[str, Any]] = []
@@ -109,6 +122,9 @@ bars_spool: Optional[DurableSpool] = None
 recovery_worker: Optional[SpoolRecoveryWorker] = None
 bars_recovery_worker: Optional[SpoolRecoveryWorker] = None
 mount_failure_state = MountFailureState()
+ws_reconnect = ReconnectController()
+tick_validity = TickValidityGate()
+connect_scheduler = ExchangeConnectScheduler(connects_per_sec=connect_per_sec())
 
 
 def _ms_int(value: Any) -> int:
@@ -410,6 +426,9 @@ def calc_and_store_spread(base_coin, trigger_exchange):
         return
 
     calc_local_ts_ms = time.time() * 1000
+    suppress = tick_validity.evaluate(base_coin, okx, bybit, calc_local_ts_ms)
+    if suppress is not None:
+        return
 
     # Still computed in-process for v1 body; lean omits from parquet (derive at read).
     spread_long = (bybit["bid_price"] - okx["ask_price"]) * 100 / bybit["bid_price"]
@@ -438,9 +457,182 @@ def calc_and_store_spread(base_coin, trigger_exchange):
     )
 
 
-async def bybit_listener(base_coin, bybit_symbol):
-    ws = None
+def _log_ws_event(fields: dict[str, Any], *, level: int = logging.INFO) -> None:
+    parts = [str(fields.get("event", "ws_event"))]
+    for key in (
+        "exchange",
+        "channel",
+        "coin",
+        "close_code",
+        "reason_class",
+        "attempt",
+        "backoff_ms",
+        "wave_60s",
+        "exception_class",
+        "exception",
+        "unrecovered",
+    ):
+        if key in fields and fields[key] is not None:
+            parts.append(f"{key}={fields[key]}")
+    runtime_logger.log(level, " | ".join(parts))
 
+
+async def _wait_reconnect_gates(session, disconnect: dict[str, Any]) -> None:
+    await asyncio.sleep(float(disconnect["backoff_sec"]))
+    ctrl = session.controller
+    if ctrl.budget_exceeded(session.key):
+        ctrl.counters["budget_exceeded_total"] += 1
+        while ctrl.budget_exceeded(session.key):
+            wait_sec = min(max(ctrl.time_until_budget_slot(session.key), 1.0), 60.0)
+            _log_ws_event(
+                {
+                    "event": "reconnect_budget_exceeded",
+                    "exchange": session.exchange,
+                    "channel": session.channel,
+                    "coin": session.base_coin,
+                    "attempt": session.attempt,
+                    "backoff_ms": int(round(wait_sec * 1000)),
+                    "wave_60s": ctrl.wave_60s(session.exchange),
+                },
+                level=logging.WARNING,
+            )
+            await asyncio.sleep(wait_sec)
+    priority = (
+        CANDLE_CONNECT_PRIORITY
+        if session.channel in {"candle5m", "kline.5"}
+        else BOOK_CONNECT_PRIORITY
+    )
+    await connect_scheduler.acquire(
+        session.exchange, priority=priority, coin=session.base_coin
+    )
+    ctrl.mark_connect_slot(session.exchange)
+    if disconnect.get("planned", True):
+        ctrl.record_planned(session.key)
+
+
+async def _ws_listen_loop_v2(
+    *,
+    exchange: str,
+    channel: str,
+    base_coin: str,
+    url: str,
+    subscribe_payload: dict[str, Any],
+    subscribe_ok_message: str,
+    on_message,
+    book_exchange: Optional[str] = None,
+    connect_priority: int = BOOK_CONNECT_PRIORITY,
+) -> None:
+    """Planned reconnect wrapper. on_message is the frozen parse/store callback."""
+    session = ws_reconnect.session(exchange, channel, base_coin)
+    pending_disconnect: Optional[dict[str, Any]] = None
+    ws = None
+    while True:
+        try:
+            if pending_disconnect is not None:
+                await _wait_reconnect_gates(session, pending_disconnect)
+                pending_disconnect = None
+            else:
+                await connect_scheduler.acquire(
+                    exchange, priority=connect_priority, coin=base_coin
+                )
+            async with websockets.connect(
+                url,
+                ping_interval=20,
+                ping_timeout=20,
+                close_timeout=2,
+            ) as ws:
+                await ws.send(json.dumps(subscribe_payload))
+                _log_ws_event(session.mark_subscribe_ok())
+                tick_validity.note_subscribe_ok(base_coin, channel)
+                runtime_logger.info(subscribe_ok_message)
+                async for message in ws:
+                    on_message(message)
+        except asyncio.CancelledError:
+            runtime_logger.info("%s | %s listener cancelled", base_coin, exchange)
+            if ws is not None:
+                try:
+                    await ws.close()
+                except Exception:
+                    pass
+            raise
+        except Exception as exc:
+            disconnect = session.on_disconnect(
+                exc,
+                ws,
+                quotes=quotes,
+                book_exchange=book_exchange,
+            )
+            pending_disconnect = disconnect
+            if book_exchange is not None:
+                tick_validity.note_disconnect(base_coin, book_exchange)
+            level = (
+                logging.ERROR
+                if disconnect["reason_class"] == "protocol_error"
+                else logging.WARNING
+            )
+            _log_ws_event(disconnect, level=level)
+            unrecovered = session.unrecovered_event(disconnect)
+            if unrecovered is not None:
+                _log_ws_event(unrecovered, level=logging.ERROR)
+            _log_ws_event(session.plan_reconnect(disconnect), level=level)
+
+
+async def bybit_listener(base_coin, bybit_symbol):
+    def handle_message(message):
+        local_recv_ts_ms = time.time() * 1000
+        data = json.loads(message)
+
+        if "data" not in data:
+            return
+
+        payload = data["data"]
+        if not isinstance(payload, dict):
+            return
+
+        bids = payload.get("b", [])
+        asks = payload.get("a", [])
+
+        if bids and len(bids[0]) >= 2:
+            quotes[base_coin]["bybit"]["bid_price"] = float(bids[0][0])
+            quotes[base_coin]["bybit"]["bid_size"] = float(bids[0][1])
+
+        if asks and len(asks[0]) >= 2:
+            quotes[base_coin]["bybit"]["ask_price"] = float(asks[0][0])
+            quotes[base_coin]["bybit"]["ask_size"] = float(asks[0][1])
+
+        exchange_ts_ms = data.get("ts")
+        cts_exchange_ms = data.get("cts")
+
+        quotes[base_coin]["bybit"]["ts_exchange"] = float(exchange_ts_ms) if exchange_ts_ms is not None else None
+        quotes[base_coin]["bybit"]["cts_exchange"] = float(cts_exchange_ms) if cts_exchange_ms is not None else None
+        quotes[base_coin]["bybit"]["local_recv_ts_ms"] = local_recv_ts_ms
+
+        if exchange_ts_ms is not None:
+            quotes[base_coin]["bybit"]["delivery_latency_ms"] = local_recv_ts_ms - float(exchange_ts_ms)
+
+        tick_validity.note_book_update(
+            base_coin, "bybit", complete_l1=book_l1_complete(quotes[base_coin]["bybit"])
+        )
+        calc_and_store_spread(base_coin, "bybit")
+
+    sub_msg = {
+        "op": "subscribe",
+        "args": [f"orderbook.1.{bybit_symbol}"],
+    }
+    if reconnect_v2_enabled():
+        await _ws_listen_loop_v2(
+            exchange="bybit",
+            channel="orderbook.1",
+            base_coin=base_coin,
+            url="wss://stream.bybit.com/v5/public/linear",
+            subscribe_payload=sub_msg,
+            subscribe_ok_message=f"{base_coin} | Bybit subscribed: orderbook.1.{bybit_symbol}",
+            on_message=handle_message,
+            book_exchange="bybit",
+        )
+        return
+
+    ws = None
     while True:
         try:
             async with websockets.connect(
@@ -449,46 +641,10 @@ async def bybit_listener(base_coin, bybit_symbol):
                 ping_timeout=20,
                 close_timeout=2,
             ) as ws:
-                sub_msg = {
-                    "op": "subscribe",
-                    "args": [f"orderbook.1.{bybit_symbol}"]
-                }
                 await ws.send(json.dumps(sub_msg))
                 runtime_logger.info(f"{base_coin} | Bybit subscribed: orderbook.1.{bybit_symbol}")
-
                 async for message in ws:
-                    local_recv_ts_ms = time.time() * 1000
-                    data = json.loads(message)
-
-                    if "data" not in data:
-                        continue
-
-                    payload = data["data"]
-                    if not isinstance(payload, dict):
-                        continue
-
-                    bids = payload.get("b", [])
-                    asks = payload.get("a", [])
-
-                    if bids and len(bids[0]) >= 2:
-                        quotes[base_coin]["bybit"]["bid_price"] = float(bids[0][0])
-                        quotes[base_coin]["bybit"]["bid_size"] = float(bids[0][1])
-
-                    if asks and len(asks[0]) >= 2:
-                        quotes[base_coin]["bybit"]["ask_price"] = float(asks[0][0])
-                        quotes[base_coin]["bybit"]["ask_size"] = float(asks[0][1])
-
-                    exchange_ts_ms = data.get("ts")
-                    cts_exchange_ms = data.get("cts")
-
-                    quotes[base_coin]["bybit"]["ts_exchange"] = float(exchange_ts_ms) if exchange_ts_ms is not None else None
-                    quotes[base_coin]["bybit"]["cts_exchange"] = float(cts_exchange_ms) if cts_exchange_ms is not None else None
-                    quotes[base_coin]["bybit"]["local_recv_ts_ms"] = local_recv_ts_ms
-
-                    if exchange_ts_ms is not None:
-                        quotes[base_coin]["bybit"]["delivery_latency_ms"] = local_recv_ts_ms - float(exchange_ts_ms)
-
-                    calc_and_store_spread(base_coin, "bybit")
+                    handle_message(message)
 
         except asyncio.CancelledError:
             runtime_logger.info(f"{base_coin} | Bybit listener cancelled")
@@ -505,8 +661,56 @@ async def bybit_listener(base_coin, bybit_symbol):
 
 
 async def okx_listener(base_coin, okx_symbol):
-    ws = None
+    def handle_message(message):
+        local_recv_ts_ms = time.time() * 1000
+        data = json.loads(message)
 
+        if "data" not in data or not data["data"]:
+            return
+
+        payload = data["data"][0]
+        bids = payload.get("bids", [])
+        asks = payload.get("asks", [])
+
+        if bids and len(bids[0]) >= 2:
+            quotes[base_coin]["okx"]["bid_price"] = float(bids[0][0])
+            quotes[base_coin]["okx"]["bid_size"] = float(bids[0][1])
+
+        if asks and len(asks[0]) >= 2:
+            quotes[base_coin]["okx"]["ask_price"] = float(asks[0][0])
+            quotes[base_coin]["okx"]["ask_size"] = float(asks[0][1])
+
+        exchange_ts_ms = payload.get("ts")
+
+        quotes[base_coin]["okx"]["ts_exchange"] = float(exchange_ts_ms) if exchange_ts_ms is not None else None
+        quotes[base_coin]["okx"]["local_recv_ts_ms"] = local_recv_ts_ms
+
+        if exchange_ts_ms is not None:
+            quotes[base_coin]["okx"]["delivery_latency_ms"] = local_recv_ts_ms - float(exchange_ts_ms)
+
+        tick_validity.note_book_update(
+            base_coin, "okx", complete_l1=book_l1_complete(quotes[base_coin]["okx"])
+        )
+        calc_and_store_spread(base_coin, "okx")
+
+    sub_msg = {
+        "op": "subscribe",
+        "args": [{"channel": "books5", "instId": okx_symbol}],
+    }
+    if reconnect_v2_enabled():
+        await _ws_listen_loop_v2(
+            exchange="okx",
+            channel="books5",
+            base_coin=base_coin,
+            url="wss://ws.okx.com:8443/ws/v5/public",
+            subscribe_payload=sub_msg,
+            subscribe_ok_message=f"{base_coin} | OKX subscribed: books5 {okx_symbol}",
+            on_message=handle_message,
+            book_exchange="okx",
+        )
+        return
+
+    ws = None
     while True:
         try:
             async with websockets.connect(
@@ -515,41 +719,10 @@ async def okx_listener(base_coin, okx_symbol):
                 ping_timeout=20,
                 close_timeout=2,
             ) as ws:
-                sub_msg = {
-                    "op": "subscribe",
-                    "args": [{"channel": "books5", "instId": okx_symbol}]
-                }
                 await ws.send(json.dumps(sub_msg))
                 runtime_logger.info(f"{base_coin} | OKX subscribed: books5 {okx_symbol}")
-
                 async for message in ws:
-                    local_recv_ts_ms = time.time() * 1000
-                    data = json.loads(message)
-
-                    if "data" not in data or not data["data"]:
-                        continue
-
-                    payload = data["data"][0]
-                    bids = payload.get("bids", [])
-                    asks = payload.get("asks", [])
-
-                    if bids and len(bids[0]) >= 2:
-                        quotes[base_coin]["okx"]["bid_price"] = float(bids[0][0])
-                        quotes[base_coin]["okx"]["bid_size"] = float(bids[0][1])
-
-                    if asks and len(asks[0]) >= 2:
-                        quotes[base_coin]["okx"]["ask_price"] = float(asks[0][0])
-                        quotes[base_coin]["okx"]["ask_size"] = float(asks[0][1])
-
-                    exchange_ts_ms = payload.get("ts")
-
-                    quotes[base_coin]["okx"]["ts_exchange"] = float(exchange_ts_ms) if exchange_ts_ms is not None else None
-                    quotes[base_coin]["okx"]["local_recv_ts_ms"] = local_recv_ts_ms
-
-                    if exchange_ts_ms is not None:
-                        quotes[base_coin]["okx"]["delivery_latency_ms"] = local_recv_ts_ms - float(exchange_ts_ms)
-
-                    calc_and_store_spread(base_coin, "okx")
+                    handle_message(message)
 
         except asyncio.CancelledError:
             runtime_logger.info(f"{base_coin} | OKX listener cancelled")
@@ -567,6 +740,49 @@ async def okx_listener(base_coin, okx_symbol):
 
 async def okx_candle5m_listener(base_coin: str, okx_symbol: str) -> None:
     """OKX business WS candle5m; persist closed bars with volCcy (base coin)."""
+
+    def handle_message(message):
+        data = json.loads(message)
+        rows = data.get("data")
+        if not rows:
+            return
+        for row in rows:
+            # [ts, o, h, l, c, vol, volCcy, volCcyQuote, confirm]
+            if not isinstance(row, (list, tuple)) or len(row) < 9:
+                continue
+            if str(row[8]) != "1":
+                continue
+            try:
+                bar_start = int(float(row[0]))
+                volume = float(row[6])  # volCcy = base currency for SWAP
+            except (TypeError, ValueError):
+                continue
+            store_closed_bar(
+                base_coin=base_coin,
+                ref_exchange="okx",
+                bar_start_ts_ms=bar_start,
+                volume=volume,
+            )
+
+    sub_msg = {
+        "op": "subscribe",
+        "args": [{"channel": "candle5m", "instId": okx_symbol}],
+    }
+    if reconnect_v2_enabled():
+        await _ws_listen_loop_v2(
+            exchange="okx",
+            channel="candle5m",
+            base_coin=base_coin,
+            url="wss://ws.okx.com:8443/ws/v5/business",
+            subscribe_payload=sub_msg,
+            subscribe_ok_message=(
+                f"{base_coin} | OKX subscribed candle5m {okx_symbol} (business WS)"
+            ),
+            on_message=handle_message,
+            connect_priority=CANDLE_CONNECT_PRIORITY,
+        )
+        return
+
     ws = None
     while True:
         try:
@@ -576,41 +792,14 @@ async def okx_candle5m_listener(base_coin: str, okx_symbol: str) -> None:
                 ping_timeout=20,
                 close_timeout=2,
             ) as ws:
-                await ws.send(
-                    json.dumps(
-                        {
-                            "op": "subscribe",
-                            "args": [{"channel": "candle5m", "instId": okx_symbol}],
-                        }
-                    )
-                )
+                await ws.send(json.dumps(sub_msg))
                 runtime_logger.info(
                     "%s | OKX subscribed candle5m %s (business WS)",
                     base_coin,
                     okx_symbol,
                 )
                 async for message in ws:
-                    data = json.loads(message)
-                    rows = data.get("data")
-                    if not rows:
-                        continue
-                    for row in rows:
-                        # [ts, o, h, l, c, vol, volCcy, volCcyQuote, confirm]
-                        if not isinstance(row, (list, tuple)) or len(row) < 9:
-                            continue
-                        if str(row[8]) != "1":
-                            continue
-                        try:
-                            bar_start = int(float(row[0]))
-                            volume = float(row[6])  # volCcy = base currency for SWAP
-                        except (TypeError, ValueError):
-                            continue
-                        store_closed_bar(
-                            base_coin=base_coin,
-                            ref_exchange="okx",
-                            bar_start_ts_ms=bar_start,
-                            volume=volume,
-                        )
+                    handle_message(message)
         except asyncio.CancelledError:
             runtime_logger.info("%s | OKX candle5m cancelled", base_coin)
             if ws is not None:
@@ -626,6 +815,41 @@ async def okx_candle5m_listener(base_coin: str, okx_symbol: str) -> None:
 
 async def bybit_kline5m_listener(base_coin: str, bybit_symbol: str) -> None:
     """Optional Bybit 5m kline (off by default; model canon is OKX)."""
+
+    def handle_message(message):
+        data = json.loads(message)
+        rows = data.get("data")
+        if not isinstance(rows, list):
+            return
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            if row.get("confirm") is not True:
+                continue
+            try:
+                store_closed_bar(
+                    base_coin=base_coin,
+                    ref_exchange="bybit",
+                    bar_start_ts_ms=int(row["start"]),
+                    volume=float(row["volume"]),
+                )
+            except (KeyError, TypeError, ValueError):
+                continue
+
+    sub_msg = {"op": "subscribe", "args": [f"kline.5.{bybit_symbol}"]}
+    if reconnect_v2_enabled():
+        await _ws_listen_loop_v2(
+            exchange="bybit",
+            channel="kline.5",
+            base_coin=base_coin,
+            url="wss://stream.bybit.com/v5/public/linear",
+            subscribe_payload=sub_msg,
+            subscribe_ok_message=f"{base_coin} | Bybit subscribed kline.5.{bybit_symbol}",
+            on_message=handle_message,
+            connect_priority=CANDLE_CONNECT_PRIORITY,
+        )
+        return
+
     ws = None
     while True:
         try:
@@ -635,33 +859,12 @@ async def bybit_kline5m_listener(base_coin: str, bybit_symbol: str) -> None:
                 ping_timeout=20,
                 close_timeout=2,
             ) as ws:
-                await ws.send(
-                    json.dumps(
-                        {"op": "subscribe", "args": [f"kline.5.{bybit_symbol}"]}
-                    )
-                )
+                await ws.send(json.dumps(sub_msg))
                 runtime_logger.info(
                     "%s | Bybit subscribed kline.5.%s", base_coin, bybit_symbol
                 )
                 async for message in ws:
-                    data = json.loads(message)
-                    rows = data.get("data")
-                    if not isinstance(rows, list):
-                        continue
-                    for row in rows:
-                        if not isinstance(row, dict):
-                            continue
-                        if row.get("confirm") is not True:
-                            continue
-                        try:
-                            store_closed_bar(
-                                base_coin=base_coin,
-                                ref_exchange="bybit",
-                                bar_start_ts_ms=int(row["start"]),
-                                volume=float(row["volume"]),
-                            )
-                        except (KeyError, TypeError, ValueError):
-                            continue
+                    handle_message(message)
         except asyncio.CancelledError:
             runtime_logger.info("%s | Bybit kline5m cancelled", base_coin)
             if ws is not None:
@@ -680,6 +883,41 @@ async def heartbeat():
         snap = publisher.metrics_snapshot() if publisher is not None else {}
         spool_snap = spool.metrics_snapshot() if spool is not None else {}
         bar_snap = bars_publisher.metrics_snapshot() if bars_publisher is not None else {}
+        reconnect_bits = ""
+        if reconnect_v2_enabled():
+            ws_snap = ws_reconnect.heartbeat_fields()
+            reconnect_bits = (
+                " | reconnect_mode=%s | ws_disconnects=%s | ws_reconnect_planned=%s | "
+                "ws_reconnect_unplanned=%s | ws_subscribe_ok=%s | ws_unrecovered=%s | "
+                "ws_unrecovered_active=%s | ws_budget_exceeded=%s | ws_protocol_errors=%s | "
+                "ws_wave_okx_60s=%s | ws_wave_bybit_60s=%s"
+            )
+            reconnect_args = (
+                ws_snap["reconnect_mode"],
+                ws_snap["ws_disconnects"],
+                ws_snap["ws_reconnect_planned"],
+                ws_snap["ws_reconnect_unplanned"],
+                ws_snap["ws_subscribe_ok"],
+                ws_snap["ws_unrecovered"],
+                ws_snap["ws_unrecovered_active"],
+                ws_snap["ws_budget_exceeded"],
+                ws_snap["ws_protocol_errors"],
+                ws_snap["ws_wave_okx_60s"],
+                ws_snap["ws_wave_bybit_60s"],
+            )
+        else:
+            reconnect_args = ("v1",)
+            reconnect_bits = " | reconnect_mode=%s"
+        valid_snap = tick_validity.heartbeat_fields()
+        reconnect_bits += (
+            " | ticks_suppressed_stale=%s | ticks_suppressed_generation=%s | "
+            "ticks_accepted=%s"
+        )
+        reconnect_args = reconnect_args + (
+            valid_snap["ticks_suppressed_stale"],
+            valid_snap["ticks_suppressed_generation"],
+            valid_snap["ticks_accepted"],
+        )
         runtime_logger.info(
             "heartbeat | pairs=%s | schema_mode=%s | collect_bars=%s | "
             "buffer_size=%s | bar_buffer_size=%s | queue_depth=%s | "
@@ -689,7 +927,8 @@ async def heartbeat():
             "bytes_written=%s | last_write_latency_ms=%s | "
             "bar_published_rows=%s | "
             "spool_files_count=%s | spool_bytes_total=%s | "
-            "spool_recovered_total=%s | spool_recovery_failed_total=%s",
+            "spool_recovered_total=%s | spool_recovery_failed_total=%s"
+            + reconnect_bits,
             len(pairs),
             tick_schema_mode(),
             str(collect_bars_enabled()).lower(),
@@ -709,6 +948,7 @@ async def heartbeat():
             spool_snap.get("spool_bytes_total", 0),
             spool_snap.get("spool_recovered_total", 0),
             spool_snap.get("spool_recovery_failed_total", 0),
+            *reconnect_args,
         )
         await asyncio.sleep(30)
 
@@ -796,7 +1036,8 @@ async def main():
     runtime_logger.info(
         "runtime_paths | parquet_root=%s | bars_root=%s | bars_parquet_root=%s | "
         "runtime_log=%s | failed_batches_log=%s | spool_root=%s | "
-        "schema_mode=%s | collect_bars=%s | collect_bybit_bars=%s",
+        "schema_mode=%s | collect_bars=%s | collect_bybit_bars=%s | "
+        "reconnect_mode=%s | connect_per_sec=%s | subscribe_batch_size=%s",
         parquet_root,
         bars_root,
         bars_pq_root,
@@ -806,6 +1047,9 @@ async def main():
         tick_schema_mode(),
         str(do_bars).lower(),
         str(COLLECT_BYBIT_BARS).lower(),
+        "v2" if reconnect_v2_enabled() else "v1",
+        connect_per_sec(),
+        subscribe_batch_size(v2=reconnect_v2_enabled()),
     )
     runtime_logger.info(f"Loaded pairs: {len(pairs)}")
     for row in pairs:
@@ -839,45 +1083,83 @@ async def main():
             signal.signal(sig, lambda *_: request_shutdown())
 
     try:
-        pair_batches = list(chunked(pairs, SUBSCRIBE_BATCH_SIZE))
-        runtime_logger.info(
-            f"Starting subscriptions in batches | batch_size={SUBSCRIBE_BATCH_SIZE} | "
-            f"pause_sec={SUBSCRIBE_BATCH_PAUSE_SEC} | batches={len(pair_batches)}"
-        )
-
-        for batch_idx, pair_batch in enumerate(pair_batches, start=1):
+        batch_size = subscribe_batch_size(v2=reconnect_v2_enabled())
+        if batch_size <= 0:
             runtime_logger.info(
-                f"Subscription batch {batch_idx}/{len(pair_batches)} | "
-                f"coins_in_batch={len(pair_batch)}"
+                "Starting subscriptions via connect scheduler | "
+                "connect_per_sec=%s | coins=%s | books_first=true",
+                connect_per_sec(),
+                len(pairs),
             )
-
-            for row in pair_batch:
+            for row in pairs:
                 base_coin = row["base_coin"]
                 okx_symbol = row["okx_symbol"]
                 bybit_symbol = row["bybit_symbol"]
-
-                tasks.append(asyncio.create_task(okx_listener(base_coin, okx_symbol), name=f"okx:{base_coin}"))
-                tasks.append(asyncio.create_task(bybit_listener(base_coin, bybit_symbol), name=f"bybit:{base_coin}"))
-                if do_bars:
+                tasks.append(
+                    asyncio.create_task(okx_listener(base_coin, okx_symbol), name=f"okx:{base_coin}")
+                )
+                tasks.append(
+                    asyncio.create_task(
+                        bybit_listener(base_coin, bybit_symbol), name=f"bybit:{base_coin}"
+                    )
+                )
+            if do_bars:
+                for row in pairs:
                     tasks.append(
                         asyncio.create_task(
-                            okx_candle5m_listener(base_coin, okx_symbol),
-                            name=f"okx-candle:{base_coin}",
+                            okx_candle5m_listener(row["base_coin"], row["okx_symbol"]),
+                            name=f"okx-candle:{row['base_coin']}",
                         )
                     )
                     if COLLECT_BYBIT_BARS:
                         tasks.append(
                             asyncio.create_task(
-                                bybit_kline5m_listener(base_coin, bybit_symbol),
-                                name=f"bybit-kline:{base_coin}",
+                                bybit_kline5m_listener(
+                                    row["base_coin"], row["bybit_symbol"]
+                                ),
+                                name=f"bybit-kline:{row['base_coin']}",
                             )
                         )
+        else:
+            pair_batches = list(chunked(pairs, batch_size))
+            runtime_logger.info(
+                f"Starting subscriptions in batches | batch_size={batch_size} | "
+                f"pause_sec={SUBSCRIBE_BATCH_PAUSE_SEC} | batches={len(pair_batches)}"
+            )
 
-            if batch_idx < len(pair_batches):
+            for batch_idx, pair_batch in enumerate(pair_batches, start=1):
                 runtime_logger.info(
-                    f"Subscription batch {batch_idx} scheduled | sleeping {SUBSCRIBE_BATCH_PAUSE_SEC}s before next batch"
+                    f"Subscription batch {batch_idx}/{len(pair_batches)} | "
+                    f"coins_in_batch={len(pair_batch)}"
                 )
-                await asyncio.sleep(SUBSCRIBE_BATCH_PAUSE_SEC)
+
+                for row in pair_batch:
+                    base_coin = row["base_coin"]
+                    okx_symbol = row["okx_symbol"]
+                    bybit_symbol = row["bybit_symbol"]
+
+                    tasks.append(asyncio.create_task(okx_listener(base_coin, okx_symbol), name=f"okx:{base_coin}"))
+                    tasks.append(asyncio.create_task(bybit_listener(base_coin, bybit_symbol), name=f"bybit:{base_coin}"))
+                    if do_bars:
+                        tasks.append(
+                            asyncio.create_task(
+                                okx_candle5m_listener(base_coin, okx_symbol),
+                                name=f"okx-candle:{base_coin}",
+                            )
+                        )
+                        if COLLECT_BYBIT_BARS:
+                            tasks.append(
+                                asyncio.create_task(
+                                    bybit_kline5m_listener(base_coin, bybit_symbol),
+                                    name=f"bybit-kline:{base_coin}",
+                                )
+                            )
+
+                if batch_idx < len(pair_batches):
+                    runtime_logger.info(
+                        f"Subscription batch {batch_idx} scheduled | sleeping {SUBSCRIBE_BATCH_PAUSE_SEC}s before next batch"
+                    )
+                    await asyncio.sleep(SUBSCRIBE_BATCH_PAUSE_SEC)
 
         await asyncio.gather(*tasks)
     except asyncio.CancelledError:

@@ -1,41 +1,48 @@
-# Статус дата-пайплайна — 2026-08-14
+# Статус контура данных — 2026-08-16
 
-Трек: сбор и хранение. Хост: VPS `root@38.180.94.108` (16 GiB / 80 GiB).
-Entrypoint: `app/screaner_b_o.py` (`SPREAD_LEAN_SCHEMA=1`, `SPREAD_COLLECT_BARS=1`, N≈337).
+Имя файла сохранено с датой первого снимка (`20260814`); содержание — снимок 2026-08-16.
 
-Это снимок того, что уже есть в коде и что доказано на VPS. Не является
-разрешением Track B и не утверждает unattended ticks+bars READY.
+Трек: сбор и хранение. Хост: `root@38.180.94.108` (16 ГиБ / 80 ГиБ).
+Вход: `app/screaner_b_o.py` (`SPREAD_LEAN_SCHEMA=1`, `SPREAD_COLLECT_BARS=1`, N=337).
+
+Снимок после приёмки профиля `L1`. Задача публичного сбора закрыта.
+Сводка готовности: [`d-track-ready-for-b.md`](d-track-ready-for-b.md).
+Это не разрешение писать код склейки.
 
 ## Что есть
 
-- Lean ticks + локальные OKX `bar_5m`.
-- Tick pipeline: live → compact (`--max-windows 1`, streaming) →
-  `backup1tb:spread-compacted` → sent/archive retention.
-- Bars: локальный hive `/data/bars/bar_5m`. Compacted-bars v2
-  (`/data/bars_compacted_v2`, remote `backup1tb:spread-bars-compacted-v2`)
-  реализован, isolated SHA-smoke прошёл, **recurring timers выключены**.
-- Systemd: collector, tick compact/backup; ops alerts; runbooks.
+Факт на дату снимка, не план.
 
-## Что работает хорошо
+- Тики `lean` и локальные OKX `bar_5m`.
+- Контур тиков: `live` → `compact` (`--max-windows 1`, поток) →
+  `backup1tb:spread-compacted` → `sent` / `archive`.
+- Конечная копия баров: `/data/bars` на сервере (решение 2026-08-16, ~1.5 ГиБ).
+  Удалённая выгрузка баров реализована. Для этого перехода она не обязательна,
+  таймеры для этого перехода не нужны.
+- Переподключение версии 2, запрет устаревшего тика, очередь соединений:
+  `canary` 24 ч удержан
+  ([результат](ws-reconnect-v2-valid-ticks-canary-20260815-result.md)).
+- Флаги профиля записаны в `deploy/systemd/spread-collector.service`.
 
-- Collector жив с 2026-08-10 22:54 UTC, `NRestarts=0`.
-- Ticks: 8h canary без OOM/TERM; compact lag 1–7 мин; remote растёт;
-  pending=0. Durable ticks ≈2529 окон / 29 GiB (3–13 авг). Полные lean-дни
-  6–9 и 11–12 авг; 13-е непрерывно до среза. Дыры: 4–5 авг (canary) и
-  10 авг (ENOSPC/миграция).
-- Локальные bars пишутся: 336 монет, партиции 11–14 авг, heartbeat
-  `collect_bars=true`. Это **не** remote bars.
+## Что доказано
 
-## Что доработать (следующий приоритет: WS reconnect)
+- Плановые обрывы: 178 из 178 за `canary`; внеплановых и невосстановленных нет.
+- Запрет устаревшего тика: в выборке `parquet` нарушений нет, максимум 1998 / 1999 мс.
+- Тики в резервной копии: ночь 12.08 принята с ежедневной проверкой.
+- Задержка `L1`: два независимых окна 16.08, 99-й процентиль 80 / 61 и 48 / 38 мс.
+- За окно `canary` нехватки памяти у сборщика и уплотнителя не было.
 
-1. **Planned reconnect** в collector: сейчас любой обрыв → `error` + sleep 10s
-   + connect. Для B нужны классификация close, backoff+jitter, wave gate,
-   budget, structured `ws_*` события. Ingest freeze снять только на lifecycle.
-2. **Bars durable**: включить v2 timers после изоляции leftover source;
-   90 мин rate proof; overnight ticks+bars. Tiny-file backup (~751/ч) не
-   догоняет ingest (~4000/ч).
-3. Наблюдаемость reconnect в heartbeat; не смешивать v1 и lean в модели.
+## Что уходит в склейку
 
-## Явно не READY
+Не закрыто в сборе. Старт спецификации склейки не блокирует.
 
-Полный unattended ticks+bars; remote bars freshness; Track B / live bot.
+- Сторож по службе, журналу и диску.
+- Защита уплотнителя от нехватки памяти и переполнения диска.
+- Недели без присмотра.
+- Удалённая копия баров — только если модели или склейке нужна вторая копия.
+
+## Явно не готово
+
+- Живая торговля.
+- Приватные каналы.
+- Автономность «забыл на отпуск».

@@ -14,6 +14,10 @@ Environment=SPREAD_FAILED_BATCHES_LOG=/var/log/spread/failed_batches.log
 Environment=SPREAD_SPOOL_ROOT=/data/spool
 Environment=SPREAD_LEAN_SCHEMA=1
 Environment=SPREAD_COLLECT_BARS=1
+Environment=SPREAD_WS_RECONNECT_V2=1
+Environment=SPREAD_WS_CONNECT_PER_SEC=3
+Environment=SPREAD_TICK_SKEW_MAX_MS=2000
+Environment=SPREAD_TICK_AGE_MAX_MS=2000
 Environment=BACKUP_RCLONE_BINARY=/opt/rclone-1.74.4/rclone
 Environment=BACKUP_RCLONE_REMOTE=backup1tb
 Environment=BACKUP_RCLONE_PATH=spread-compacted
