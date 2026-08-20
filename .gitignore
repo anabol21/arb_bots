@@ -13,3 +13,9 @@ bye
 chmod
 mkdir
 put
+
+# B-private real env files only (keep *.template versioned).
+# Narrow paths — do not use a blanket *.env ignore.
+config/bbot-private-testnet.env
+config/bbot-private-live.env
+config/bbot-private.env

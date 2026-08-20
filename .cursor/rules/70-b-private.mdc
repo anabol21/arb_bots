@@ -1,0 +1,22 @@
+---
+description: B-private testnet-then-live — isolate from D, never default to live send
+globs: app/bot/private/**/*.py,docs/b-private-*.md
+alwaysApply: false
+---
+
+# B-private
+
+Written unlock 2026-08-18: private channels allowed. Ladder is testnet/demo
+first, live orders only after testnet evidence and an explicit user phrase.
+
+- Own code: `app/bot/private/**`. Do not put keys or send in `app/screaner_b_o.py`.
+- Do not turn `stub_broker.py` into a live sender.
+- Paths: `/data/bbot/private/`, `/var/log/spread/bbot-private.log`, secrets
+  outside git (`/etc/spread/bbot-private.env`, mode 600).
+- Never write `/data/live`, `/data/bars`, `/data/compacted`, or D backup prefixes.
+- Testnet process must not load live keys. Default `VENUE=testnet`, live send
+  requires `VENUE=live` and `LIVE_ORDERS=1`.
+- Live risk cap ≈ 100 USD per exchange (OKX and Bybit). First live order is
+  minimum lot, `K_live=1`.
+- Host Ops agent is not created on testnet; it opens at the first live order.
+- No profitability claims. No secrets in git, chat, or logs.
