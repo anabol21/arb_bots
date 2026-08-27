@@ -13,7 +13,7 @@ Environment=SPREAD_RUNTIME_LOG=/var/log/spread/runtime.log
 Environment=SPREAD_FAILED_BATCHES_LOG=/var/log/spread/failed_batches.log
 Environment=SPREAD_SPOOL_ROOT=/data/spool
 Environment=SPREAD_LEAN_SCHEMA=1
-Environment=SPREAD_COLLECT_BARS=1
+Environment=SPREAD_COLLECT_BARS=0
 Environment=BACKUP_RCLONE_BINARY=/opt/rclone-1.74.4/rclone
 Environment=BACKUP_RCLONE_REMOTE=backup1tb
 Environment=BACKUP_RCLONE_PATH=spread-compacted
@@ -41,7 +41,7 @@ Do **not** write lean into leftover canary day partitions under `/data/live` wit
 mkdir -p /data/experiments/lean_soak/{live,bars,spool} /var/log/spread
 cd /root/spread_staging
 SPREAD_LEAN_SCHEMA=1 \
-SPREAD_COLLECT_BARS=1 \
+SPREAD_COLLECT_BARS=0 \
 SPREAD_PARQUET_ROOT=/data/experiments/lean_soak/live \
 SPREAD_BARS_ROOT=/data/experiments/lean_soak/bars \
 SPREAD_SPOOL_ROOT=/data/experiments/lean_soak/spool \
@@ -81,7 +81,7 @@ cp deploy/systemd/spread-collector.service /etc/systemd/system/
 systemctl daemon-reload
 
 # 2) Ensure roots exist; prefer empty/new event_date under /data/live
-mkdir -p /data/live /data/bars /data/spool /data/compacted /var/log/spread
+mkdir -p /data/live /data/bars /data/spool /data/compacted /data/gaps /var/log/spread
 
 # 3) Start collector
 systemctl enable --now spread-collector.service

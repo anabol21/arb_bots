@@ -466,6 +466,89 @@ class CompactorTests(unittest.TestCase):
         self.assertFalse(archived.exists())
         self.assertEqual(len(self._outputs()), 1)
 
+    def _write_complete_state(
+        self,
+        *,
+        output: str,
+        window_end: float,
+        sources: list[str],
+        artifact_location: str = "offloaded",
+    ) -> Path:
+        state_root = self.compacted / ".state"
+        state_root.mkdir(parents=True, exist_ok=True)
+        path = state_root / f"{Path(output).stem}.json"
+        payload = {
+            "status": "complete",
+            "output": output,
+            "output_sha256": "a" * 64,
+            "window_start": int(window_end) - 300,
+            "window_end": int(window_end),
+            "total_rows": 1,
+            "input_bytes": 1,
+            "source_files_count": len(sources),
+            "artifact_location": artifact_location,
+            "sources": [
+                {"path": relative, "size": 1, "mtime_ns": 0, "sha256": "b" * 64}
+                for relative in sources
+            ],
+        }
+        path.write_text(json.dumps(payload) + "\n", encoding="utf-8")
+        return path
+
+    def test_expired_complete_state_pruned_after_archives_gone(self) -> None:
+        output = "spread_20220101T000000Z_20220101T000500Z.parquet"
+        archived = self.live / "archived/old-source.parquet"
+        archived.parent.mkdir(parents=True, exist_ok=True)
+        archived.write_bytes(b"x")
+        old = NOW - 48 * 3600
+        os.utime(archived, (old, old))
+        state = self._write_complete_state(
+            output=output,
+            window_end=NOW - 48 * 3600,
+            sources=["old-source.parquet"],
+        )
+        # Offloaded: no local compacted/sent artifact.
+        self.assertEqual(
+            run_archive_retention_only(self.config, now_epoch=NOW, logger=self.logger),
+            0,
+        )
+        self.assertFalse(archived.exists())
+        self.assertFalse(state.exists())
+
+    def test_expired_state_kept_while_pending_in_compacted(self) -> None:
+        from app.storage.compactor import JsonLogger, _prune_expired_complete_states
+
+        output = "spread_20220101T001000Z_20220101T001500Z.parquet"
+        self.compacted.mkdir(parents=True, exist_ok=True)
+        pending = self.compacted / output
+        pending.write_bytes(b"pending-bytes")
+        state = self._write_complete_state(
+            output=output,
+            window_end=NOW - 48 * 3600,
+            sources=["still-pending.parquet"],
+            artifact_location="compacted",
+        )
+        stats = _prune_expired_complete_states(
+            self.config, NOW, JsonLogger(self.logger)
+        )
+        self.assertEqual(stats["deferred_pending_compacted"], 1)
+        self.assertEqual(stats["pruned_manifests"], 0)
+        self.assertTrue(state.exists())
+        self.assertTrue(pending.exists())
+
+    def test_young_complete_state_not_pruned(self) -> None:
+        output = "spread_20220101T002000Z_20220101T002500Z.parquet"
+        state = self._write_complete_state(
+            output=output,
+            window_end=NOW - 3600,
+            sources=["young.parquet"],
+        )
+        self.assertEqual(
+            run_archive_retention_only(self.config, now_epoch=NOW, logger=self.logger),
+            0,
+        )
+        self.assertTrue(state.exists())
+
 
 if __name__ == "__main__":
     unittest.main()

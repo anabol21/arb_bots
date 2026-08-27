@@ -69,7 +69,7 @@ collect → write VPS → compact → backup → delete/move sent → folder tra
 | Live tmp | `/data/live/.tmp/*.parquet.tmp` | эфемерно, не input compact |
 | Archived sources | `/data/live/archived/` | после `row_count_match`; prune по retention (~12 h unit) |
 | Compacted | `/data/compacted/spread_*.parquet` | backlog обычно 0–few между тиками |
-| Compact state | `/data/compacted/.state/` | manifests / backup sqlite |
+| Compact state | `/data/compacted/.state/` | window manifests kept ≤ retention (~12 h unit); `backup_manifest.sqlite3` separate |
 | Sent (confirmed local) | `/data/compacted/sent/` | после remote size+SHA; prune ~12 h |
 | Durable remote | `backup1tb:spread-compacted/spread_*.parquet` | монотонный рост объектов за ночь |
 

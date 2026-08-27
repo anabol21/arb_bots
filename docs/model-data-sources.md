@@ -25,9 +25,9 @@
 | Dataset | Durable remote (предпочтительно для модели) | Локально на VPS (рабочий) |
 |---------|---------------------------------------------|---------------------------|
 | **Тики** | `backup1tb:spread-compacted/spread_*.parquet` | `/data/live` → compact `/data/compacted` |
-| **Бары `bar_5m`** | `backup1tb:spread-bars/bar_5m/...` | `/data/bars/bar_5m/...` |
+| **Бары `bar_5m`** | REST-история OKX (`download_okx_bar5m_hist.py`); старый слой `backup1tb:spread-bars/bar_5m/...` | `/data/bars/bar_5m/...` больше не пишется collector'ом |
 
-Сборщик на VPS сейчас: **lean ticks + OKX bars** (`SPREAD_LEAN_SCHEMA=1`, `SPREAD_COLLECT_BARS=1`) → `/data/live` и `/data/bars`.
+Сборщик на VPS: **lean ticks**, без `candle5m` (`SPREAD_LEAN_SCHEMA=1`, `SPREAD_COLLECT_BARS=0`) → `/data/live`. Бары 5m для модели — отдельно по REST, не из живого WS.
 
 **Для модели:** тянуть с remote backup (rclone / scp с хоста бэкапа), а не копировать live-hive с VPS как «архив». Live на VPS короткоживущий (archive/sent retention ~12h).
 

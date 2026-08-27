@@ -15,11 +15,14 @@ DEFAULT_STORAGE_MOUNT = Path("/mnt/storage")
 DEFAULT_PARQUET_ROOT = Path("/data/live")
 # Sibling of ticks: hive under <root>/bar_5m/base_coin=…/event_date=…
 DEFAULT_BARS_ROOT = Path("/data/bars")
+# WS reconnect gap JSONL; not the tick hive and not /data/bbot.
+DEFAULT_GAPS_ROOT = Path("/data/gaps")
 DEFAULT_RUNTIME_LOG = Path("/root/runtime.log")
 DEFAULT_FAILED_BATCHES_LOG = Path("/root/failed_batches.log")
 
 _ENV_PARQUET_ROOT = "SPREAD_PARQUET_ROOT"
 _ENV_BARS_ROOT = "SPREAD_BARS_ROOT"
+_ENV_GAPS_ROOT = "SPREAD_GAPS_ROOT"
 _ENV_RUNTIME_LOG = "SPREAD_RUNTIME_LOG"
 _ENV_FAILED_BATCHES_LOG = "SPREAD_FAILED_BATCHES_LOG"
 
@@ -178,6 +181,17 @@ def resolve_bars_root() -> Path:
 def bars_parquet_root(bars_root: Path | None = None) -> Path:
     root = bars_root if bars_root is not None else resolve_bars_root()
     return root / "bar_5m"
+
+
+def resolve_gaps_root() -> Path:
+    """Root for WS gap JSONL (not mixed into the tick or bar hives).
+
+    Default ``/data/gaps``. Day files are ``<root>/event_date=…/gaps.jsonl``.
+    """
+    raw = os.environ.get(_ENV_GAPS_ROOT)
+    if raw:
+        return _require_absolute(Path(raw).expanduser(), _ENV_GAPS_ROOT)
+    return DEFAULT_GAPS_ROOT
 
 
 def resolve_runtime_log_path() -> Path:

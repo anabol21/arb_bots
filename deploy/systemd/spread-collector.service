@@ -13,7 +13,7 @@ Environment=SPREAD_RUNTIME_LOG=/var/log/spread/runtime.log
 Environment=SPREAD_FAILED_BATCHES_LOG=/var/log/spread/failed_batches.log
 Environment=SPREAD_SPOOL_ROOT=/data/spool
 Environment=SPREAD_LEAN_SCHEMA=1
-Environment=SPREAD_COLLECT_BARS=1
+Environment=SPREAD_COLLECT_BARS=0
 Environment=SPREAD_WS_RECONNECT_V2=1
 Environment=SPREAD_WS_CONNECT_PER_SEC=3
 Environment=SPREAD_TICK_SKEW_MAX_MS=2000
@@ -24,7 +24,7 @@ Environment=BACKUP_RCLONE_PATH=spread-compacted
 Environment=BACKUP_SFTP_KEY_PATH=/root/.ssh/id_ed25519_uploader
 Environment=BACKUP_RCLONE_SFTP_CONCURRENCY=8
 Environment=BACKUP_RCLONE_SFTP_CHUNK_SIZE=128k
-ExecStartPre=/usr/bin/mkdir -p /data/live /data/bars /data/spool /data/compacted /var/log/spread
+ExecStartPre=/usr/bin/mkdir -p /data/live /data/bars /data/spool /data/compacted /data/gaps /var/log/spread
 ExecStart=/root/venv/bin/python app/screaner_b_o.py
 LimitNOFILE=65535
 Restart=always

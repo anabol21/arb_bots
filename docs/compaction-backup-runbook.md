@@ -27,7 +27,7 @@ the filesystem reported by `df /data`.
 | Live writer temporary files | `/data/live/.tmp/*.parquet.tmp` |
 | Archived source files | `/data/live/archived/` |
 | Consolidated files | `/data/compacted/spread_*.parquet` |
-| Compactor state | `/data/compacted/.state/spread_*.json` |
+| Compactor state | `/data/compacted/.state/spread_*.json` (complete manifests retained ≤ `--retention-hours`, prod unit 12h; pruned before full RAM load) |
 | Compactor temporary files | `/data/compacted/.tmp/*.inprogress` |
 | Confirmed local backup copies | `/data/compacted/sent/` |
 | Transfer manifest | `/data/compacted/.state/backup_manifest.sqlite3` |
@@ -39,7 +39,9 @@ Defaults:
 
 - compaction source-window width: 5 minutes; compactor timer cadence: 2 minutes
   during catch-up;
-- source archive retention: 24 hours;
+- source archive retention: `--retention-hours` (code default 24h; **prod unit 12h**);
+- complete window manifests in `.state/spread_*.json`: same retention clock as
+  archive prune (see `docs/compactor-state-retention-20260825.md`);
 - transfer schedule: 5 minutes;
 - sent retention: 12 hours.
 

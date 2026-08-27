@@ -11,6 +11,14 @@ from app.schema.parquet_layout import (
     PARTITION_KEYS,
     spreads_partition_dir,
 )
+from app.schema.ws_gap import (
+    WS_GAP_REQUIRED_FIELDS,
+    WS_GAP_SCHEMA_VERSION,
+    encode_gap_record,
+    gaps_jsonl_path,
+    utc_event_date,
+    validate_gap_record,
+)
 from app.schema.spread_event import (
     SPREAD_EVENT_BODY_COLS,
     SPREAD_EVENT_BOOK_COLS,
@@ -32,4 +40,10 @@ __all__ = [
     "lean_schema_enabled",
     "spreads_partition_dir",
     "tick_schema_mode",
+    "WS_GAP_REQUIRED_FIELDS",
+    "WS_GAP_SCHEMA_VERSION",
+    "encode_gap_record",
+    "gaps_jsonl_path",
+    "utc_event_date",
+    "validate_gap_record",
 ]

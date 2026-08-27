@@ -25,6 +25,7 @@ from storage.paths import (
     bars_parquet_root,
     resolve_bars_root,
     resolve_failed_batches_log_path,
+    resolve_gaps_root,
     resolve_parquet_root,
     resolve_runtime_log_path,
 )
@@ -38,6 +39,7 @@ from utils.tick_validity import (  # noqa: E402
     TickValidityGate,
     book_l1_complete,
 )
+from utils.ws_gap_journal import WsGapJournal  # noqa: E402
 from utils.ws_reconnect import (  # noqa: E402
     BOOK_CONNECT_PRIORITY,
     CANDLE_CONNECT_PRIORITY,
@@ -54,6 +56,7 @@ FAILED_BATCHES_LOG_PATH = resolve_failed_batches_log_path()
 PARQUET_ROOT = resolve_parquet_root()
 BARS_ROOT = resolve_bars_root()
 BARS_PARQUET_ROOT = bars_parquet_root(BARS_ROOT)
+GAPS_ROOT = resolve_gaps_root()
 
 # Option B: default OFF — deploying code must not change canary v1 output.
 LEAN_SCHEMA = lean_schema_enabled()
@@ -101,6 +104,8 @@ if not failed_batches_logger.handlers:
     )
     failed_batches_logger.addHandler(failed_batches_handler)
 
+
+ws_gap_journal = WsGapJournal(GAPS_ROOT, logger=runtime_logger)
 
 UNIVERSE_PATH = os.environ.get("SPREAD_UNIVERSE", "bybit_okx_universe.csv")
 ROW_START = int(os.environ.get("SPREAD_ROW_START", "0"))
@@ -543,6 +548,11 @@ async def _ws_listen_loop_v2(
             ) as ws:
                 await ws.send(json.dumps(subscribe_payload))
                 _log_ws_event(session.mark_subscribe_ok())
+                ws_gap_journal.note_subscribe_ok(
+                    exchange=exchange,
+                    channel=channel,
+                    base_coin=base_coin,
+                )
                 tick_validity.note_subscribe_ok(base_coin, channel)
                 runtime_logger.info(subscribe_ok_message)
                 async for message in ws:
@@ -571,6 +581,12 @@ async def _ws_listen_loop_v2(
                 else logging.WARNING
             )
             _log_ws_event(disconnect, level=level)
+            ws_gap_journal.note_disconnect(
+                exchange=exchange,
+                channel=channel,
+                base_coin=base_coin,
+                close_code=disconnect.get("close_code"),
+            )
             unrecovered = session.unrecovered_event(disconnect)
             if unrecovered is not None:
                 _log_ws_event(unrecovered, level=logging.ERROR)
@@ -984,6 +1000,14 @@ async def main():
 
     parquet_root.mkdir(parents=True, exist_ok=True)
     assert_storage_root_writable(parquet_root)
+    gaps_root = resolve_gaps_root()
+    ws_gap_journal.root = gaps_root
+    try:
+        gaps_root.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        runtime_logger.warning(
+            "main | gaps_root_mkdir_failed | path=%s | %s", gaps_root, exc
+        )
     spool = DurableSpool(
         logger=runtime_logger,
         mount_failure_state=mount_failure_state,
@@ -1035,12 +1059,13 @@ async def main():
 
     runtime_logger.info(
         "runtime_paths | parquet_root=%s | bars_root=%s | bars_parquet_root=%s | "
-        "runtime_log=%s | failed_batches_log=%s | spool_root=%s | "
+        "gaps_root=%s | runtime_log=%s | failed_batches_log=%s | spool_root=%s | "
         "schema_mode=%s | collect_bars=%s | collect_bybit_bars=%s | "
         "reconnect_mode=%s | connect_per_sec=%s | subscribe_batch_size=%s",
         parquet_root,
         bars_root,
         bars_pq_root,
+        ws_gap_journal.root,
         RUNTIME_LOG_PATH,
         FAILED_BATCHES_LOG_PATH,
         spool.root,

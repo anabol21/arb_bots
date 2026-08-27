@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import importlib
+import json
 import os
 import sys
 import tempfile
 import time
 import unittest
+from datetime import datetime, timezone
 from pathlib import Path
 from unittest import mock
 
@@ -151,7 +153,7 @@ class CalcStoreGateTests(unittest.TestCase):
 
 
 class CoverageScriptTests(unittest.TestCase):
-    def test_disconnect_marks_incomplete_window(self) -> None:
+    def test_disconnect_marks_incomplete_interval_not_lost_slot(self) -> None:
         path = Path(tempfile.mkdtemp()) / "runtime.log"
         path.write_text(
             "26-08-15 15:01:00 - WARNING - ws_disconnect | exchange=bybit | "
@@ -164,6 +166,64 @@ class CoverageScriptTests(unittest.TestCase):
         self.assertEqual(report["disconnects"], 1)
         self.assertEqual(report["incomplete_from_log"], 1)
         self.assertEqual(report["incomplete_windows"][0]["base_coin"], "BTC")
+        row = report["incomplete_intervals"][0]
+        self.assertIsNone(row["t_up_ms"])
+        self.assertIsNone(row["duration_ms"])
+        self.assertNotEqual(report["verdict"], "incomplete_windows_present")
+        self.assertEqual(report["verdict"], "open_gap_interval")
+
+    def test_paired_reconnect_is_seconds_hole_inside_slot(self) -> None:
+        path = Path(tempfile.mkdtemp()) / "runtime.log"
+        path.write_text(
+            "26-08-15 15:01:00 - WARNING - ws_disconnect | exchange=bybit | "
+            "channel=orderbook.1 | coin=BTC | close_code=1006 | reason_class=abrupt\n"
+            "26-08-15 15:01:02 - INFO - ws_subscribe_ok | exchange=bybit | "
+            "channel=orderbook.1 | coin=BTC | attempt=0\n",
+            encoding="utf-8",
+        )
+        report = analyze_logs([path], parse_since("2026-08-15T15:00:00Z"))
+        self.assertEqual(report["gaps_closed"], 1)
+        row = report["incomplete_intervals"][0]
+        self.assertEqual(row["duration_ms"], 2000)
+        self.assertLess(row["slot_gap_frac"], 0.02)
+        self.assertGreater(row["slot_tick_frac_est"], 0.98)
+        self.assertEqual(report["verdict"], "hole_2s_inside_slot")
+
+    def test_jsonl_preferred_over_five_minute_window(self) -> None:
+        tmp = Path(tempfile.mkdtemp())
+        log = tmp / "runtime.log"
+        log.write_text("", encoding="utf-8")
+        gaps_root = tmp / "gaps"
+        day = gaps_root / "event_date=2026-08-15"
+        day.mkdir(parents=True)
+        t_down = int(
+            datetime(2026, 8, 15, 15, 1, tzinfo=timezone.utc).timestamp() * 1000
+        )
+        t_up = t_down + 3000
+        (day / "gaps.jsonl").write_text(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "base_coin": "ETH",
+                    "exchange": "okx",
+                    "channel": "books5",
+                    "t_down_ms": t_down,
+                    "t_up_ms": t_up,
+                    "close_code": 1006,
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        report = analyze_logs(
+            [log],
+            parse_since("2026-08-15T15:00:00Z"),
+            gaps_root=gaps_root,
+        )
+        self.assertEqual(report["gap_source"], "gaps_jsonl")
+        self.assertEqual(report["incomplete_from_log"], 1)
+        self.assertEqual(report["incomplete_intervals"][0]["duration_ms"], 3000)
+        self.assertEqual(report["verdict"], "hole_3s_inside_slot")
 
 
 if __name__ == "__main__":

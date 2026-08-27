@@ -543,6 +543,111 @@ def _prune_manifest_archives(
     )
 
 
+def _archives_gone(config: CompactorConfig, manifest: dict[str, Any]) -> bool:
+    """True when no archived source path from the manifest still exists on disk."""
+    archive_root = config.resolved_archive_root
+    for source in manifest.get("sources") or []:
+        relative = source.get("path")
+        if not isinstance(relative, str):
+            continue
+        try:
+            if (archive_root / relative).is_file():
+                return False
+        except OSError:
+            return False
+    return True
+
+
+def _prune_expired_complete_states(
+    config: CompactorConfig,
+    now_epoch: float,
+    log: JsonLogger,
+) -> dict[str, int]:
+    """Drop complete window manifests older than retention, one file at a time.
+
+    Sent parquet is already pruned by backup_transfer after ``sent_retention_hours``.
+    Compactor ``.state/spread_*.json`` used to live forever and eventually OOM'd
+    ``MemoryMax`` when every oneshot reloaded millions of source paths. Align
+    state lifetime with archive retention:
+
+    1. only ``status=complete``;
+    2. ``window_end`` older than ``retention_hours``;
+    3. never while the output still sits in ``compacted/`` pending transfer;
+    4. prune archives first; delete JSON only when archives are gone.
+
+    Incomplete/published manifests are untouched. ``backup_manifest.sqlite3`` is
+    not matched by ``spread_*.json``.
+    """
+    state_root = config.compacted_root / ".state"
+    stats = {
+        "examined": 0,
+        "pruned_manifests": 0,
+        "removed_archive_files": 0,
+        "deferred_pending_compacted": 0,
+        "deferred_archives_remain": 0,
+        "skipped_young": 0,
+        "skipped_other": 0,
+        "errors": 0,
+    }
+    if not state_root.is_dir():
+        return stats
+    cutoff = now_epoch - config.retention_hours * 3600.0
+    for state_path in sorted(state_root.glob("spread_*.json")):
+        stats["examined"] += 1
+        try:
+            with state_path.open("r", encoding="utf-8") as handle:
+                manifest = json.load(handle)
+            if not isinstance(manifest, dict):
+                stats["skipped_other"] += 1
+                continue
+            if manifest.get("status") != "complete":
+                stats["skipped_other"] += 1
+                continue
+            window_end = manifest.get("window_end")
+            if not isinstance(window_end, (int, float)):
+                stats["skipped_other"] += 1
+                continue
+            if float(window_end) > cutoff:
+                stats["skipped_young"] += 1
+                continue
+            output_name = manifest.get("output")
+            if not isinstance(output_name, str) or not output_name:
+                stats["skipped_other"] += 1
+                continue
+            pending = config.compacted_root / output_name
+            if pending.is_file():
+                stats["deferred_pending_compacted"] += 1
+                continue
+            removed = _prune_manifest_archives(config, now_epoch, manifest)
+            stats["removed_archive_files"] += removed
+            if not _archives_gone(config, manifest):
+                stats["deferred_archives_remain"] += 1
+                continue
+            state_path.unlink(missing_ok=True)
+            stats["pruned_manifests"] += 1
+            log.emit(
+                logging.INFO,
+                "compaction_state_pruned",
+                output=output_name,
+                window_end=window_end,
+                removed_archive_files=removed,
+                source_files_count=manifest.get("source_files_count"),
+            )
+        except Exception as exc:
+            stats["errors"] += 1
+            log.emit(
+                logging.ERROR,
+                "compaction_state_prune_alert",
+                path=str(state_path),
+                error=repr(exc),
+            )
+        finally:
+            if stats["examined"] % 64 == 0:
+                _release_memory()
+    log.emit(logging.INFO, "compaction_state_prune_complete", **stats)
+    return stats
+
+
 def _collect_retention_eligible(
     config: CompactorConfig,
     manifests: list[tuple[Path, dict[str, Any]]],
@@ -613,6 +718,8 @@ def run_archive_retention_only(
     now = time.time() if now_epoch is None else now_epoch
     log = JsonLogger(logger)
     state_root = config.compacted_root / ".state"
+    # Stream-drop expired complete manifests before loading the remainder into RAM.
+    _prune_expired_complete_states(config, now, log)
     try:
         manifests = _load_manifests(state_root)
     except Exception as exc:
@@ -680,6 +787,9 @@ def compact_once(
     (config.compacted_root / ".tmp").mkdir(parents=True, exist_ok=True)
     failures = 0
     windows_budget = config.max_windows
+
+    # Drop expired complete state JSON one-by-one before holding the rest in RAM.
+    _prune_expired_complete_states(config, now, log)
 
     try:
         manifests = _load_manifests(state_root)
