@@ -11,8 +11,9 @@ Use `.cursor/agents/model-simulator-agent.md` for implementation and `.cursor/ag
 
 - 1.0: closed fixed-vector simulator for one coin.
 - 1.5: closed; fixed expert volatility screener (Top-N / cluster); no PnL optimization; `regime_on` is not a close criterion.
-- 2: multi-coin simulation using 1.0 + 1.5, limit `K`, equal capital per slot.
-- 2.5: separate position-size policy.
+- 2: closed (contour; 2.2 out of scope); multi-coin simulation using 1.0 + optional 1.5 Top-N on open, limit `K`, equal capital per slot.
+- 2.2: **next allowed**; stricter statistical analysis / C/D / occupancy / rates — not 2.5, not 3.
+- 2.5: separate position-size policy (blocked until 2.2 done or unlocked).
 - 3: parameter search after 2–2.5 and an anomaly-episode catalog.
 
 Do not skip gears or implement live trading in this workflow.

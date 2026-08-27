@@ -12,9 +12,10 @@ Gear order:
 
 1. Gear 1.0 is closed: one coin, fixed vector, explicit execution approximations.
 2. Gear 1.5 is closed: fixed expert volatility screener (Top-N / cluster); no PnL optimization; `regime_on` is not a close criterion.
-3. Gear 2: multi-coin simulation using 1.0 + 1.5, limit `K`, equal capital per slot.
-4. Gear 2.5: separate position-size policy.
-5. Gear 3: parameter search only after 2–2.5 and a catalog of independent anomaly episodes.
+3. Gear 2 is closed (contour; 2.2 out of scope): multi-coin simulation using 1.0 + optional 1.5 Top-N on open, limit `K`, equal capital per slot. Stamp must keep the parenthetical.
+4. **Next allowed stage = Gear 2.2:** stricter statistical analysis / hypothesis experiments (C = `regime_on`, D = random entry at B’s rate, occupancy, signal rates, honest holes). Explicitly **not** 2.5 and **not** 3.
+5. Gear 2.5: separate position-size policy — blocked until 2.2 is done or explicitly unlocked. Entry is an available cluster flag, not “cluster as default universe”.
+6. Gear 3: parameter search only after 2–2.5 and a catalog of independent anomaly episodes.
 
 For each change:
 

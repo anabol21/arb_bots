@@ -1,0 +1,403 @@
+digraph Gear2_MultiCoin_Simulation {
+    graph [
+        rankdir=TB,
+        splines=true,
+        nodesep=0.45,
+        ranksep=0.65,
+        fontname="Helvetica,sans-Serif",
+        fontsize=12,
+        compound=true,
+        bgcolor="#ffffff"
+    ];
+    
+    node [
+        fontname="Helvetica,sans-Serif",
+        fontsize=10,
+        shape=box,
+        style="filled,rounded",
+        margin="0.2,0.1"
+    ];
+    
+    edge [
+        fontname="Helvetica,sans-Serif",
+        fontsize=9,
+        color="#333333"
+    ];
+
+    status_banner [
+        label="Статус (info slide): гир 2 = закрыт (контур; 2.2 вне scope)\nСледующий этап лестницы: гир 2.2 (stats / C/D) — не 2.5, не 3\nValidator YELLOW · Critic accept-with-caveats · не live-ready / не alpha",
+        shape=note,
+        fillcolor="#fff8e1",
+        color="#f9a825",
+        fontsize=11
+    ];
+
+    // ==========================================
+    // CLUSTER 1: CONFIG & INPUTS & PRECOMPUTE
+    // ==========================================
+    subgraph cluster_cfg {
+        label="1. Входы, универсум и предрасчёт структур";
+        style="filled,dashed";
+        color="#78909c";
+        fillcolor="#eceff1";
+        fontsize=11;
+        
+        cfg_inputs [
+            label="Конфигурация (замороженные контракты):\n• VARIATION: thresh_open/close(long/short), open_frac, close_frac\n• HYPER: Trade_Lat, fee_rate, avg_window_sec, max_latency, max_freshness\n• SIZING: position_frac=1.0, position_size=10.0 (константный слот K=1)",
+            shape=note,
+            fillcolor="#ffffff",
+            color="#90a4ae"
+        ];
+        
+        cfg_data [
+            label="Глобальный сквозной датасет тиков:\n• data = mergesort(event_local_ts_ms, base_coin)\n• Универсум: только крипто (is_crypto denylist)\n• 16-колоночный канон L1 (цены/объёмы стакана + timestamps)",
+            fillcolor="#e1f5fe",
+            color="#0288d1"
+        ];
+        
+        cfg_index [
+            label="Поканальные структуры (на монету):\n• coin_idx[coin] = индексы строк монеты\n• local_pos[i] = локальный номер тика внутри монеты\n• compute_gate_b_ma: поканальный расчёт MA_long / MA_short",
+            fillcolor="#e0f2f1",
+            color="#00897b"
+        ];
+        
+        cfg_screener [
+            label="Опциональный скринер 1.5 (open-only флаг закрытого гира 2):\n• Top-N / кластер волатильности по закрытым 5m барам\n• crypto-only, soft short blend α=0.75\n• C/D и stricter stats → гир 2.2",
+            shape=note,
+            fillcolor="#fff9c4",
+            color="#fbc02d"
+        ];
+        
+        cfg_inputs -> cfg_data [style=invis];
+        cfg_data -> cfg_index [color="#00897b", label="группировка"];
+    }
+
+    status_banner -> cfg_inputs [style=dashed, color="#f9a825", label="закрытый контур 2"];
+
+    // ==========================================
+    // CLUSTER 2: GLOBAL TICK LOOP & PENDING RESOLVE
+    // ==========================================
+    subgraph cluster_tick_loop {
+        label="2. Глобальный мультимонетный такт (строка i)";
+        style="filled,rounded";
+        color="#5c6bc0";
+        fillcolor="#f3f5fd";
+        fontsize=11;
+        
+        tick_start [
+            label="Старт тика i (глобальный индекс)\ncoin = row.base_coin | ts = event_local_ts_ms\nspread_long, spread_short, L1 bids/asks",
+            fillcolor="#c5cae9",
+            color="#3949ab",
+            shape=box
+        ];
+        
+        check_pending [
+            label="Активен ли pending И\ni == pending.fill_i ?",
+            shape=diamond,
+            fillcolor="#ffe082",
+            color="#ffa000"
+        ];
+        
+        exec_pending [
+            label="Исполнить отложенный fill:\n• Assert: pending.coin == coin\n• _execute_fill(pending, i, row)\n• filled_now = True; pending = None",
+            fillcolor="#c8e6c9",
+            color="#2e7d32"
+        ];
+        
+        check_pending_wait [
+            label="pending активен И\nждёт будущий fill_i ?",
+            shape=diamond,
+            fillcolor="#ffe082",
+            color="#ffa000"
+        ];
+        
+        tick_continue [
+            label="continue (пропуск тика):\nНовые сигналы блокированы,\nпока слот в ожидании fill или исполнен",
+            fillcolor="#ffcdd2",
+            color="#c62828"
+        ];
+        
+        tick_next [
+            label="Переход к тику i + 1",
+            fillcolor="#e8eaf6",
+            color="#3f51b5"
+        ];
+        
+        tick_start -> check_pending;
+        check_pending -> exec_pending [label="да", color="#2e7d32"];
+        check_pending -> check_pending_wait [label="нет", color="#333333"];
+        check_pending_wait -> tick_continue [label="да (ждёт fill)", color="#c62828"];
+        exec_pending -> tick_continue [color="#2e7d32"];
+        tick_continue -> tick_next;
+    }
+
+    // ==========================================
+    // CLUSTER 3: THRESHOLDS & MULTI-COIN ELIF
+    // ==========================================
+    subgraph cluster_elif {
+        label="3. Мультимонетный elif (взаимоисключение, приоритет веток при K=1)";
+        style="filled,rounded";
+        color="#43a047";
+        fillcolor="#f1f8e9";
+        fontsize=11;
+        
+        eval_slot [
+            label="Оценка занятости слота:\nslot_full = (pos >= target_qty ИЛИ whatpos is not None)",
+            fillcolor="#dcedc8",
+            color="#689f38"
+        ];
+        
+        branch_open_long [
+            label="1. Кандидат Open Long:\nspread_long > thresh_open_long ∧ NOT slot_full",
+            fillcolor="#ffffff",
+            color="#2e7d32"
+        ];
+        
+        branch_open_short [
+            label="2. Кандидат Open Short:\nspread_short > thresh_open_short ∧ NOT slot_full",
+            fillcolor="#ffffff",
+            color="#2e7d32"
+        ];
+        
+        branch_slot_busy [
+            label="3. Отсев по занятости слота (Slot Busy):\nslot_full ∧ (spread_long > th_L ∨ spread_short > th_S) ∧ coin != held_coin\n→ n_filtered_slot_busy += 1 (сигнал отброшен)",
+            fillcolor="#fff3e0",
+            color="#ef6c00"
+        ];
+        
+        branch_close_long [
+            label="4. Кандидат Close Long:\nspread_short > thresh_close_long ∧ pos > 0 ∧ whatpos == long ∧ coin == held_coin",
+            fillcolor="#ffffff",
+            color="#1565c0"
+        ];
+        
+        branch_close_short [
+            label="5. Кандидат Close Short:\nspread_long > thresh_close_short ∧ pos > 0 ∧ whatpos == short ∧ coin == held_coin",
+            fillcolor="#ffffff",
+            color="#1565c0"
+        ];
+        
+        branch_none [
+            label="6. Нет сигнала на тике",
+            fillcolor="#ffffff",
+            color="#757575"
+        ];
+        
+        eval_slot -> branch_open_long;
+        branch_open_long -> branch_open_short;
+        branch_open_short -> branch_slot_busy;
+        branch_slot_busy -> branch_close_long;
+        branch_close_long -> branch_close_short;
+        branch_close_short -> branch_none;
+    }
+
+    // ==========================================
+    // CLUSTER 4: GATES & FILTERS
+    // ==========================================
+    subgraph cluster_gates {
+        label="4. Гейты качества кандидата (отказ → ветка съедена без fall-through)";
+        style="filled,rounded";
+        color="#d84315";
+        fillcolor="#fbe9e7";
+        fontsize=11;
+        
+        sig_candidate [
+            label="Сработала ветка кандидата\n(+1 n_signals_raw)",
+            fillcolor="#ffccbc",
+            color="#d84315"
+        ];
+        
+        gate_regime [
+            label="Gate 1.5 (только open, до Gate A):\n• coin ∈ Top_N_Cluster(t) по закрытому bar_5m\n• На close фильтра нет; выключен при regime_topn=None",
+            shape=diamond,
+            fillcolor="#fff9c4",
+            color="#fbc02d"
+        ];
+        
+        gate_a [
+            label="Gate A (Свежесть и задержка каналов):\n• okx_freshness <= max_fresh ∧ bybit_freshness <= max_fresh\n• okx_latency <= max_lat ∧ bybit_latency <= max_lat",
+            shape=diamond,
+            fillcolor="#ffe0b2",
+            color="#f57c00"
+        ];
+        
+        gate_b [
+            label="Gate B (Скользящее среднее на монету):\n• MA_side[coin] >= frac × thresh в окне avg_window_sec\n• Causal MA считается строго по тикам монеты coin",
+            shape=diamond,
+            fillcolor="#ffe0b2",
+            color="#f57c00"
+        ];
+        
+        gate_vol [
+            label="Gate Volume (Глубина стакана L1 Bybit):\n• _volume_ok_bybit_ws(size_arrs, i, side)\n• Проверяется только при Check_volume = True",
+            shape=diamond,
+            fillcolor="#ffe0b2",
+            color="#f57c00"
+        ];
+        
+        gate_fail [
+            label="Отказ гейта:\n• +1 n_filtered_not_topn / freshness / latency / avg / size\n• Ветка съедена, тик завершён",
+            fillcolor="#ffcdd2",
+            color="#c62828"
+        ];
+        
+        sig_passed [
+            label="Сигнал прошёл все гейты\n(+1 n_signals_passed)",
+            fillcolor="#c8e6c9",
+            color="#2e7d32"
+        ];
+        
+        sig_candidate -> gate_regime;
+        gate_regime -> gate_a [label="ok / close без фильтра", color="#2e7d32"];
+        gate_regime -> gate_fail [label="отказ (open not_topn)", color="#c62828"];
+        gate_a -> gate_b [label="ok", color="#2e7d32"];
+        gate_a -> gate_fail [label="отказ", color="#c62828"];
+        gate_b -> gate_vol [label="ok", color="#2e7d32"];
+        gate_b -> gate_fail [label="отказ", color="#c62828"];
+        gate_vol -> sig_passed [label="ok", color="#2e7d32"];
+        gate_vol -> gate_fail [label="отказ", color="#c62828"];
+    }
+
+    // ==========================================
+    // CLUSTER 5: RESOLVE FILL ON SAME COIN
+    // ==========================================
+    subgraph cluster_resolve {
+        label="5. Мультимонетное планирование исполнения (_schedule_or_fill)";
+        style="filled,rounded";
+        color="#00838f";
+        fillcolor="#e0f7fa";
+        fontsize=11;
+        
+        resolve_search [
+            label="_resolve_fill_same_coin(signal_i, coin):\nПоиск первого тика той же монеты в coin_idx[coin],\nгде ts[g] >= signal_ts + Trade_Lat",
+            fillcolor="#b2ebf2",
+            color="#00838f"
+        ];
+        
+        check_fill_found [
+            label="Найден ли fill_i\nдо конца датасета?",
+            shape=diamond,
+            fillcolor="#ffe082",
+            color="#ffa000"
+        ];
+        
+        missed_fill [
+            label="fill_i не найден в выборке:\n+1 n_pending_missed\n(сделка не открывается)",
+            fillcolor="#ffcdd2",
+            color="#c62828"
+        ];
+        
+        check_imm_fill [
+            label="Trade_Lat == 0 ИЛИ\nfill_i == signal_i ?",
+            shape=diamond,
+            fillcolor="#ffe082",
+            color="#ffa000"
+        ];
+        
+        exec_immediate [
+            label="Немедленное исполнение:\n_execute_fill(payload, signal_i, row)\n(filled_now = True)",
+            fillcolor="#c8e6c9",
+            color="#2e7d32"
+        ];
+        
+        set_pending [
+            label="Отложенное исполнение (pending fill):\npending = payload(kind, side, coin, signal_i, fill_i, ...)\n(Слот K=1 блокируется под монету coin)",
+            fillcolor="#ffe082",
+            color="#f57f17"
+        ];
+        
+        resolve_search -> check_fill_found;
+        check_fill_found -> missed_fill [label="нет", color="#c62828"];
+        check_fill_found -> check_imm_fill [label="да", color="#2e7d32"];
+        check_imm_fill -> exec_immediate [label="да", color="#2e7d32"];
+        check_imm_fill -> set_pending [label="нет (fill_i > signal_i)", color="#f57f17"];
+    }
+
+    // ==========================================
+    // CLUSTER 6: EXECUTE FILL & CAPITAL EFFECT
+    // ==========================================
+    subgraph cluster_effect {
+        label="6. Эффект исполнения (_execute_fill)";
+        style="filled,rounded";
+        color="#2e7d32";
+        fillcolor="#e8f5e9";
+        fontsize=11;
+        
+        fx_open [
+            label="Исполнение OPEN (вход в слот K=1):\n• pos = 100 × position_frac; whatpos = side\n• held_coin = coin (захват слота под монету)\n• open_price = fill_spread (на тике fill_i)\n• open_fees = 2-leg комиссия от target_qty\n• Сохранение среза задержек _lat_win(signal_i, coin)",
+            fillcolor="#ffffff",
+            color="#2e7d32"
+        ];
+        
+        fx_close [
+            label="Исполнение CLOSE (выход и фиксация PnL):\n• Assert: held_coin == coin ∧ whatpos == side\n• close_price = fill_spread (на тике fill_i)\n• fees = open_fees + close_fees\n• pnl = (open_price + close_price) × (pos / 100) − fees\n• Создание закрытого Trade(status='closed', base_coin=coin, ...)\n• metric += trade.pnl; fees_total += fees\n• Освобождение слота: pos=0, whatpos=None, held_coin=None",
+            fillcolor="#ffffff",
+            color="#1565c0"
+        ];
+    }
+
+    // ==========================================
+    // CLUSTER 7: POST-LOOP & REPORTING
+    // ==========================================
+    subgraph cluster_post {
+        label="7. Завершение прогона (Post-Loop Summary)";
+        style="filled,rounded";
+        color="#455a64";
+        fillcolor="#eceff1";
+        fontsize=11;
+        
+        eod_pending [
+            label="Остался незакрытый pending?\n→ +1 n_pending_missed",
+            fillcolor="#ffffff",
+            color="#78909c"
+        ];
+        
+        eod_open_trade [
+            label="Осталась незакрытая позиция?\n• Создание Trade(status='open', base_coin=held_coin)\n• Включается в trades, но НЕ входит в metric",
+            fillcolor="#ffffff",
+            color="#78909c"
+        ];
+        
+        backtest_result [
+            label="Итоговый объект BacktestResult:\n• trades: список закрытых и открытых сделок\n• metric: честный суммарный PnL закрытых позиций\n• fees_total: суммарные уплаченные комиссии\n• Счётчики отсевов: n_signals_raw, n_signals_passed,\n  n_filtered_slot_busy, n_filtered_by_latency/freshness/avg/size",
+            shape=box,
+            style="filled,bold",
+            fillcolor="#b0bec5",
+            color="#37474f"
+        ];
+        
+        eod_pending -> eod_open_trade -> backtest_result;
+    }
+
+    // ==========================================
+    // INTER-CLUSTER CONNECTIONS
+    // ==========================================
+    cfg_index -> tick_start [style=dashed, color="#00897b", label="потоки тиков"];
+    
+    check_pending_wait -> eval_slot [label="нет (pending=None)", color="#2e7d32"];
+    
+    branch_open_long -> sig_candidate [color="#2e7d32", label="ветка 1"];
+    branch_open_short -> sig_candidate [color="#2e7d32", label="ветка 2"];
+    branch_close_long -> sig_candidate [color="#1565c0", label="ветка 4"];
+    branch_close_short -> sig_candidate [color="#1565c0", label="ветка 5"];
+    
+    branch_slot_busy -> tick_next [color="#ef6c00", label="отсев"];
+    branch_none -> tick_next [color="#757575", label="пропуск"];
+    gate_fail -> tick_next [color="#c62828", label="отсев"];
+    
+    sig_passed -> resolve_search [color="#2e7d32"];
+    missed_fill -> tick_next [color="#c62828"];
+    
+    exec_immediate -> fx_open [color="#2e7d32", label="kind=open"];
+    exec_immediate -> fx_close [color="#1565c0", label="kind=close"];
+    
+    exec_pending -> fx_open [color="#2e7d32", label="kind=open"];
+    exec_pending -> fx_close [color="#1565c0", label="kind=close"];
+    
+    set_pending -> tick_next [color="#f57f17", label="ожидание"];
+    fx_open -> tick_next [color="#2e7d32"];
+    fx_close -> tick_next [color="#1565c0"];
+    
+    tick_next -> tick_start [style=dashed, color="#3f51b5", label="следующий тик i+1"];
+    tick_next -> eod_pending [style=bold, color="#455a64", label="конец данных (i == N)"];
+}

@@ -41,7 +41,8 @@ Unless the user explicitly unlocks them, treat these areas as frozen:
 - websocket ingest logic
 - exchange parsing
 - spread calculation
-- signal/trading logic
+- signal/trading logic inside `app/screaner_b_o.py`
+- live order routing outside `app/bot/private/**` (B-private: testnet first)
 - unrelated strategy experimentation
 
 Do not modify frozen areas just because storage behavior is problematic.
@@ -125,8 +126,8 @@ Use these as starting points. Add more targeted commands only when required by t
 
 ## Development tracks (lines of work, not necessarily git branches)
 1. **Data collection / storage reliability** — VPS, mount, persistence (`app/screaner_b_o.py`). Current reliability priority.
-2. **Model** — build and validate the strategy on **simulated historical runs** only (`model.ipynb`, gear ladder in `docs/strategy-gears.md`: **1.0** closed → **1.5** regime screener → **2** multi-coin fixed model → **2.5** size policy → **3** parameter search on anomaly episodes). Validation remains **backtest / historical simulation**, not live trading. An async live trading bot is **out of scope** for the model track.
-3. **Glue (future)** — one architecture joining collection, training history, live model metrics, and trades.
+2. **Model** — build and validate the strategy on **simulated historical runs** only (`model.ipynb`, gear ladder in `docs/strategy-gears.md`: **1.0** closed → **1.5** regime screener → **2** multi-coin fixed model **closed (contour; 2.2 out of scope)** → **2.2** stricter stats / C/D → **2.5** size policy → **3** parameter search on anomaly episodes). Validation remains **backtest / historical simulation**, not live trading. An async live trading bot is **out of scope** for the model track.
+3. **Glue** — architecture joining collection, model, and trades. Spec: `docs/b-v0-block-diagram.md`. Track 3 may implement a **live VPS stub bot** in `app/bot/**` (not `private/`) that must not interfere with the D collector. **B-private** is unlocked (2026-08-18) in `app/bot/private/**`: testnet/demo first, live orders after an explicit live gate. Private APIs stay out of the collector. Starters: `docs/b-bot-starter-prompt.md`, `docs/b-private-starter-prompt.md`.
 
 Strategy documentation does not replace the storage-reliability priority. Live-bot integration belongs to track 3; gear 1.0 closure was simulator-only.
 
