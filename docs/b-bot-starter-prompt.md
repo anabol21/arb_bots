@@ -51,6 +51,10 @@ fee, abort.
 - find по /data/live и /data/bars не показывает файлы бота;
 - в журнале dual-leg would_send с полными ts; send нет.
 
+Текущий canary: spread-bbot-gear2 / /data/bbot-gear2; GREEN закрыт 2026-08-30.
+Дальше — live через B-private orchestrator, не testnet. Этот промпт — исторический
+чат stub (/data/bbot, без send); не считать spread-bbot.service / гир 1.0 живым unit.
+
 Первый шаг: зафиксировать манифест изоляции путей/unit, затем минимальный
 async runtime + stub журнал на 1–2 крипто-парах, не на всём рынке.
 Отчёт в 8 блоках. Не объявлять, что бот не мешает D, пока Validation не

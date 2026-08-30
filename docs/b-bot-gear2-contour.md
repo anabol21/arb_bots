@@ -4,8 +4,16 @@
 
 Этот live-data эксперимент собирает dual-leg журнал `would_send=true`, `send=false`
 на четырёх монетах с Arm A и глобальным `K=1`. Он **не** является штампом
-[`gear-2-close-20260825.md`](gear-2-close-20260825.md) (all-crypto, пороги 0.5)
-и не доказательство готовности к live send.
+[`gear-2-close-20260825.md`](gear-2-close-20260825.md) (all-crypto, пороги 0.5).
+
+**GREEN закрыт 2026-08-30.** GREEN измерил 24h процесс, `K=1`, stub dual-leg,
+`send=false` и изоляцию от D. GREEN **не** измерил fill≠L1, ACK, venue minQty
+и live PnL. GREEN ≠ разрешение на send.
+
+Следующий разрешённый шаг B — live send на **этом же** контуре (не testnet,
+не полный пул, не гиры 2.5/3). Отдельный live broker; `StubBroker` не
+становится sender. Код `make_broker()` по-прежнему отказывает `VENUE=live` /
+`LIVE_ORDERS=1`, пока не будет явного патча + Review Critic.
 
 ## Профиль (зафиксированный контракт)
 
@@ -20,7 +28,7 @@
 | `Trade_Lat` | 100 ms | |
 | Volume / freshness | выкл. | |
 | Latency caps | OKX 54 ms, Bybit 35 ms | gear1 40/25 |
-| Broker | stub dual-leg | private send |
+| Broker (GREEN soak) | stub dual-leg | live send |
 
 Канон elif-цепочки: [`research/gear2_backtest.py`](../research/gear2_backtest.py).
 Streaming-порт: [`app/policy/gear2_market_manager.py`](../app/policy/gear2_market_manager.py).
@@ -39,57 +47,69 @@ Streaming-порт: [`app/policy/gear2_market_manager.py`](../app/policy/gear2_m
 Сериализация решений: один `asyncio.Lock` на все монеты; `ordering_key` = `MarketState.seq`.
 Restart читает `held_coin` из `position.json` / `pending.json` и не открывает второй слот.
 
-## GREEN (24h soak)
+## GREEN (критерии и закрытие)
 
 GREEN только если одновременно:
 
 1. Процесс непрерывно прошёл 24 часа (нет crash loop).
 2. Collector остался `active`; его `NRestarts` не вырос из-за бота.
-3. `K=1`: нет перекрывающихся позиций/pending.
-4. Каждый intent имеет две terminal-ноги; все `send=false`.
+3. `K=1`: нет перекрывающихся позиций/pending. Открытый слот на отметке 24h — OK;
+   не требовать, чтобы каждый цикл был закрыт.
+4. Каждый **записанный** intent имеет две terminal-ноги (`filled` или `aborted`);
+   все `send=false`.
 5. Config в журнале: `0.02/0.02/0.02/0.02`, MA 10s, четыре монеты.
 6. Нет файлов бота в деревьях D.
 7. Журнал читается локальным Plotly-разбором.
 
-Малое число или отсутствие сделок — наблюдение, не автоматический FAIL механики.
+Малое число или отсутствие сделок по монете — наблюдение, не автоматический FAIL
+механики.
 
 Проверка: `python3 validation/check_bbot_gear2.py --data-root /data/bbot-gear2`.
 
-## После GREEN: только private testnet/demo
-
-`StubBroker` не превращается в sender. Монтирование: `BBOT_BROKER=private_testnet`,
-`VENUE=testnet`, `LIVE_ORDERS=0`. Лестница: read-only auth → одна нога → dual-leg/abort.
-Live send требует отдельной явной фразы пользователя, Review Critic и Host Ops.
-
-Лестница после GREEN (ещё не исполняется этим unit’ом; soak держит `BBOT_BROKER=stub`):
-
-1. `BBOT_BROKER=private_testnet`, `VENUE=testnet`, `LIVE_ORDERS=0`, отдельный secret file, журнал `/data/bbot/private/`.
-2. Read-only auth / balance.
-3. Одна минимальная нога place/ack/cancel-or-fill.
-4. Controlled dual-leg / abort.
-5. B Private Validator + D-isolation review.
-
-`make_broker()` уже отказывает `VENUE=live` и `LIVE_ORDERS=1`. Непрерывный private systemd на этом этапе не запускается.
-
-## Soak start (VPS)
+### Stamp GREEN closed
 
 | | |
 |--|--|
 | Host | `root@38.180.94.108` |
-| Start (UTC) | 2026-08-28 15:44:28 (порог 0.1; сделок не было) |
-| Restart (UTC) | 2026-08-29 11:10:01 — порог `0.02`; часы GREEN с этого рестарта |
-| Collector baseline | PID 902378, `NRestarts=0`, active since 2026-08-20 13:08:32 UTC |
-| Unit | `spread-bbot-gear2.service` (disabled, started manually) |
-| Backup timer | installed, **not** enabled |
+| 0.02 restart (UTC) | 2026-08-29 11:10:01 |
+| GREEN closed | ~2026-08-30 14:25 MSK (~11:25 UTC), ≈24.25 h |
+| Gear2 unit | PID **1650273**, `NRestarts=0` |
+| Collector | PID **902378**, `NRestarts=0`, без изменений |
+| Intents | 11 would_send, все `send=false`, `K=1` без overlap |
+| ETH | 4 завершённых dual-leg цикла + 1 open short на отметке GREEN (слот busy часами — ожидаемо) |
+| BTC | 2 `open_long` abort `okx_qty_below_min` при notional 100 |
+| SOL / XRP | 0 intents — наблюдение, не баг |
+| D trees | файлов bbot нет |
 
-Canary (2026-08-28 ~16:05 UTC, ~20 min): unit active, same PID 1596629, `NRestarts=0`;
-collector PID 902378 / `NRestarts=0` unchanged; 8 WS subscribed (BTC/ETH/SOL/XRP);
-accepted ≈ 244k, `sup_stale=0`, disconnects=0; RSS ≈ 28 MiB, FD=15, CPU ≈ 13%;
-D-tree bbot names=0. `raw` signals observed, zero terminal intents yet (not FAIL).
+Первый soak 2026-08-28 15:44:28 UTC (порог 0.1) сделок не дал и **не** является
+часами этого GREEN. Часы GREEN — только с рестарта 0.02.
 
-GREEN 24h soak is running. Do not stop collector. After 2026-08-29 15:44:28 UTC:
+Soak **не** «идёт». Этот документ больше не содержит команду stop после
+2026-08-29 15:44:28 UTC (это были брошенные часы 0.1).
 
-```bash
-systemctl stop spread-bbot-gear2.service   # only the would_send unit
-python3 validation/check_bbot_gear2.py --data-root /data/bbot-gear2
-```
+## После GREEN: live send на том же контуре (план, не исполнение)
+
+Лестница private testnet/demo как обязательный гейт **отменена** (2026-08-25:
+testnet API не держался). Override 2026-08-30: следующий шаг B — **realnet live
+send** на том же would_send контуре. Не testnet, не полный пул, не гиры 2.5/3,
+не frozen 0.4/0. Этот раздел — locked plan. Код и unit’ы этим документом не
+меняются. GREEN ≠ разрешение на send.
+
+1. Не ставить `send=true` на работающем stub. `StubBroker` не sender.
+2. Отдельный live broker через `app/bot/broker.py` / `app/bot/private`.
+   `make_broker()` сейчас принимает только `stub|private_testnet` и отказывает
+   `VENUE=live` / `LIVE_ORDERS=1`. Снять отказ можно только явным патчем +
+   Review Critic, не env-хаком. Этот docs-PR отказ **не** снимает.
+3. Та же политика: `0.02`×4, MA 10s, Arm A, `K=1`, BTC/ETH/SOL/XRP,
+   `Trade_Lat=100`. Unit `spread-bbot-gear2`, данные `/data/bbot-gear2`.
+   Не 337-pair WS.
+4. Жёсткий notional cap. BTC @ 100 USDT уже дважды упёрся в OKX minQty —
+   первый live либо поднимает размер до minQty, либо не шлёт BTC.
+5. Журнал обязан различать would_send vs send, ack, fill vs L1, abort.
+6. Деплой: никогда не stop/restart collector или compactor. Canary 15–30 мин,
+   затем 24h только если PID/`NRestarts` collector не изменились.
+7. ETH, держащий слот `K=1` часами (SOL/XRP молчат), — ожидаемо.
+
+Непрерывный private systemd и live send этим документом не запускаются.
+Нужны отдельная явная фраза пользователя, Review Critic и Host Ops на гейте
+первой live-заявки.

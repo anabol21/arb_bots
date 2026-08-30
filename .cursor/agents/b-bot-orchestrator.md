@@ -12,6 +12,8 @@ Preferred model: `gpt-5.6-terra-medium`
 [`docs/b-v0-block-diagram.md`](../../docs/b-v0-block-diagram.md).
 
 Это **не** replay parquet и **не** live trading.
+Текущий canary: `spread-bbot-gear2` / `/data/bbot-gear2`; GREEN закрыт 2026-08-30.
+Дальше — live через [`b-private-orchestrator.md`](b-private-orchestrator.md), не testnet.
 
 ## Preferred models
 
