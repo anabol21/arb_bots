@@ -1,0 +1,28 @@
+# Isolated Gear-2 would_send backup transfer (oneshot).
+# Do not install or overwrite any collector / D backup unit or spread-bbot backup.
+# Remote prefix is spread-bbot-gear2 only; never spread-compacted or D lock.
+
+[Unit]
+Description=Spread B-bot Gear2 backup transfer (one-shot, isolated from D)
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=root
+WorkingDirectory=/root/spread_staging
+Environment=BBOT_DATA_ROOT=/data/bbot-gear2
+Environment=BBOT_RCLONE_BIN=/opt/rclone-1.74.4/rclone
+Environment=BBOT_RCLONE_REMOTE=backup1tb
+Environment=BBOT_RCLONE_PATH=spread-bbot-gear2
+Environment=BBOT_BACKUP_LOCK=/run/spread-bbot-gear2-backup.lock
+Environment=BACKUP_SFTP_KEY_PATH=/root/.ssh/id_ed25519_uploader
+# NEVER BACKUP_RCLONE_PATH=spread-compacted
+# NEVER BACKUP_TRANSFER_LOCK_PATH=/run/spread-backup.lock
+ExecStartPre=/usr/bin/mkdir -p /var/log/spread
+ExecStart=/root/venv/bin/python -m app.bot.backup
+StandardOutput=append:/var/log/spread/bbot-gear2-backup-transfer.log
+StandardError=append:/var/log/spread/bbot-gear2-backup-transfer.log
+Nice=10
+MemoryMax=256M
+ReadWritePaths=/data/bbot-gear2 /var/log/spread /run
+InaccessiblePaths=/data/live /data/bars /data/compacted /data/spool

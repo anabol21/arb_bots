@@ -1,0 +1,18 @@
+# Isolated B-bot backup transfer timer.
+# Do not install or overwrite any collector / D backup timer.
+# Drives only spread-bbot-backup-transfer.service (never D backup).
+# Do not systemctl enable without a Validation snapshot of collector NRestarts.
+# This file is not enabled on the VPS by creating it in the repo.
+
+[Unit]
+Description=Run spread B-bot backup transfer every 5 minutes
+
+[Timer]
+OnBootSec=190s
+OnUnitActiveSec=5min
+AccuracySec=30s
+Persistent=true
+Unit=spread-bbot-backup-transfer.service
+
+[Install]
+WantedBy=timers.target

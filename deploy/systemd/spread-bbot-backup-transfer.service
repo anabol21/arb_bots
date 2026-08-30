@@ -1,0 +1,30 @@
+# Isolated B-bot backup transfer (oneshot).
+# Do not install or overwrite any collector / D backup unit.
+# Remote prefix is spread-bbot only; never spread-compacted or D lock.
+# Do not systemctl enable without a Validation snapshot of collector NRestarts.
+# This file is not enabled on the VPS by creating it in the repo.
+
+[Unit]
+Description=Spread B-bot backup transfer (one-shot, isolated from D)
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=root
+WorkingDirectory=/root/spread_staging
+Environment=BBOT_DATA_ROOT=/data/bbot
+Environment=BBOT_RCLONE_BIN=/opt/rclone-1.74.4/rclone
+Environment=BBOT_RCLONE_REMOTE=backup1tb
+Environment=BBOT_RCLONE_PATH=spread-bbot
+Environment=BBOT_BACKUP_LOCK=/run/spread-bbot-backup.lock
+Environment=BACKUP_SFTP_KEY_PATH=/root/.ssh/id_ed25519_uploader
+# NEVER BACKUP_RCLONE_PATH=spread-compacted
+# NEVER BACKUP_TRANSFER_LOCK_PATH=/run/spread-backup.lock
+ExecStartPre=/usr/bin/mkdir -p /var/log/spread
+ExecStart=/root/venv/bin/python -m app.bot.backup
+StandardOutput=append:/var/log/spread/bbot-backup-transfer.log
+StandardError=append:/var/log/spread/bbot-backup-transfer.log
+Nice=10
+MemoryMax=256M
+ReadWritePaths=/data/bbot /var/log/spread /run
+InaccessiblePaths=/data/live /data/bars /data/compacted /data/spool

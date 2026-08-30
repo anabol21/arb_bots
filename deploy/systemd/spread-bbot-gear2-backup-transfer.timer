@@ -1,0 +1,16 @@
+# Isolated Gear-2 would_send backup transfer timer.
+# Do not install or overwrite any collector / D backup timer.
+# Do not systemctl enable without a Validation snapshot of collector NRestarts.
+
+[Unit]
+Description=Run spread B-bot Gear2 backup transfer every 5 minutes
+
+[Timer]
+OnBootSec=200s
+OnUnitActiveSec=5min
+AccuracySec=30s
+Persistent=true
+Unit=spread-bbot-gear2-backup-transfer.service
+
+[Install]
+WantedBy=timers.target

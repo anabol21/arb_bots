@@ -15,6 +15,10 @@ Primary ownership:
 - Model Simulator Agent: `model.ipynb`, model modules, gear meaning in `docs/strategy-gears.md`.
 - Integration Validator Agent: independent model regression; does not implement the feature.
 - Review Critic Agent: independent design/patch review; does not implement the patch.
+- B Stub Runtime Agent: `app/bot/**` except `app/bot/private/**`, live async stub bot, `/data/bbot` ledger.
+- B Stub Validator Agent: stub isolation vs D; does not implement.
+- B Private Runtime Agent: `app/bot/private/**` only; testnet then live send.
+- B Private Validator Agent: venue, secrets, D isolation; does not implement.
 - Text Stylist Agent: wording and structure in `docs/*`; does not alter technical meaning.
 
 Rules:
@@ -25,5 +29,7 @@ Rules:
 - Model changes flow Model Simulator → Integration Validator.
 - Storage changes flow Runtime Storage → Review Critic → Validation.
 - Shared docs require a single semantic owner; Text Stylist runs only after meaning is fixed.
-- Frozen ingest, parsing, spread calculation, and trading logic require explicit user approval.
-- Track 3 has no implementation agent until a glue specification is approved.
+- Frozen ingest, parsing, spread calculation, and live order routing require explicit user approval.
+- Track 3 stub-only live bot: B Stub Runtime implements `app/bot/**` except `private/`; Model Simulator owns portable policy; Runtime Storage may own only `spread-bbot.service` and `/data/bbot` paths. No private APIs in the collector, no writes into D trees.
+- Track 3 B-private (unlock 2026-08-18): B Private Runtime owns `app/bot/private/**`. Testnet/demo first. Live send only after testnet evidence and an explicit user phrase. Live risk cap ≈ 100 USD per exchange.
+- Host Ops agent (VPS load, extra processes, bot logs vs host) is deferred until the first live (non-testnet) order in B-private. Do not create it for stub or testnet.

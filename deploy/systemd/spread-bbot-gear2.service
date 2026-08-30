@@ -1,0 +1,45 @@
+# Isolated Gear-2 would_send stub unit.
+# Do not install or overwrite collector / D storage units or spread-bbot.service.
+# Paths and locks are BBOT-gear2 only (/data/bbot-gear2, never D trees, never /data/bbot).
+# Do not systemctl enable without a Validation snapshot of collector NRestarts.
+# This file is not enabled on the VPS by creating it in the repo.
+
+[Unit]
+Description=Spread B-bot Gear2 would_send stub (isolated from collector)
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=300
+StartLimitBurst=5
+# Do NOT After= or BindsTo= spread-collector
+# Create /data/bbot-gear2 on the host before first start: ReadWritePaths
+# requires the directory to exist before namespace setup.
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/root/spread_staging
+Environment=BBOT_DATA_ROOT=/data/bbot-gear2
+Environment=BBOT_LOG_PATH=/var/log/spread/bbot-gear2.log
+Environment=BBOT_COINS=BTC,ETH,SOL,XRP
+Environment=BBOT_MODE=policy
+Environment=BBOT_PROFILE=gear2_would_send
+Environment=BBOT_BROKER=stub
+Environment=BBOT_NOTIONAL_USDT=100
+Environment=BBOT_TRADE_LAT_MS=100
+# NO SPREAD_* vars, NO BACKUP_RCLONE_PATH=spread-compacted, NO API keys
+ExecStart=/root/venv/bin/python -m app.bot
+Restart=always
+RestartSec=5
+KillSignal=SIGTERM
+TimeoutStopSec=30
+StandardOutput=append:/var/log/spread/bbot-gear2.log
+StandardError=append:/var/log/spread/bbot-gear2.log
+MemoryMax=256M
+CPUQuota=20%
+LimitNOFILE=4096
+Nice=10
+ReadWritePaths=/data/bbot-gear2 /var/log/spread
+InaccessiblePaths=/data/live /data/bars /data/compacted /data/spool
+
+[Install]
+WantedBy=multi-user.target

@@ -9,7 +9,7 @@ Work belongs to one functional track:
 
 1. **Collection and storage** — `app/screaner_b_o.py`, schema, persistence, VPS, mount, compaction, backup. Current priority.
 2. **Historical model** — `model.ipynb` and `docs/strategy-gears.md`. Simulation only.
-3. **Glue** — future architecture joining collection, model metrics, and trades. Specification only until explicitly opened.
+3. **Glue** — architecture joining collection, model, and trades. Spec: `docs/b-v0-block-diagram.md`. Unlocked: live VPS stub bot in `app/bot/**` (no D paths); B-private in `app/bot/private/**` (testnet first, live orders after an explicit live gate). Private APIs stay out of `app/screaner_b_o.py`.
 
 Before acting:
 
@@ -23,7 +23,8 @@ Frozen unless explicitly unlocked:
 - WebSocket ingest
 - exchange parsing
 - spread calculation
-- trading logic
+- trading logic inside `app/screaner_b_o.py`
+- live order routing and private trading APIs **outside** `app/bot/private/**` (B-private chat: testnet first; live send needs an explicit user phrase)
 
 Environment claims must distinguish local development, VPS runtime, and mounted remote storage.
 

@@ -11,14 +11,15 @@
 - Основной сборщик на VPS: `app/screaner_b_o.py`.
 - Локальный облегчённый сборщик: `app/screaner_local_lean.py`; он не доказывает корректность производственного контура.
 - Текущий приоритет: надёжность сбора, хранения и восстановления данных.
-- WebSocket ingest, парсинг бирж, расчёт спреда и торговая логика заморожены без явного разрешения пользователя.
+- WebSocket ingest, парсинг бирж, расчёт спреда и торговая логика в collector заморожены без явного разрешения пользователя.
+- Приватные заявки — только чат B-private (`app/bot/private/**`), лестница testnet→live.
 - Корректность хранения не считается доказанной без проверки на VPS и mounted storage.
 
 ## Функциональные треки
 
 1. **Сбор и хранение** — сборщик, схема данных, запись, spool, восстановление, compaction, backup, VPS и mount.
 2. **Модель** — исторический симулятор в `model.ipynb` и лестница гиров из `docs/strategy-gears.md`. Этот трек не включает живую торговлю.
-3. **Склейка, в будущем** — общая архитектура сбора, истории, метрик модели и сделок. Пока здесь разрешены только анализ и спецификация.
+3. **Склейка** — архитектура сбора, модели и сделок. Спека: [`docs/b-v0-block-diagram.md`](../../docs/b-v0-block-diagram.md). Чаты: **B-bot** (stub, [оркестратор](b-bot-orchestrator.md)) и **B-private** (testnet→live, [оркестратор](b-private-orchestrator.md), unlock [`docs/b-private-unlock.md`](../../docs/b-private-unlock.md)). Файлы чатов не пересекать.
 
 ## Состав агентов
 
@@ -30,16 +31,21 @@
 - **Model Simulator Agent** — реализует исторический симулятор и очередной разрешённый гир.
 - **Integration Validator Agent** — независимо проверяет изменения модели и регрессию эталона.
 - **Review Critic Agent** — независимо атакует рискованные решения и силу выводов.
+- **B Stub Runtime Agent** — живой `app/bot/**` на VPS: свои WS, stub dual-leg, журнал в `/data/bbot`.
+- **B Stub Validator Agent** — изоляция stub от D и полнота журнала заглушек; не реализует.
+- **B Private Runtime Agent** — `app/bot/private/**`: testnet/demo, затем live send по гейту.
+- **B Private Validator Agent** — venue, секреты не в логах, изоляция от D; не реализует.
 
 ### Необязательная роль
 
 - **Text Stylist Agent** — редактирует язык и структуру документов, но не меняет технический смысл.
 
-Не создавайте отдельные роли Strategy Critic, Code Quality, DevOps или Live Trading:
-- смысл и риски модели принадлежат Model Simulator Agent, а проверка — Integration Validator Agent;
-- качество границ и патча проверяют Orchestrator и Review Critic Agent;
-- `deploy/*`, compaction и backup делят Runtime Storage Agent и Validation Agent;
-- агент живой торговли появится только после отдельной спецификации и явного открытия трека 3.
+Не создавайте роли Strategy Critic, Code Quality, DevOps или общий Live Trading:
+- смысл модели — Model Simulator; проверка M — Integration Validator, если файл есть, иначе B Stub Validator на стыке M↔бот;
+- границы и патч — Orchestrator и Review Critic;
+- `deploy/*`, compaction и backup — Runtime Storage и Validation;
+- живые заявки — только **B Private Runtime** в `app/bot/private/**` по лестнице testnet→live; не в collector и не в `stub_broker.py`;
+- **Host Ops** (нагрузка VPS, чужие процессы, логи бота и хоста) — не заводить на stub и на testnet. Открывается на гейте **первой live-заявки** в чате B-private.
 
 ## Маршрутизация задач
 
@@ -66,10 +72,15 @@
 
 ### Склейка и живая торговля
 
-До отдельной спецификации Orchestrator и Review Critic Agent могут только:
-- описывать границы компонентов и данные между ними;
-- фиксировать угрозы, требования и критерии открытия трека;
-- запрещать реализацию order routing, приватных каналов и исполнения сделок.
+Два чата, разные файлы:
+
+**B-bot** (заглушки): [`.cursor/agents/b-bot-orchestrator.md`](b-bot-orchestrator.md), постановка [`docs/b-bot-starter-prompt.md`](../../docs/b-bot-starter-prompt.md). Без private и send.
+
+**B-private** (unlock 2026-08-18): [`.cursor/agents/b-private-orchestrator.md`](b-private-orchestrator.md), постановка [`docs/b-private-starter-prompt.md`](../../docs/b-private-starter-prompt.md).
+
+1. Код только `app/bot/private/**`. Политика по-прежнему Model Simulator, если понадобится стык.
+2. Лестница: секреты → testnet/demo read → testnet order → dual-leg → live только после фразы пользователя.
+3. Запрещено: collector, деревья D, live send до гейта, Host Ops-агент на testnet.
 
 ## Правила владения
 

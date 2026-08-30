@@ -1,0 +1,21 @@
+---
+description: Live B-bot on VPS with stub orders — isolate from D collector
+globs: app/bot/**/*.py,app/policy/**/*.py,docs/b-bot-*.md,deploy/systemd/spread-bbot.service,deploy/systemd/spread-bbot-gear2.service
+alwaysApply: false
+---
+
+# B-bot live stubs
+
+Real async process on the VPS. Orders are stubs. Not parquet replay.
+
+Isolation:
+
+- Own unit `spread-bbot.service`, log `/var/log/spread/bbot.log`, data `/data/bbot/`, backup `backup1tb:spread-bbot`.
+- Never write `/data/live`, `/data/bars`, `/data/compacted`, or D backup prefixes.
+- Never stop or edit `spread-collector`, D compactor, or D backup timers.
+- Do not start a second N=337 book fan-out; cap CPU/RSS/FD.
+- Bars: read-only `/data/bars` unless a separate decision adds bot bar sockets.
+
+Policy is a pure function. Stub broker logs dual-leg `would_send` with place/ack/fill. No private sockets, no keys, no send. No profitability claims.
+
+Handoff: Model Simulator owns policy; B Stub Runtime owns `app/bot/**`; Runtime Storage may add only the bot unit/paths; Validator + Validation prove D trees are untouched.
