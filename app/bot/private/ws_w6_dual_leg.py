@@ -464,9 +464,11 @@ def _runtime_for_plan(
 
 
 def _profile_for_plan(plan: OrderPlan) -> dict[str, Any]:
-    if str(plan.venue).startswith("okx"):
-        return resolve_w6_leg("okx")
-    return resolve_w6_leg("bybit")
+    """Return a profile matching the plan's actual symbol, not hardcoded TRUMP."""
+    base_profile = resolve_w6_leg("okx" if str(plan.venue).startswith("okx") else "bybit")
+    profile = dict(base_profile)
+    profile["symbol"] = str(plan.symbol)
+    return profile
 
 
 def _collect_open_latency(journal: PrivateJournalWriter) -> dict[str, Any]:
@@ -1290,6 +1292,11 @@ def run_w6_dual_leg(
             issue_approval=issue_approval,
         )
         if recovery_err is not None:
+            recovery_error_code = (
+                "recovery_blocked" if recovery_err == "recovery_blocked"
+                else "recovery_journal_failed" if recovery_err == "recovery_journal_failed"
+                else "unknown"
+            )
             return _report(
                 status=recovery_err,
                 n_requested=n_req,
@@ -1297,7 +1304,7 @@ def run_w6_dual_leg(
                 subscription_ready=True,
                 reseed_matched=True,
                 sends_blocked=True,
-                error_code="unknown",
+                error_code=recovery_error_code,
             )
 
         try:

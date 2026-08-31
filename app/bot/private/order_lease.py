@@ -186,6 +186,7 @@ class ReconstructedLeg:
     request_sent: bool = False
     terminal_state: Optional[str] = None
     side: str = "buy"
+    symbol: Optional[str] = None
 
 
 def _latest_post_dispatch_ambiguity(
@@ -259,6 +260,7 @@ def reconstruct_legs_from_events(
             request_sent="request_sent" in types,
             terminal_state=term_state,
             side=str(prepared.get("side") or "buy"),
+            symbol=str(prepared["symbol"]) if prepared.get("symbol") else None,
         )
     return out
 
@@ -358,13 +360,18 @@ class LeaseSupervisor:
             # Minimal plan stub for recovery — identity fields only.
             from app.bot.private.order_plan import OrderPlan as OP
 
+            stub_symbol = (
+                leg.symbol
+                if leg.symbol is not None
+                else ("BTCUSDT" if leg.venue == "bybit" else "BTC-USDT-SWAP")
+            )
             stub = OP(
                 intent_id=f"intent_recon_{op_id}",
                 leg_id=leg.leg_id or f"leg_{op_id}",
                 order_attempt_id=op_id,
                 venue="bybit_live" if leg.venue == "bybit" else "okx_live",
-                symbol="BTCUSDT" if leg.venue == "bybit" else "BTC-USDT-SWAP",
-                symbol_alias="BTCUSDT" if leg.venue == "bybit" else "BTC-USDT-SWAP",
+                symbol=stub_symbol,
+                symbol_alias=stub_symbol,
                 instrument_class="linear_perpetual",
                 side="buy",
                 mode="post_only_limit",
@@ -407,7 +414,10 @@ class LeaseSupervisor:
         from app.bot.private.order_plan import OrderPlan as OP
 
         venue_live = "bybit_live" if leg.venue == "bybit" else "okx_live"
-        symbol = "BTCUSDT" if leg.venue == "bybit" else "BTC-USDT-SWAP"
+        if leg.symbol is not None:
+            symbol = leg.symbol
+        else:
+            symbol = "BTCUSDT" if leg.venue == "bybit" else "BTC-USDT-SWAP"
         qty = "0.001" if leg.venue == "bybit" else "0.01"
         side = leg.side if leg.side in {"buy", "sell"} else "buy"
         return OP(
