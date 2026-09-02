@@ -1,0 +1,12 @@
+{
+  "intent_id": "intent-fixture-sol-001",
+  "signal_ts_ms": 1725000000000,
+  "place_ts_ms": 1725000000012,
+  "ack_ts_ms": 1725000000045,
+  "fill_ts_ms_okx": 1725000000118,
+  "fill_ts_ms_bybit": 1725000000095,
+  "dual_fill_complete_ms": 1725000000118,
+  "fill_source": "l1_at_send",
+  "pad_ms_default": 3000,
+  "event_date": "2024-08-30"
+}
