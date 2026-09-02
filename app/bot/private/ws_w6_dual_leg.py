@@ -1042,16 +1042,34 @@ def run_w6_dual_leg(
     fill_inject_fn: Optional[Any] = None,
     parallel_open: bool = False,
     send_gate: Optional[Any] = None,
+    warm_session: Optional[Any] = None,
 ) -> W6Report:
     """Execute n dual-leg market rounds (Bybit buy / OKX sell).
 
     Default is sequential: Bybit must fill before OKX is sent.
     ``parallel_open=True`` (W7) dispatches both WS places after a barrier.
+
+    When a process-lifetime ``warm_session`` is attached (or passed), the send
+    path reuses that private WS session: same ``run_id``, no per-signal
+    auth/subscribe/REST reseed handshake. Sockets are not closed on exit.
     """
+    from app.bot.private.ws_warm_session import (
+        PrivateWarmSession,
+        get_process_warm_session,
+    )
+
     e = dict(env if env is not None else os.environ)
     gate = send_gate if send_gate is not None else assert_ws_w6_send_gates
     open_mode = "parallel" if parallel_open else "sequential"
     dispatch_pairs: list[tuple[Optional[int], Optional[int]]] = []
+    session: Optional[PrivateWarmSession] = None
+    if warm_session is not None:
+        if not isinstance(warm_session, PrivateWarmSession):
+            raise TypeError("warm_session must be PrivateWarmSession")
+        session = warm_session
+    else:
+        session = get_process_warm_session()
+    retain_sockets = False
 
     def _latency() -> dict[str, Any]:
         payload = _collect_open_latency(j)
@@ -1079,29 +1097,31 @@ def run_w6_dual_leg(
 
     dual_base = _as_dual_baseline(baseline)
     root = data_root if data_root is not None else resolve_data_root(e)
-    j = journal if journal is not None else PrivateJournalWriter(
-        root, run_id=new_opaque_id("run")
-    )
 
-    if bybit_credentials is None or okx_credentials is None:
-        if not load_secrets:
-            return _report(
-                status="secrets_unavailable",
-                n_requested=n_req,
-                error_code="auth_unavailable",
-            )
+    if session is not None and not session._stopped:  # noqa: SLF001
         try:
-            secrets = load_live_secrets(e, require_complete=True)
-            if bybit_credentials is None:
-                bybit_credentials = _creds_from_live(secrets, "bybit")
-            if okx_credentials is None:
-                okx_credentials = _creds_from_live(secrets, "okx")
-        except (OSError, RuntimeError, ValueError, KeyError, TypeError):
+            session.ensure_ready()
+        except RuntimeError:
             return _report(
-                status="secrets_unavailable",
+                status="handshake_failed",
                 n_requested=n_req,
-                error_code="auth_unavailable",
+                error_code="auth_failed",
             )
+        if (
+            session.bybit_symbol != bybit_p["symbol"]
+            or session.okx_symbol != okx_p["symbol"]
+        ):
+            return _report(
+                status="plan_rejected",
+                n_requested=n_req,
+                error_code="invalid_request",
+            )
+        j = session.journal
+        bybit_credentials = session.bybit_credentials
+        okx_credentials = session.okx_credentials
+        bybit_runtime = session.bybit_runtime
+        okx_runtime = session.okx_runtime
+        retain_sockets = True
         if rest_order_recon is None:
             from app.bot.private.ws_w4_baseline import build_signed_rest_order_recon
 
@@ -1111,6 +1131,71 @@ def run_w6_dual_leg(
                 endpoints=endpoints_for_venue("live"),
                 require_position_flat=True,
             )
+    else:
+        session = None
+        j = journal if journal is not None else PrivateJournalWriter(
+            root, run_id=new_opaque_id("run")
+        )
+
+        if bybit_credentials is None or okx_credentials is None:
+            if not load_secrets:
+                return _report(
+                    status="secrets_unavailable",
+                    n_requested=n_req,
+                    error_code="auth_unavailable",
+                )
+            try:
+                secrets = load_live_secrets(e, require_complete=True)
+                if bybit_credentials is None:
+                    bybit_credentials = _creds_from_live(secrets, "bybit")
+                if okx_credentials is None:
+                    okx_credentials = _creds_from_live(secrets, "okx")
+            except (OSError, RuntimeError, ValueError, KeyError, TypeError):
+                return _report(
+                    status="secrets_unavailable",
+                    n_requested=n_req,
+                    error_code="auth_unavailable",
+                )
+            if rest_order_recon is None:
+                from app.bot.private.ws_w4_baseline import build_signed_rest_order_recon
+
+                rest_order_recon = build_signed_rest_order_recon(
+                    bybit_credentials=bybit_credentials,
+                    okx_credentials=okx_credentials,
+                    endpoints=endpoints_for_venue("live"),
+                    require_position_flat=True,
+                )
+
+        bybit_reseed = build_signed_rest_reseed(
+            exchange="bybit",
+            credentials=bybit_credentials,
+            endpoints=endpoints_for_venue("live"),
+            probe_fn=rest_probe_fn,
+        )
+        okx_reseed = build_signed_rest_reseed(
+            exchange="okx",
+            credentials=okx_credentials,
+            endpoints=endpoints_for_venue("live"),
+            probe_fn=rest_probe_fn,
+        )
+        bybit_runtime = PrivateStreamRuntime.create_gated(
+            exchange="bybit",
+            symbol_alias=bybit_p["symbol"],
+            journal=j,
+            credentials=bybit_credentials,
+            env=e,
+            rest_reseed=bybit_reseed,
+            profile_gate=gate,
+        )
+        okx_runtime = PrivateStreamRuntime.create_gated(
+            exchange="okx",
+            symbol_alias=okx_p["symbol"],
+            journal=j,
+            credentials=okx_credentials,
+            env=e,
+            rest_reseed=okx_reseed,
+            profile_gate=gate,
+        )
 
     try:
         assert_flat(
@@ -1137,37 +1222,6 @@ def run_w6_dual_leg(
             n_requested=n_req,
             error_code="invalid_request",
         )
-
-    bybit_reseed = build_signed_rest_reseed(
-        exchange="bybit",
-        credentials=bybit_credentials,
-        endpoints=endpoints_for_venue("live"),
-        probe_fn=rest_probe_fn,
-    )
-    okx_reseed = build_signed_rest_reseed(
-        exchange="okx",
-        credentials=okx_credentials,
-        endpoints=endpoints_for_venue("live"),
-        probe_fn=rest_probe_fn,
-    )
-    bybit_runtime = PrivateStreamRuntime.create_gated(
-        exchange="bybit",
-        symbol_alias=bybit_p["symbol"],
-        journal=j,
-        credentials=bybit_credentials,
-        env=e,
-        rest_reseed=bybit_reseed,
-        profile_gate=gate,
-    )
-    okx_runtime = PrivateStreamRuntime.create_gated(
-        exchange="okx",
-        symbol_alias=okx_p["symbol"],
-        journal=j,
-        credentials=okx_credentials,
-        env=e,
-        rest_reseed=okx_reseed,
-        profile_gate=gate,
-    )
 
     bybit_transport = bybit_place_override or _WsTradePlaceTransport(
         runtime=bybit_runtime, ack_timeout_sec=ack_timeout_sec
@@ -1212,48 +1266,54 @@ def run_w6_dual_leg(
     n_completed = 0
     n_aborted = 0
     try:
-        if (
-            bybit_private_socket is None
-            or bybit_trade_socket is None
-            or okx_private_socket is None
-            or okx_trade_socket is None
-        ):
-            return _report(
-                status="sockets_required",
-                n_requested=n_req,
-                error_code="transport_error",
-            )
-
-        bybit_runtime.bind_sockets(
-            private=bybit_private_socket, trade=bybit_trade_socket, env=e
-        )
-        okx_runtime.bind_sockets(
-            private=okx_private_socket, trade=okx_trade_socket, env=e
-        )
-        trade_bound = (
-            bybit_runtime.trade_socket is not None
-            and okx_runtime.trade_socket is not None
-        )
-
-        for runtime, exchange in ((bybit_runtime, "bybit"), (okx_runtime, "okx")):
-            hs_err = _handshake_private_and_trade(
-                runtime, exchange=exchange, ack_timeout_sec=ack_timeout_sec
-            )
-            if hs_err is not None:
-                status_map = {
-                    "auth_failed": "auth_failed",
-                    "venue_rejected": "subscribe_failed",
-                    "reseed_required": "reseed_required",
-                }
+        if session is None:
+            if (
+                bybit_private_socket is None
+                or bybit_trade_socket is None
+                or okx_private_socket is None
+                or okx_trade_socket is None
+            ):
                 return _report(
-                    status=status_map.get(hs_err, "handshake_failed"),
+                    status="sockets_required",
                     n_requested=n_req,
-                    trade_ws_bound=trade_bound,
-                    subscription_ready=hs_err not in {"auth_failed"},
-                    reseed_matched=False,
-                    sends_blocked=True,
-                    error_code="auth_failed" if "auth" in hs_err else "unknown",
+                    error_code="transport_error",
                 )
+
+            bybit_runtime.bind_sockets(
+                private=bybit_private_socket, trade=bybit_trade_socket, env=e
+            )
+            okx_runtime.bind_sockets(
+                private=okx_private_socket, trade=okx_trade_socket, env=e
+            )
+            trade_bound = (
+                bybit_runtime.trade_socket is not None
+                and okx_runtime.trade_socket is not None
+            )
+
+            for runtime, exchange in ((bybit_runtime, "bybit"), (okx_runtime, "okx")):
+                hs_err = _handshake_private_and_trade(
+                    runtime, exchange=exchange, ack_timeout_sec=ack_timeout_sec
+                )
+                if hs_err is not None:
+                    status_map = {
+                        "auth_failed": "auth_failed",
+                        "venue_rejected": "subscribe_failed",
+                        "reseed_required": "reseed_required",
+                    }
+                    return _report(
+                        status=status_map.get(hs_err, "handshake_failed"),
+                        n_requested=n_req,
+                        trade_ws_bound=trade_bound,
+                        subscription_ready=hs_err not in {"auth_failed"},
+                        reseed_matched=False,
+                        sends_blocked=True,
+                        error_code="auth_failed" if "auth" in hs_err else "unknown",
+                    )
+        else:
+            trade_bound = (
+                bybit_runtime.trade_socket is not None
+                and okx_runtime.trade_socket is not None
+            )
 
         inst_err = _bind_okx_inst_id(
             runtime=okx_runtime,
@@ -1863,13 +1923,14 @@ def run_w6_dual_leg(
             latency_ms=latency,
         )
     finally:
-        for runtime in (bybit_runtime, okx_runtime):
-            for sock in (runtime.private_socket, runtime.trade_socket):
-                if sock is not None:
-                    try:
-                        sock.close()
-                    except Exception:  # noqa: BLE001
-                        pass
+        if not retain_sockets:
+            for runtime in (bybit_runtime, okx_runtime):
+                for sock in (runtime.private_socket, runtime.trade_socket):
+                    if sock is not None:
+                        try:
+                            sock.close()
+                        except Exception:  # noqa: BLE001
+                            pass
 
 
 def parse_w6_cli_args(argv: Sequence[str]) -> tuple[Optional[int], bool]:
@@ -1998,7 +2059,17 @@ def main_ws_w6_dual_leg(
     env: Optional[Mapping[str, str]] = None,
     bindings: Optional[W6RuntimeBindings] = None,
 ) -> int:
-    """CLI entry for ``--ws-w6-dual-leg --w6-n=N --w6-approve-one-shot``."""
+    """CLI entry for ``--ws-w6-dual-leg --w6-n=N --w6-approve-one-shot``.
+
+    Production path warms private WS once at process entry (same policy as
+    public L1 keep-alive), then reuses that session for the send.
+    """
+    from app.bot.private.ws_warm_session import (
+        WarmSocketBundle,
+        clear_process_warm_session,
+        start_warm_private_session,
+    )
+
     argv = list(argv or [])
     e = dict(env if env is not None else os.environ)
     n, approve_one_shot = parse_w6_cli_args(argv)
@@ -2070,21 +2141,69 @@ def main_ws_w6_dual_leg(
                 )
                 return 2
 
+        bybit_p = resolve_w6_leg("bybit")
+        okx_p = resolve_w6_leg("okx")
+        initial = WarmSocketBundle(
+            bybit_private=active.bybit_private_socket,
+            bybit_trade=active.bybit_trade_socket,
+            okx_private=active.okx_private_socket,
+            okx_trade=active.okx_trade_socket,
+        )
+        held: dict[str, Optional[WarmSocketBundle]] = {"bundle": initial}
+
+        def _provider() -> WarmSocketBundle:
+            if held["bundle"] is not None:
+                out = held["bundle"]
+                held["bundle"] = None
+                return out
+            from app.bot.private.ws_private import trade_ws_url_for_exchange
+            from app.bot.private.ws_socket import open_private_socket
+
+            ep = endpoints_for_venue("live")
+            return WarmSocketBundle(
+                bybit_private=open_private_socket(ep.bybit_private_ws),
+                bybit_trade=open_private_socket(
+                    trade_ws_url_for_exchange("bybit", ep)
+                ),
+                okx_private=open_private_socket(ep.okx_private_ws),
+                okx_trade=open_private_socket(
+                    trade_ws_url_for_exchange("okx", ep)
+                ),
+            )
+
+        try:
+            warm = start_warm_private_session(
+                env=e,
+                bybit_credentials=active.bybit_credentials,
+                okx_credentials=active.okx_credentials,
+                socket_provider=_provider,
+                bybit_symbol=bybit_p["symbol"],
+                okx_symbol=okx_p["symbol"],
+                profile_gate=assert_ws_w6_send_gates,
+                attach=True,
+            )
+        except (RuntimeError, WsProfileGateError, OSError, ValueError, TypeError):
+            _print(
+                W6Report(
+                    status="handshake_failed",
+                    n_requested=n,
+                    error_code="auth_failed",
+                )
+            )
+            return 2
+
         report = run_w6_dual_leg(
             n=n,
             env=e,
             metadata_provider=active.metadata_provider,
             position_mode_provider=active.position_mode_provider,
             baseline=active.baseline,
-            bybit_private_socket=active.bybit_private_socket,
-            bybit_trade_socket=active.bybit_trade_socket,
-            okx_private_socket=active.okx_private_socket,
-            okx_trade_socket=active.okx_trade_socket,
             bybit_credentials=active.bybit_credentials,
             okx_credentials=active.okx_credentials,
             load_secrets=False,
             issue_approval=True,
             rest_order_recon=active.rest_order_recon,
+            warm_session=warm,
         )
         _print(report)
         if report.status == "ok":
@@ -2097,6 +2216,138 @@ def main_ws_w6_dual_leg(
             return 1
         return 2
     finally:
+        clear_process_warm_session(stop=True)
+        if owned:
+            unbind_socket_factory()
+            assert_default_entrypoint_cannot_transport()
+
+
+def main_ws_warm_session(
+    argv: Optional[Sequence[str]] = None,
+    *,
+    env: Optional[Mapping[str, str]] = None,
+    bindings: Optional[W6RuntimeBindings] = None,
+) -> int:
+    """CLI: ``--ws-warm-session`` — connect private WS at startup, no send."""
+    from app.bot.private.ws_gates import assert_ws_warm_private_gates
+    from app.bot.private.ws_warm_session import (
+        WarmSocketBundle,
+        clear_process_warm_session,
+        start_warm_private_session,
+    )
+
+    argv = list(argv or [])
+    e = dict(env if env is not None else os.environ)
+    hold_sec = 0.0
+    for arg in argv:
+        if arg.startswith("--warm-hold-sec="):
+            try:
+                hold_sec = float(arg.split("=", 1)[1].strip())
+            except ValueError:
+                hold_sec = -1.0
+
+    def _print(payload: Mapping[str, Any]) -> None:
+        print(json.dumps(dict(payload), ensure_ascii=False, indent=2, sort_keys=True))
+
+    gate = assert_ws_w6_send_gates
+    try:
+        gate(e)
+    except WsProfileGateError:
+        try:
+            assert_ws_warm_private_gates(e)
+            gate = assert_ws_warm_private_gates
+        except WsProfileGateError:
+            _print(
+                {
+                    "status": "rejected_before_socket",
+                    "error_code": "invalid_request",
+                    "orders_sent": 0,
+                }
+            )
+            return 1
+
+    if hold_sec < 0:
+        _print({"status": "rejected_before_socket", "error_code": "invalid_request"})
+        return 1
+
+    assert_default_entrypoint_cannot_transport()
+    owned = bindings is None
+    active: Optional[W6RuntimeBindings] = bindings
+    try:
+        if active is None:
+            try:
+                assert_no_default_ws_socket()
+                active = open_w6_production_bindings(env=e)
+            except Exception:  # noqa: BLE001
+                unbind_socket_factory()
+                _print({"status": "bind_failed", "error_code": "transport_error"})
+                return 2
+
+        bybit_p = resolve_w6_leg("bybit")
+        okx_p = resolve_w6_leg("okx")
+        initial = WarmSocketBundle(
+            bybit_private=active.bybit_private_socket,
+            bybit_trade=active.bybit_trade_socket,
+            okx_private=active.okx_private_socket,
+            okx_trade=active.okx_trade_socket,
+        )
+        held: dict[str, Optional[WarmSocketBundle]] = {"bundle": initial}
+
+        def _provider() -> WarmSocketBundle:
+            if held["bundle"] is not None:
+                out = held["bundle"]
+                held["bundle"] = None
+                return out
+            from app.bot.private.ws_private import trade_ws_url_for_exchange
+            from app.bot.private.ws_socket import open_private_socket
+
+            ep = endpoints_for_venue("live")
+            return WarmSocketBundle(
+                bybit_private=open_private_socket(ep.bybit_private_ws),
+                bybit_trade=open_private_socket(
+                    trade_ws_url_for_exchange("bybit", ep)
+                ),
+                okx_private=open_private_socket(ep.okx_private_ws),
+                okx_trade=open_private_socket(
+                    trade_ws_url_for_exchange("okx", ep)
+                ),
+            )
+
+        try:
+            warm = start_warm_private_session(
+                env=e,
+                bybit_credentials=active.bybit_credentials,
+                okx_credentials=active.okx_credentials,
+                socket_provider=_provider,
+                bybit_symbol=bybit_p["symbol"],
+                okx_symbol=okx_p["symbol"],
+                profile_gate=gate,
+                attach=True,
+            )
+        except Exception:  # noqa: BLE001
+            _print({"status": "handshake_failed", "error_code": "auth_failed"})
+            return 2
+
+        _print(
+            {
+                "status": "ok",
+                "run_id": warm.run_id,
+                "ready": warm.is_ready(),
+                "handshake_count": warm._handshake_count,  # noqa: SLF001
+                "orders_sent": 0,
+                "note": (
+                    "private WS warmed at startup; l1_at_send fill timestamps "
+                    "are still not venue fills"
+                ),
+            }
+        )
+        if hold_sec > 0:
+            import time
+
+            time.sleep(hold_sec)
+        return 0
+    finally:
+        clear_process_warm_session(stop=True)
         if owned:
             unbind_socket_factory()
             assert_default_entrypoint_cannot_transport()
