@@ -463,11 +463,42 @@ def _runtime_for_plan(
     return bybit_runtime
 
 
-def _profile_for_plan(plan: OrderPlan) -> dict[str, Any]:
-    if str(plan.venue).startswith("okx"):
-        return resolve_w6_leg("okx")
-    return resolve_w6_leg("bybit")
+def _profile_for_plan(
+    plan: OrderPlan,
+    *,
+    bybit_profile: Mapping[str, Any],
+    okx_profile: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Return this dispatch's venue profile for the lease's venue.
 
+    Do not copy ``plan.symbol`` onto the profile — that makes ``same_symbol`` a
+    tautology. Compare the reconstructed lease to the dispatch legs instead.
+    """
+    if str(plan.venue).startswith("okx"):
+        return dict(okx_profile)
+    return dict(bybit_profile)
+
+
+def _is_synthetic_exposure_plan(plan: OrderPlan) -> bool:
+    return str(plan.order_attempt_id).startswith("exposure_flatten_")
+
+
+def _clear_synthetic_exposure_lease(lease: Any) -> None:
+    """In-memory clear only — synthetic ops have no order_prepared to reconcile."""
+    lease.mark_terminal()
+
+
+def _commit_or_clear_rest_flat(
+    *,
+    journal: PrivateJournalWriter,
+    lease: Any,
+    plan: OrderPlan,
+    scope: str = "post_dispatch_ambiguity",
+) -> None:
+    if _is_synthetic_exposure_plan(plan):
+        _clear_synthetic_exposure_lease(lease)
+        return
+    _commit_rest_flat_matched(journal=journal, lease=lease, plan=plan, scope=scope)
 
 def _collect_open_latency(journal: PrivateJournalWriter) -> dict[str, Any]:
     events = [
@@ -839,6 +870,9 @@ def _recover_inflight_w6(
     vault: ApprovalVault,
     env: Mapping[str, str],
     issue_approval: bool,
+    bybit_profile: Mapping[str, Any],
+    okx_profile: Mapping[str, Any],
+    flatten_only: bool = False,
 ) -> Optional[str]:
     unresolved = [
         lease
@@ -853,16 +887,71 @@ def _recover_inflight_w6(
     observe_sec = max(0.05, min(float(terminal_wait_sec), 5.0))
     for lease in unresolved:
         plan = lease.plan
-        profile = _profile_for_plan(plan)
+        profile = _profile_for_plan(
+            plan, bybit_profile=bybit_profile, okx_profile=okx_profile
+        )
         runtime = _runtime_for_plan(
             plan, bybit_runtime=bybit_runtime, okx_runtime=okx_runtime
         )
         provider = bybit_provider if profile["exchange"] == "bybit" else okx_provider
+        # Compare reconstructed lease symbol to this dispatch's venue leg.
         same_symbol = str(plan.symbol) == str(profile["symbol"])
         sender._lease = lease  # noqa: SLF001
         if not same_symbol:
             sender.lease_supervisor.mark_process_sends_blocked()
             return "recovery_blocked"
+
+        # Synthetic restart leftover: no journal order_prepared/request_sent.
+        # Never journal.append reconciliation/terminal on these ids.
+        if _is_synthetic_exposure_plan(plan):
+            if flatten_only:
+                # This dispatch is the reduce-only close of the held dual —
+                # clear the in-memory block so close legs can place.
+                _clear_synthetic_exposure_lease(lease)
+                continue
+            try:
+                base_syn = baseline.check(
+                    exchange=profile["exchange"], symbol=profile["symbol"]
+                )
+            except BaselineError:
+                sender.lease_supervisor.mark_process_sends_blocked()
+                return "recovery_blocked"
+            if base_syn.ok:
+                _clear_synthetic_exposure_lease(lease)
+                continue
+            # Position still open on a normal W6 open sample — flatten via
+            # real attempt ids below; do not commit on the synthetic op.
+            if runtime.sends_blocked or runtime.reseed_required:
+                sender.lease_supervisor.mark_process_sends_blocked()
+                return "recovery_blocked"
+            if not issue_approval:
+                sender.lease_supervisor.mark_process_sends_blocked()
+                return "recovery_blocked"
+            transport = (
+                bybit_transport if profile["exchange"] == "bybit" else okx_transport
+            )
+            creds = bybit_creds if profile["exchange"] == "bybit" else okx_creds
+            st, _ = _flatten_venue(
+                sender=sender,
+                runtime=runtime,
+                provider=provider,
+                place_transport=transport,
+                vault=vault,
+                credentials=creds,
+                env=env,
+                metadata_provider=metadata_provider,
+                profile=profile,
+                dual_leg_id=plan.dual_leg_id,
+                journal=journal,
+                baseline=baseline,
+                terminal_wait_sec=float(terminal_wait_sec),
+                fill_inject_fn=None,
+                inject_kind="recovery_flatten",
+            )
+            if st != "ok":
+                return "recovery_blocked"
+            _clear_synthetic_exposure_lease(lease)
+            continue
 
         term: Optional[str] = None
         source: Optional[str] = None
@@ -886,14 +975,19 @@ def _recover_inflight_w6(
 
         if term is not None and source == "rest" and term in {"cancelled", "expired"}:
             try:
-                _commit_rest_flat_matched(journal=journal, lease=lease, plan=plan)
+                _commit_or_clear_rest_flat(journal=journal, lease=lease, plan=plan)
             except (
                 OSError,
                 RuntimeError,
                 ValueError,
                 TypeError,
                 JournalValidationError,
-            ):
+            ) as exc:
+                LOG.exception(
+                    "w6 recovery journal commit failed op=%s: %s",
+                    plan.order_attempt_id,
+                    exc,
+                )
                 sender.lease_supervisor.mark_process_sends_blocked()
                 return "recovery_journal_failed"
             continue
@@ -917,7 +1011,12 @@ def _recover_inflight_w6(
                 ValueError,
                 TypeError,
                 JournalValidationError,
-            ):
+            ) as exc:
+                LOG.exception(
+                    "w6 recovery stream terminal journal failed op=%s: %s",
+                    plan.order_attempt_id,
+                    exc,
+                )
                 sender.lease_supervisor.mark_process_sends_blocked()
                 return "recovery_journal_failed"
             if term == "filled" and not bool(plan.reduce_only):
@@ -936,14 +1035,21 @@ def _recover_inflight_w6(
         if base.ok:
             try:
                 if lease.state != LeaseState.TERMINAL:
-                    _commit_rest_flat_matched(journal=journal, lease=lease, plan=plan)
+                    _commit_or_clear_rest_flat(
+                        journal=journal, lease=lease, plan=plan
+                    )
             except (
                 OSError,
                 RuntimeError,
                 ValueError,
                 TypeError,
                 JournalValidationError,
-            ):
+            ) as exc:
+                LOG.exception(
+                    "w6 recovery flat-matched journal failed op=%s: %s",
+                    plan.order_attempt_id,
+                    exc,
+                )
                 sender.lease_supervisor.mark_process_sends_blocked()
                 return "recovery_journal_failed"
             continue
@@ -977,7 +1083,7 @@ def _recover_inflight_w6(
             return "recovery_blocked"
         if lease.state != LeaseState.TERMINAL:
             try:
-                _commit_rest_flat_matched(
+                _commit_or_clear_rest_flat(
                     journal=journal,
                     lease=lease,
                     plan=plan,
@@ -989,7 +1095,12 @@ def _recover_inflight_w6(
                 ValueError,
                 TypeError,
                 JournalValidationError,
-            ):
+            ) as exc:
+                LOG.exception(
+                    "w6 recovery post-flatten journal failed op=%s: %s",
+                    plan.order_attempt_id,
+                    exc,
+                )
                 sender.lease_supervisor.mark_process_sends_blocked()
                 return "recovery_journal_failed"
 
@@ -997,7 +1108,6 @@ def _recover_inflight_w6(
     if sender.lease_supervisor.has_blocking_lease():
         return "recovery_blocked"
     return None
-
 
 def _bind_okx_inst_id(
     *,
@@ -1042,11 +1152,18 @@ def run_w6_dual_leg(
     fill_inject_fn: Optional[Any] = None,
     parallel_open: bool = False,
     send_gate: Optional[Any] = None,
+    bybit_leg: Optional[Mapping[str, Any]] = None,
+    okx_leg: Optional[Mapping[str, Any]] = None,
+    flatten_only: bool = False,
 ) -> W6Report:
     """Execute n dual-leg market rounds (Bybit buy / OKX sell).
 
     Default is sequential: Bybit must fill before OKX is sent.
     ``parallel_open=True`` (W7) dispatches both WS places after a barrier.
+    ``flatten_only=True`` skips the pre-send flat gate so a held dual can close;
+    synthetic ``exposure_flatten_*`` leftovers are cleared without journal commit.
+    Optional ``bybit_leg`` / ``okx_leg`` override the immutable TRUMP defaults
+    (VPS Gear-2 live_broker may pass SOL natives).
     """
     e = dict(env if env is not None else os.environ)
     gate = send_gate if send_gate is not None else assert_ws_w6_send_gates
@@ -1068,8 +1185,8 @@ def run_w6_dual_leg(
     try:
         gate(e)
         n_req = assert_w6_n(int(n))
-        bybit_p = resolve_w6_leg("bybit")
-        okx_p = resolve_w6_leg("okx")
+        bybit_p = dict(bybit_leg) if bybit_leg is not None else resolve_w6_leg("bybit")
+        okx_p = dict(okx_leg) if okx_leg is not None else resolve_w6_leg("okx")
     except (WsProfileGateError, W6ProfileError, TypeError, ValueError):
         return _report(
             status="rejected_before_socket",
@@ -1112,17 +1229,18 @@ def run_w6_dual_leg(
                 require_position_flat=True,
             )
 
-    try:
-        assert_flat(
-            dual_base.check(exchange="bybit", symbol=bybit_p["symbol"])
-        )
-        assert_flat(dual_base.check(exchange="okx", symbol=okx_p["symbol"]))
-    except BaselineError:
-        return _report(
-            status="baseline_not_flat",
-            n_requested=n_req,
-            error_code="invalid_request",
-        )
+    if not flatten_only:
+        try:
+            assert_flat(
+                dual_base.check(exchange="bybit", symbol=bybit_p["symbol"])
+            )
+            assert_flat(dual_base.check(exchange="okx", symbol=okx_p["symbol"]))
+        except BaselineError:
+            return _report(
+                status="baseline_not_flat",
+                n_requested=n_req,
+                error_code="invalid_request",
+            )
 
     try:
         bybit_meta = metadata_provider.get(bybit_p["venue"], bybit_p["symbol"])
@@ -1288,8 +1406,18 @@ def run_w6_dual_leg(
             vault=vault,
             env=e,
             issue_approval=issue_approval,
+            bybit_profile=bybit_p,
+            okx_profile=okx_p,
+            flatten_only=bool(flatten_only),
         )
         if recovery_err is not None:
+            recovery_error_code = (
+                "recovery_blocked"
+                if recovery_err == "recovery_blocked"
+                else "recovery_journal_failed"
+                if recovery_err == "recovery_journal_failed"
+                else "unknown"
+            )
             return _report(
                 status=recovery_err,
                 n_requested=n_req,
@@ -1297,7 +1425,7 @@ def run_w6_dual_leg(
                 subscription_ready=True,
                 reseed_matched=True,
                 sends_blocked=True,
-                error_code="unknown",
+                error_code=recovery_error_code,
             )
 
         try:

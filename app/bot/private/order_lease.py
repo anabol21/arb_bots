@@ -186,6 +186,99 @@ class ReconstructedLeg:
     request_sent: bool = False
     terminal_state: Optional[str] = None
     side: str = "buy"
+    # Native venue symbol when known. Journal order_prepared stores symbol_alias
+    # only (schema extras); never invent BTC here when an alias is present.
+    symbol: Optional[str] = None
+    # Wall-clock of terminal_update (RFC3339 Z). Used to retire open duals
+    # when a later reduce-only flatten fills under a different dual_leg_id.
+    terminal_ts_utc: Optional[str] = None
+
+
+def venue_short_name(venue: str) -> str:
+    v = str(venue or "bybit").strip().lower()
+    if v.startswith("okx"):
+        return "okx"
+    return "bybit"
+
+
+def base_coin_from_native_symbol(symbol: Optional[str]) -> Optional[str]:
+    """Derive base coin from a venue-native or alias symbol. No coin hardcodes."""
+    if symbol is None:
+        return None
+    s = str(symbol).strip().upper()
+    if not s:
+        return None
+    for suffix in ("-USDT-SWAP", "-USDT-PERP", "-USDT"):
+        if s.endswith(suffix):
+            base = s[: -len(suffix)]
+            return base or None
+    if s.endswith("USDT") and "-" not in s:
+        base = s[: -len("USDT")]
+        return base or None
+    return s
+
+
+def exposure_net_key(
+    venue: str, symbol: Optional[str]
+) -> Optional[tuple[str, str]]:
+    """Netting key for open vs later flatten: (venue_short, base_coin)."""
+    coin = base_coin_from_native_symbol(symbol)
+    if not coin:
+        return None
+    return (venue_short_name(venue), coin)
+
+
+def native_symbol_from_prepared(
+    venue: str,
+    prepared: Mapping[str, Any],
+) -> Optional[str]:
+    """Resolve a venue-native symbol from order_prepared fields.
+
+    Legal journal rows carry ``symbol_alias`` (e.g. SOL-USDT-PERP) and omit
+    ``symbol``. Prefer an explicit ``symbol`` when present; otherwise map the
+    alias. BTC fallback is only for rows with neither field.
+    """
+    raw_symbol = prepared.get("symbol")
+    if raw_symbol is not None and str(raw_symbol).strip():
+        return str(raw_symbol).strip()
+
+    alias = str(prepared.get("symbol_alias") or "").strip()
+    if not alias:
+        return None
+
+    v = str(venue or "bybit").strip().lower()
+    if v in {"bybit_live", "okx_live"}:
+        venue_live = v
+        venue_short = "bybit" if v.startswith("bybit") else "okx"
+    elif v.startswith("okx"):
+        venue_live = "okx_live"
+        venue_short = "okx"
+    else:
+        venue_live = "bybit_live"
+        venue_short = "bybit"
+
+    try:
+        from app.bot.private.order_symbols import resolve_allowed_futures_symbol
+
+        return resolve_allowed_futures_symbol(venue_live, alias).symbol
+    except Exception:  # noqa: BLE001 — allowlist miss is normal for live Gear-2 coins
+        pass
+
+    if alias.endswith("-USDT-PERP"):
+        base = alias[: -len("-USDT-PERP")]
+        if not base:
+            return alias
+        if venue_short == "okx":
+            return f"{base}-USDT-SWAP"
+        return f"{base}USDT"
+
+    if venue_short == "okx":
+        if alias.endswith("-USDT-SWAP") or alias.endswith("-USDT"):
+            return alias
+    else:
+        if alias.endswith("USDT") and "-" not in alias:
+            return alias
+    return alias
 
 
 def _latest_post_dispatch_ambiguity(
@@ -228,6 +321,11 @@ def reconstruct_legs_from_events(
             if term_ev is not None and term_ev.get("terminal_state")
             else None
         )
+        term_ts = (
+            str(term_ev.get("event_ts_utc"))
+            if term_ev is not None and term_ev.get("event_ts_utc")
+            else None
+        )
         order_kind = str(prepared.get("order_kind") or "limit")
         ack_failed = any(
             e.get("event_type") == "ack_received" and e.get("outcome") == "failure"
@@ -259,6 +357,10 @@ def reconstruct_legs_from_events(
             request_sent="request_sent" in types,
             terminal_state=term_state,
             side=str(prepared.get("side") or "buy"),
+            symbol=native_symbol_from_prepared(
+                str(prepared.get("venue") or "bybit"), prepared
+            ),
+            terminal_ts_utc=term_ts,
         )
     return out
 
@@ -358,13 +460,18 @@ class LeaseSupervisor:
             # Minimal plan stub for recovery — identity fields only.
             from app.bot.private.order_plan import OrderPlan as OP
 
+            stub_symbol = (
+                leg.symbol
+                if leg.symbol is not None
+                else ("BTCUSDT" if leg.venue == "bybit" else "BTC-USDT-SWAP")
+            )
             stub = OP(
                 intent_id=f"intent_recon_{op_id}",
                 leg_id=leg.leg_id or f"leg_{op_id}",
                 order_attempt_id=op_id,
                 venue="bybit_live" if leg.venue == "bybit" else "okx_live",
-                symbol="BTCUSDT" if leg.venue == "bybit" else "BTC-USDT-SWAP",
-                symbol_alias="BTCUSDT" if leg.venue == "bybit" else "BTC-USDT-SWAP",
+                symbol=stub_symbol,
+                symbol_alias=stub_symbol,
                 instrument_class="linear_perpetual",
                 side="buy",
                 mode="post_only_limit",
@@ -400,14 +507,23 @@ class LeaseSupervisor:
                 self._dispatch_blocking = True
 
         # Buy market filled without flatten terminal → open exposure blocks all venues
-        # until REST flat or same-venue reduce-only flatten.
+        # until REST flat or same-venue / later cross-dual reduce-only flatten.
+        # Drop prior synthetic stubs so a re-scan can retire cross-dual leftovers.
+        for op_id in [
+            k for k in self._leases if str(k).startswith("exposure_flatten_")
+        ]:
+            del self._leases[op_id]
         self._register_open_market_exposures(legs)
 
     def _market_stub_plan(self, leg: ReconstructedLeg, *, op_id: str) -> Any:
         from app.bot.private.order_plan import OrderPlan as OP
 
         venue_live = "bybit_live" if leg.venue == "bybit" else "okx_live"
-        symbol = "BTCUSDT" if leg.venue == "bybit" else "BTC-USDT-SWAP"
+        if leg.symbol is not None:
+            symbol = leg.symbol
+        else:
+            # Only when reconstruct had neither symbol nor symbol_alias.
+            symbol = "BTCUSDT" if leg.venue == "bybit" else "BTC-USDT-SWAP"
         qty = "0.001" if leg.venue == "bybit" else "0.01"
         side = leg.side if leg.side in {"buy", "sell"} else "buy"
         return OP(
@@ -439,13 +555,38 @@ class LeaseSupervisor:
     def _register_open_market_exposures(
         self, legs: Mapping[str, ReconstructedLeg]
     ) -> None:
-        """Filled market buy without flatten fill → blocking exposure lease."""
+        """Filled market open without flatten fill → blocking exposure lease.
+
+        Close often allocates a *new* dual_leg_id for reduce-only legs, so the
+        original open dual never sees flatten_filled in-group. Retire an open
+        dual when a later filled reduce-only market covers the same
+        (venue, base_coin) netting keys — regardless of dual_leg_id.
+        """
         by_dual: dict[str, list[ReconstructedLeg]] = {}
         for leg in legs.values():
             if leg.post_only or leg.order_kind != "market":
                 continue
             dual = leg.dual_leg_id or leg.operation_id
             by_dual.setdefault(dual, []).append(leg)
+
+        # Latest filled reduce-only terminal per (venue_short, base_coin).
+        latest_flatten_ts: dict[tuple[str, str], str] = {}
+        for leg in legs.values():
+            if leg.post_only or leg.order_kind != "market":
+                continue
+            if not (
+                leg.reduce_only
+                and leg.terminal
+                and leg.terminal_state == "filled"
+            ):
+                continue
+            key = exposure_net_key(leg.venue, leg.symbol)
+            if key is None:
+                continue
+            ts = str(leg.terminal_ts_utc or "")
+            prev = latest_flatten_ts.get(key)
+            if prev is None or ts >= prev:
+                latest_flatten_ts[key] = ts
 
         for dual, group in by_dual.items():
             buy_filled = any(
@@ -468,13 +609,39 @@ class LeaseSupervisor:
                 for leg in group
             ):
                 continue
-            buy = next(
+
+            open_filled = [
                 leg
                 for leg in group
                 if (not leg.reduce_only)
                 and leg.terminal
                 and leg.terminal_state == "filled"
-            )
+            ]
+            # Cross-dual retirement: every open venue/coin must have a later
+            # (or equal-ts) filled reduce-only on the same netting key.
+            # Fail closed when a key/ts is missing — do not invent a retire.
+            retired = True
+            for leg in open_filled:
+                key = exposure_net_key(leg.venue, leg.symbol)
+                if key is None:
+                    retired = False
+                    break
+                flat_ts = latest_flatten_ts.get(key)
+                if flat_ts is None:
+                    retired = False
+                    break
+                open_ts = str(leg.terminal_ts_utc or "")
+                # Without timestamps we cannot prove flatten is later.
+                if not open_ts or not flat_ts:
+                    retired = False
+                    break
+                if flat_ts < open_ts:
+                    retired = False
+                    break
+            if retired:
+                continue
+
+            buy = open_filled[0]
             exposure_id = f"exposure_flatten_{dual}"
             if exposure_id in self._leases:
                 continue
@@ -497,6 +664,9 @@ class LeaseSupervisor:
                 request_sent=False,
                 terminal_state=None,
                 side="sell",
+                # Must carry the held coin; omitting symbol BTC-fallbacks the stub.
+                symbol=buy.symbol,
+                terminal_ts_utc=buy.terminal_ts_utc,
             )
             stub = self._market_stub_plan(exposure_leg, op_id=exposure_id)
             lease = PostOnlyLease(plan=stub, ttl_sec=0)
