@@ -56,6 +56,20 @@ CLI (только явный флаг; транспорт CLI по умолча�
 В симуляторе гира 1.0 константа `Trade_Lat` = 100 мс на обе площадки
 ([`gear-2-private-params.md`](gear-2-private-params.md), [`strategy-gears.md`](strategy-gears.md)).
 
+**Private sockets = process-lifetime (как public L1).** С 2026-09-02 warm
+supervisor (`app/bot/private/ws_warm_session.py`) поднимает private+trade WS
+OKX/Bybit при старте private-live unit и держит сессию на жизнь процесса.
+Live send **переиспользует** тот же `run_id` / журнал: нет нового
+`event_seq=1` + auth + subscribe + REST reseed на каждый сигнал. Re-auth /
+reseed — только после disconnect, auth failure или явного reconnect (та же
+политика, что у public). CLI: `--ws-warm-session` (без send); dual-leg send
+подхватывает process warm session автоматически.
+
+**`l1_at_send` / journal fill stamps ≠ venue fill latency.** Метки public
+journal `l1_at_send` и stub `Trade_Lat_ms=100` не измеряют время матча на
+бирже. Сравнивать place→fill нужно по private journal `request_sent` →
+`terminal_update` / venue fill observation на уже тёплой сессии.
+
 Замер W7 n=1 (журнал, монотонные метки):
 
 | Участок | ≈ мс | Комментарий |
