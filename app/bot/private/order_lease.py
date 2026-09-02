@@ -186,6 +186,62 @@ class ReconstructedLeg:
     request_sent: bool = False
     terminal_state: Optional[str] = None
     side: str = "buy"
+    # Native venue symbol when known. Journal order_prepared stores symbol_alias
+    # only (schema extras); never invent BTC here when an alias is present.
+    symbol: Optional[str] = None
+
+
+def native_symbol_from_prepared(
+    venue: str,
+    prepared: Mapping[str, Any],
+) -> Optional[str]:
+    """Resolve a venue-native symbol from order_prepared fields.
+
+    Legal journal rows carry ``symbol_alias`` (e.g. SOL-USDT-PERP) and omit
+    ``symbol``. Prefer an explicit ``symbol`` when present; otherwise map the
+    alias. BTC fallback is only for rows with neither field.
+    """
+    raw_symbol = prepared.get("symbol")
+    if raw_symbol is not None and str(raw_symbol).strip():
+        return str(raw_symbol).strip()
+
+    alias = str(prepared.get("symbol_alias") or "").strip()
+    if not alias:
+        return None
+
+    v = str(venue or "bybit").strip().lower()
+    if v in {"bybit_live", "okx_live"}:
+        venue_live = v
+        venue_short = "bybit" if v.startswith("bybit") else "okx"
+    elif v.startswith("okx"):
+        venue_live = "okx_live"
+        venue_short = "okx"
+    else:
+        venue_live = "bybit_live"
+        venue_short = "bybit"
+
+    try:
+        from app.bot.private.order_symbols import resolve_allowed_futures_symbol
+
+        return resolve_allowed_futures_symbol(venue_live, alias).symbol
+    except Exception:  # noqa: BLE001 — allowlist miss is normal for live Gear-2 coins
+        pass
+
+    if alias.endswith("-USDT-PERP"):
+        base = alias[: -len("-USDT-PERP")]
+        if not base:
+            return alias
+        if venue_short == "okx":
+            return f"{base}-USDT-SWAP"
+        return f"{base}USDT"
+
+    if venue_short == "okx":
+        if alias.endswith("-USDT-SWAP") or alias.endswith("-USDT"):
+            return alias
+    else:
+        if alias.endswith("USDT") and "-" not in alias:
+            return alias
+    return alias
 
 
 def _latest_post_dispatch_ambiguity(
@@ -259,6 +315,9 @@ def reconstruct_legs_from_events(
             request_sent="request_sent" in types,
             terminal_state=term_state,
             side=str(prepared.get("side") or "buy"),
+            symbol=native_symbol_from_prepared(
+                str(prepared.get("venue") or "bybit"), prepared
+            ),
         )
     return out
 
@@ -358,13 +417,18 @@ class LeaseSupervisor:
             # Minimal plan stub for recovery — identity fields only.
             from app.bot.private.order_plan import OrderPlan as OP
 
+            stub_symbol = (
+                leg.symbol
+                if leg.symbol is not None
+                else ("BTCUSDT" if leg.venue == "bybit" else "BTC-USDT-SWAP")
+            )
             stub = OP(
                 intent_id=f"intent_recon_{op_id}",
                 leg_id=leg.leg_id or f"leg_{op_id}",
                 order_attempt_id=op_id,
                 venue="bybit_live" if leg.venue == "bybit" else "okx_live",
-                symbol="BTCUSDT" if leg.venue == "bybit" else "BTC-USDT-SWAP",
-                symbol_alias="BTCUSDT" if leg.venue == "bybit" else "BTC-USDT-SWAP",
+                symbol=stub_symbol,
+                symbol_alias=stub_symbol,
                 instrument_class="linear_perpetual",
                 side="buy",
                 mode="post_only_limit",
@@ -407,7 +471,11 @@ class LeaseSupervisor:
         from app.bot.private.order_plan import OrderPlan as OP
 
         venue_live = "bybit_live" if leg.venue == "bybit" else "okx_live"
-        symbol = "BTCUSDT" if leg.venue == "bybit" else "BTC-USDT-SWAP"
+        if leg.symbol is not None:
+            symbol = leg.symbol
+        else:
+            # Only when reconstruct had neither symbol nor symbol_alias.
+            symbol = "BTCUSDT" if leg.venue == "bybit" else "BTC-USDT-SWAP"
         qty = "0.001" if leg.venue == "bybit" else "0.01"
         side = leg.side if leg.side in {"buy", "sell"} else "buy"
         return OP(
@@ -497,6 +565,8 @@ class LeaseSupervisor:
                 request_sent=False,
                 terminal_state=None,
                 side="sell",
+                # Must carry the held coin; omitting symbol BTC-fallbacks the stub.
+                symbol=buy.symbol,
             )
             stub = self._market_stub_plan(exposure_leg, op_id=exposure_id)
             lease = PostOnlyLease(plan=stub, ttl_sec=0)
