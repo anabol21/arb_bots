@@ -58,11 +58,12 @@ CLI (только явный флаг; транспорт CLI по умолча�
 
 **Private sockets = process-lifetime (как public L1).** С 2026-09-02 warm
 supervisor (`app/bot/private/ws_warm_session.py`) поднимает private+trade WS
-OKX/Bybit при старте private-live unit и держит сессию на жизнь процесса.
-Live send **переиспользует** тот же `run_id` / журнал: нет нового
-`event_seq=1` + auth + subscribe + REST reseed на каждый сигнал. Re-auth /
-reseed — только после disconnect, auth failure или явного reconnect (та же
-политика, что у public). CLI: `--ws-warm-session` (без send); dual-leg send
+OKX/Bybit при старте private-live / `python -m app.bot` (`VENUE=live` +
+`LIVE_ORDERS=1`) **до** signal loop и держит сессию на жизнь процесса:
+heartbeat/ping, auto-reconnect с bounded backoff в фоне (в т.ч. на idle —
+не lazy на следующем send). Live send **переиспользует** тот же `run_id` /
+журнал: нет нового `event_seq=1` + auth + subscribe + REST reseed на каждый
+сигнал на здоровой сессии. CLI: `--ws-warm-session` (без send); dual-leg send
 подхватывает process warm session автоматически.
 
 **`l1_at_send` / journal fill stamps ≠ venue fill latency.** Метки public

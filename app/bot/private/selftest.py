@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import tempfile
+import time
 import traceback
 import unittest
 from pathlib import Path
@@ -9280,6 +9281,189 @@ class WarmPrivateSessionTests(unittest.TestCase):
             self.assertTrue(session.is_ready())
             self.assertEqual(session._handshake_count, 2)  # noqa: SLF001
             self.assertEqual(len(session.auth_success_events()), 4)
+
+    def test_idle_drop_reconnects_before_send(self) -> None:
+        """Drop sockets while idle; supervisor reconnects before next send."""
+        from app.bot.private.ws_private import RestReseedResult
+        from app.bot.private.ws_w4_baseline import FakeFlatBaseline
+        from app.bot.private.ws_w6_dual_leg import run_w6_dual_leg
+        from app.bot.private.ws_warm_session import start_warm_private_session
+
+        with tempfile.TemporaryDirectory() as td:
+            env = self._live_env(td)
+            Path(env["BBOT_PRIVATE_DATA_ROOT"]).mkdir(parents=True, exist_ok=True)
+            session = start_warm_private_session(
+                env=env,
+                bybit_credentials=W2PrivateWsTests()._creds(),
+                okx_credentials=W2PrivateWsTests()._creds(okx=True),
+                socket_provider=self._provider(),
+                rest_probe_fn=lambda **_: RestReseedResult(matched=True),
+                attach=True,
+                keepalive=True,
+                poll_sec=0.05,
+                heartbeat_every_sec=60.0,
+                reconnect_base_sec=0.05,
+                reconnect_cap_sec=0.2,
+                ack_timeout_sec=2.0,
+            )
+            run_id = session.run_id
+            self.assertEqual(session._handshake_count, 1)  # noqa: SLF001
+            self.assertTrue(session.keepalive_running)
+
+            for rt in (session.bybit_runtime, session.okx_runtime):
+                for sock in (rt.private_socket, rt.trade_socket):
+                    if sock is not None:
+                        sock.close()
+            self.assertFalse(session.is_ready())
+
+            deadline = time.time() + 3.0
+            while time.time() < deadline and not session.is_ready():
+                time.sleep(0.05)
+            self.assertTrue(session.is_ready(), "supervisor must reconnect while idle")
+            self.assertEqual(session.run_id, run_id)
+            self.assertGreaterEqual(session._handshake_count, 2)  # noqa: SLF001
+            hs_after_idle = session._handshake_count  # noqa: SLF001
+            auth_after_idle = len(session.auth_success_events())
+
+            def inject(kind: str, plan) -> None:
+                okx = str(plan.venue).startswith("okx")
+                symbol = "TRUMP-USDT-SWAP" if okx else "TRUMPUSDT"
+                priv = (
+                    session.okx_runtime.private_socket
+                    if okx
+                    else session.bybit_runtime.private_socket
+                )
+                self._inject_fill(priv, plan, okx=okx, symbol=symbol)
+
+            rep = run_w6_dual_leg(
+                n=1,
+                env=env,
+                metadata_provider=W6PrivateWsDualLegTests()._meta(),
+                position_mode_provider=W6PrivateWsDualLegTests()._position(),
+                baseline=FakeFlatBaseline(),
+                load_secrets=False,
+                issue_approval=True,
+                warm_session=session,
+                fill_inject_fn=inject,
+                terminal_wait_sec=2.0,
+                rest_probe_fn=lambda **_: RestReseedResult(matched=True),
+            )
+            self.assertEqual(rep.status, "ok", rep.as_public_dict())
+            self.assertEqual(session.run_id, run_id)
+            self.assertEqual(session._handshake_count, hs_after_idle)  # noqa: SLF001
+            self.assertEqual(len(session.auth_success_events()), auth_after_idle)
+
+    def test_reconnect_backoff_not_tight_loop(self) -> None:
+        """Failed reconnects use public-style exponential backoff."""
+        from app.bot.private.ws_private import RestReseedResult
+        from app.bot.private.ws_socket import FakePrivateWsSocket
+        from app.bot.private.ws_warm_session import (
+            WarmSocketBundle,
+            reconnect_sleep_sec,
+            start_warm_private_session,
+        )
+
+        self.assertEqual(reconnect_sleep_sec(0, base=0.1, cap=10.0), 0.1)
+        self.assertEqual(reconnect_sleep_sec(1, base=0.1, cap=10.0), 0.2)
+        self.assertEqual(reconnect_sleep_sec(2, base=0.1, cap=10.0), 0.4)
+        self.assertEqual(reconnect_sleep_sec(10, base=0.1, cap=0.5), 0.5)
+
+        with tempfile.TemporaryDirectory() as td:
+            env = self._live_env(td, w6=False)
+            Path(env["BBOT_PRIVATE_DATA_ROOT"]).mkdir(parents=True, exist_ok=True)
+            calls = {"n": 0}
+
+            def flaky_provider() -> WarmSocketBundle:
+                calls["n"] += 1
+                bpriv = FakePrivateWsSocket()
+                btrade = FakePrivateWsSocket(auto_trade_ack=True, exchange="bybit")
+                opriv = FakePrivateWsSocket()
+                otrade = FakePrivateWsSocket(auto_trade_ack=True, exchange="okx")
+                if calls["n"] <= 3:
+                    return WarmSocketBundle(
+                        bybit_private=bpriv,
+                        bybit_trade=btrade,
+                        okx_private=opriv,
+                        okx_trade=otrade,
+                    )
+                self._push_hs(bpriv, btrade, okx=False)
+                self._push_hs(opriv, otrade, okx=True)
+                return WarmSocketBundle(
+                    bybit_private=bpriv,
+                    bybit_trade=btrade,
+                    okx_private=opriv,
+                    okx_trade=otrade,
+                )
+
+            session = start_warm_private_session(
+                env=env,
+                bybit_credentials=W2PrivateWsTests()._creds(),
+                okx_credentials=W2PrivateWsTests()._creds(okx=True),
+                socket_provider=self._provider(),
+                rest_probe_fn=lambda **_: RestReseedResult(matched=True),
+                attach=True,
+                keepalive=True,
+                poll_sec=0.05,
+                reconnect_base_sec=0.15,
+                reconnect_cap_sec=1.0,
+                ack_timeout_sec=0.15,
+            )
+            session.socket_provider = flaky_provider
+            for rt in (session.bybit_runtime, session.okx_runtime):
+                for sock in (rt.private_socket, rt.trade_socket):
+                    if sock is not None:
+                        sock.close()
+
+            deadline = time.time() + 5.0
+            while (
+                time.time() < deadline
+                and len(session._reconnect_attempt_times) < 3  # noqa: SLF001
+            ):
+                time.sleep(0.05)
+            times = list(session._reconnect_attempt_times)  # noqa: SLF001
+            self.assertGreaterEqual(len(times), 3)
+            gaps = [times[i + 1] - times[i] for i in range(2)]
+            self.assertGreaterEqual(gaps[0], 0.12)
+            self.assertGreaterEqual(gaps[1], 0.25)
+
+    def test_bot_process_hook_warms_private_by_default(self) -> None:
+        """Production app.bot hook connects private WS with zero sends."""
+        from app.bot.private.ws_private import RestReseedResult
+        from app.bot.private.ws_warm_session import (
+            get_process_warm_session,
+            start_warm_private_for_bot_process,
+        )
+
+        with tempfile.TemporaryDirectory() as td:
+            env = self._live_env(td, w6=False)
+            Path(env["BBOT_PRIVATE_DATA_ROOT"]).mkdir(parents=True, exist_ok=True)
+            session = start_warm_private_for_bot_process(
+                env=env,
+                bybit_credentials=W2PrivateWsTests()._creds(),
+                okx_credentials=W2PrivateWsTests()._creds(okx=True),
+                socket_provider=self._provider(),
+                rest_probe_fn=lambda **_: RestReseedResult(matched=True),
+                poll_sec=0.05,
+                heartbeat_every_sec=60.0,
+            )
+            self.assertIsNotNone(session)
+            assert session is not None
+            self.assertTrue(session.is_ready())
+            self.assertTrue(session.keepalive_running)
+            self.assertIs(get_process_warm_session(), session)
+            from app.bot.private.journal_v1 import scan_all_journal_events
+
+            places = [
+                e
+                for e in scan_all_journal_events(session.journal.data_root)
+                if e.get("event_type") == "request_sent"
+                and e.get("request_kind") == "place"
+            ]
+            self.assertEqual(places, [])
+            skipped = start_warm_private_for_bot_process(
+                env={"VENUE": "live", "LIVE_ORDERS": "0"},
+            )
+            self.assertIsNone(skipped)
 
 
 def run_selftest() -> bool:
