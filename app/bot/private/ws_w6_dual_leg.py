@@ -266,10 +266,23 @@ def assert_w6_okx_net_mode(
 
 
 def assert_w6_notional(
-    meta: Any, qty: str, *, min_usd: Optional[Decimal] = None
+    meta: Any,
+    qty: str,
+    *,
+    min_usd: Optional[Decimal] = None,
+    enforce_open_caps: bool = True,
 ) -> Decimal:
+    """Compute mark notional and optionally enforce open-side size gates.
+
+    Open samples keep venue min-notional, ``W6_SAMPLE_MAX_NOTIONAL``, and the
+    hard ``<100`` USD band. Close/flatten of an already-open dual must pass
+    ``enforce_open_caps=False`` (or skip this helper): held qty is authoritative
+    and must not be rejected because current notional exceeds the sample cap.
+    """
     q = parse_decimal(qty, field="qty")
     notional = meta.market_notional_usdt(q)
+    if not enforce_open_caps:
+        return notional
     if min_usd is not None and notional < min_usd:
         raise W6ProfileError("W6 notional below venue min-notional floor")
     if notional > W6_SAMPLE_MAX_NOTIONAL:
@@ -1042,11 +1055,18 @@ def run_w6_dual_leg(
     fill_inject_fn: Optional[Any] = None,
     parallel_open: bool = False,
     send_gate: Optional[Any] = None,
+    bybit_leg: Optional[Mapping[str, Any]] = None,
+    okx_leg: Optional[Mapping[str, Any]] = None,
+    flatten_only: bool = False,
 ) -> W6Report:
     """Execute n dual-leg market rounds (Bybit buy / OKX sell).
 
     Default is sequential: Bybit must fill before OKX is sent.
     ``parallel_open=True`` (W7) dispatches both WS places after a barrier.
+    ``flatten_only=True`` closes a held dual at profile qty without opening and
+    without open-side sample-notional / min-notional caps (held size wins).
+    Optional ``bybit_leg`` / ``okx_leg`` override immutable TRUMP defaults
+    (Gear-2 live close may pass held native qty).
     """
     e = dict(env if env is not None else os.environ)
     gate = send_gate if send_gate is not None else assert_ws_w6_send_gates
@@ -1068,8 +1088,8 @@ def run_w6_dual_leg(
     try:
         gate(e)
         n_req = assert_w6_n(int(n))
-        bybit_p = resolve_w6_leg("bybit")
-        okx_p = resolve_w6_leg("okx")
+        bybit_p = dict(bybit_leg) if bybit_leg is not None else resolve_w6_leg("bybit")
+        okx_p = dict(okx_leg) if okx_leg is not None else resolve_w6_leg("okx")
     except (WsProfileGateError, W6ProfileError, TypeError, ValueError):
         return _report(
             status="rejected_before_socket",
@@ -1112,31 +1132,35 @@ def run_w6_dual_leg(
                 require_position_flat=True,
             )
 
-    try:
-        assert_flat(
-            dual_base.check(exchange="bybit", symbol=bybit_p["symbol"])
-        )
-        assert_flat(dual_base.check(exchange="okx", symbol=okx_p["symbol"]))
-    except BaselineError:
-        return _report(
-            status="baseline_not_flat",
-            n_requested=n_req,
-            error_code="invalid_request",
-        )
+    if not flatten_only:
+        try:
+            assert_flat(
+                dual_base.check(exchange="bybit", symbol=bybit_p["symbol"])
+            )
+            assert_flat(dual_base.check(exchange="okx", symbol=okx_p["symbol"]))
+        except BaselineError:
+            return _report(
+                status="baseline_not_flat",
+                n_requested=n_req,
+                error_code="invalid_request",
+            )
 
-    try:
-        bybit_meta = metadata_provider.get(bybit_p["venue"], bybit_p["symbol"])
-        okx_meta = metadata_provider.get(okx_p["venue"], okx_p["symbol"])
-        assert_w6_notional(
-            bybit_meta, bybit_p["qty"], min_usd=W6_BYBIT_MIN_NOTIONAL
-        )
-        assert_w6_notional(okx_meta, okx_p["qty"])
-    except (MetadataError, W6ProfileError):
-        return _report(
-            status="plan_rejected",
-            n_requested=n_req,
-            error_code="invalid_request",
-        )
+    # Open-side sample / notional caps apply only to NEW opens. Close/flatten of
+    # a held dual uses profile qty as held size and must not abort on sample cap.
+    if not flatten_only:
+        try:
+            bybit_meta = metadata_provider.get(bybit_p["venue"], bybit_p["symbol"])
+            okx_meta = metadata_provider.get(okx_p["venue"], okx_p["symbol"])
+            assert_w6_notional(
+                bybit_meta, bybit_p["qty"], min_usd=W6_BYBIT_MIN_NOTIONAL
+            )
+            assert_w6_notional(okx_meta, okx_p["qty"])
+        except (MetadataError, W6ProfileError):
+            return _report(
+                status="plan_rejected",
+                n_requested=n_req,
+                error_code="invalid_request",
+            )
 
     bybit_reseed = build_signed_rest_reseed(
         exchange="bybit",
@@ -1323,6 +1347,79 @@ def run_w6_dual_leg(
                 subscription_ready=True,
                 reseed_matched=True,
                 error_code="invalid_request",
+            )
+
+        if flatten_only:
+            # Close held dual at profile (held) qty — no open, no sample-cap gate.
+            if (
+                bybit_runtime.reseed_required
+                or bybit_runtime.sends_blocked
+                or okx_runtime.reseed_required
+                or okx_runtime.sends_blocked
+            ):
+                return _report(
+                    status="stream_blocked",
+                    n_requested=n_req,
+                    trade_ws_bound=True,
+                    subscription_ready=True,
+                    reseed_matched=False,
+                    sends_blocked=True,
+                    orders_sent=orders_sent,
+                    error_code="unknown",
+                    latency_ms=_latency(),
+                )
+            dual_id = new_opaque_id("dual")
+            flat_b, n_b = _flatten_venue(
+                sender=bybit_sender,
+                runtime=bybit_runtime,
+                provider=bybit_provider,
+                place_transport=bybit_transport,
+                vault=vault,
+                credentials=bybit_credentials,
+                env=e,
+                metadata_provider=metadata_provider,
+                profile=bybit_p,
+                dual_leg_id=dual_id,
+                journal=j,
+                baseline=dual_base,
+                terminal_wait_sec=float(terminal_wait_sec),
+                fill_inject_fn=fill_inject_fn,
+                inject_kind="bybit_flatten",
+            )
+            orders_sent += n_b
+            flat_o, n_o = _flatten_venue(
+                sender=okx_sender,
+                runtime=okx_runtime,
+                provider=okx_provider,
+                place_transport=okx_transport,
+                vault=vault,
+                credentials=okx_credentials,
+                env=e,
+                metadata_provider=metadata_provider,
+                profile=okx_p,
+                dual_leg_id=dual_id,
+                journal=j,
+                baseline=dual_base,
+                terminal_wait_sec=float(terminal_wait_sec),
+                fill_inject_fn=fill_inject_fn,
+                inject_kind="okx_flatten",
+            )
+            orders_sent += n_o
+            both_ok = flat_b == "ok" and flat_o == "ok"
+            if not both_ok:
+                bybit_sender.lease_supervisor.mark_process_sends_blocked()
+            return _report(
+                status="ok" if both_ok else "flatten_incomplete",
+                n_requested=n_req,
+                n_completed=1 if both_ok else 0,
+                trade_ws_bound=True,
+                subscription_ready=True,
+                reseed_matched=True,
+                sends_blocked=not both_ok,
+                orders_sent=orders_sent,
+                flat_after=both_ok,
+                error_code=None if both_ok else "unknown",
+                latency_ms=_latency(),
             )
 
         for _round in range(n_req):
