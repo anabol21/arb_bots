@@ -10,6 +10,8 @@ from typing import Sequence
 from research.gear22_quiet_regime_viz.candles import (
     DEFAULT_MA_BARS,
     BAR_MS,
+    SPREAD_LONG_COL,
+    SPREAD_SHORT_COL,
     build_5m_bucket_stats,
     floor_bar_start_ms,
 )
@@ -22,7 +24,11 @@ from research.gear22_quiet_regime_viz.load import (
     load_ticks,
     parse_since_ms,
 )
-from research.gear22_quiet_regime_viz.plot import write_coin_html
+from research.gear22_quiet_regime_viz.plot import (
+    coin_html_filename,
+    write_coin_html,
+    write_coins_json,
+)
 
 DEFAULT_COINS = ("SOL", "XRP")
 
@@ -47,8 +53,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="python -m research.gear22_quiet_regime_viz",
         description=(
-            "Gear 2.2 quiet-regime research visualizer: gappy L1 → 5m edge "
-            "candles + intra-stats → Plotly HTML (one page per coin)."
+            "Gear 2.2 quiet-regime research visualizer: gappy L1 → 5m "
+            "spread_long/short candles + intra-stats + TW quantiles → Plotly HTML."
         ),
     )
     p.add_argument(
@@ -80,7 +86,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "--out-dir",
         type=Path,
         required=True,
-        help="Directory for per-coin HTML pages.",
+        help="Directory for per-coin HTML pages (+ plotly.min.js, coins.json).",
     )
     p.add_argument(
         "--gap-threshold-ms",
@@ -100,6 +106,14 @@ def build_arg_parser() -> argparse.ArgumentParser:
         default=4_000,
         help="Even downsample cap for sparse tick overlay.",
     )
+    p.add_argument(
+        "--inline-plotly",
+        action="store_true",
+        help=(
+            "Embed plotly.js inside each HTML (large single-file pages). "
+            "Default: copy sibling plotly.min.js next to the HTML (file://-friendly)."
+        ),
+    )
     return p
 
 
@@ -113,30 +127,54 @@ def run_viz(
     gap_threshold_ms: int = DEFAULT_GAP_THRESHOLD_MS,
     ma_bars: Sequence[int] = DEFAULT_MA_BARS,
     max_tick_points: int = 4_000,
+    inline_plotly: bool = False,
 ) -> list[Path]:
     since_ms = parse_since_ms(since)
     until_ms = parse_since_ms(until) if until else int(
         datetime.now(tz=timezone.utc).timestamp() * 1000
     )
+    coins_u = [c.upper() for c in coins]
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
     ticks = load_ticks(
         data_root,
-        coins=coins,
+        coins=coins_u,
         since_ms=since_ms,
         until_ms=until_ms,
     )
-    out_dir = Path(out_dir)
-    out_dir.mkdir(parents=True, exist_ok=True)
+
     written: list[Path] = []
     bucket_start = floor_bar_start_ms(since_ms, BAR_MS)
-    for coin in coins:
-        coin_u = coin.upper()
+    present = [
+        c for c in coins_u if not ticks.loc[ticks["base_coin"] == c].empty
+    ]
+    for c in coins_u:
+        if c not in present:
+            print(f"skip {c}: no ticks in window")
+    if not present:
+        raise SystemExit("no HTML written — check coins / window / data-root")
+    write_coins_json(out_dir, present)
+
+    until_label = (
+        until
+        if until
+        else datetime.fromtimestamp(until_ms / 1000, tz=timezone.utc)
+        .isoformat()
+        .replace("+00:00", "Z")
+    )
+    for coin_u in present:
         sub = ticks.loc[ticks["base_coin"] == coin_u].copy()
-        if sub.empty:
-            print(f"skip {coin_u}: no ticks in window")
-            continue
-        buckets = build_5m_bucket_stats(
+        buckets_long = build_5m_bucket_stats(
             sub,
-            value_col="edge_pct",
+            value_col=SPREAD_LONG_COL,
+            start_ms=bucket_start,
+            end_ms=until_ms,
+            fill_empty_buckets=True,
+            ma_bars=ma_bars,
+        )
+        buckets_short = build_5m_bucket_stats(
+            sub,
+            value_col=SPREAD_SHORT_COL,
             start_ms=bucket_start,
             end_ms=until_ms,
             fill_empty_buckets=True,
@@ -148,37 +186,36 @@ def run_viz(
         )
         meta = {
             "coin": coin_u,
+            "coins_nav": ",".join(present),
             "since_utc": since,
-            "until_utc": (
-                until
-                if until
-                else datetime.fromtimestamp(until_ms / 1000, tz=timezone.utc)
-                .isoformat()
-                .replace("+00:00", "Z")
-            ),
+            "until_utc": until_label,
             "n_ticks": len(sub),
-            "n_buckets": len(buckets),
+            "n_buckets": len(buckets_long),
             "n_gaps": len(gaps),
             "gap_threshold_ms": gap_threshold_ms,
             "ma_bars": ",".join(str(x) for x in ma_bars),
-            "primary_series": "edge_pct = (okx_mid-bybit_mid)/bybit_mid*100",
+            "spread_long": "(bybit_bid-okx_ask)/bybit_bid*100 → open_long",
+            "spread_short": "(okx_bid-bybit_ask)/okx_bid*100 → open_short",
+            "tw_weights": "hold until next tick; last tick → 5m bar end",
             "bar_ms": BAR_MS,
             "data_root": str(data_root),
+            "plotly": "inline" if inline_plotly else "sibling plotly.min.js",
         }
         path = write_coin_html(
-            out_dir / f"gear22_quiet_regime_{coin_u}.html",
+            out_dir / coin_html_filename(coin_u),
             coin=coin_u,
+            coins=present,
             ticks=sub,
-            buckets=buckets,
+            buckets_long=buckets_long,
+            buckets_short=buckets_short,
             gaps=gaps,
             meta=meta,
             ma_bars=ma_bars,
             max_tick_points=max_tick_points,
+            inline_plotly=inline_plotly,
         )
         print(f"wrote {path} (ticks={len(sub)} gaps={len(gaps)})")
         written.append(path)
-    if not written:
-        raise SystemExit("no HTML written — check coins / window / data-root")
     return written
 
 
@@ -193,6 +230,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         gap_threshold_ms=args.gap_threshold_ms,
         ma_bars=args.ma_bars,
         max_tick_points=args.max_tick_points,
+        inline_plotly=args.inline_plotly,
     )
     return 0
 

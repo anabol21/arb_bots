@@ -8,11 +8,20 @@ import numpy as np
 import pandas as pd
 
 from app.schema.lean_event import BAR_INTERVAL_MS
+from research.gear22_quiet_regime_viz.quantiles import (
+    TW_QUANTILE_NAMES,
+    tick_hold_weights_ms,
+    time_weighted_quantiles,
+)
 
 BAR_MS = int(BAR_INTERVAL_MS)  # 300_000
 
 # Causal SMA windows on **candle closes** (number of completed 5m bars).
 DEFAULT_MA_BARS: tuple[int, ...] = (3, 12)  # 15m and 60m lookbacks
+
+# Policy-aligned primary series (see app.policy.features).
+SPREAD_LONG_COL = "spread_long"
+SPREAD_SHORT_COL = "spread_short"
 
 
 def floor_bar_start_ms(ts_ms: int, bar_ms: int = BAR_MS) -> int:
@@ -39,6 +48,31 @@ def causal_sma(values: np.ndarray, window: int) -> np.ndarray:
     return out
 
 
+def _empty_bucket(bar_start: int, bar_end: int) -> dict:
+    row = {
+        "bar_start_ms": bar_start,
+        "bar_end_ms": bar_end,
+        "open": np.nan,
+        "high": np.nan,
+        "low": np.nan,
+        "close": np.nan,
+        "tick_count": 0,
+        "mean": np.nan,
+        "std": np.nan,
+        "min": np.nan,
+        "max": np.nan,
+        "q25": np.nan,
+        "q75": np.nan,
+        "iqr": np.nan,
+        "gap_fraction": 1.0,
+        "update_rate_hz": 0.0,
+        "span_ms": 0,
+    }
+    for name in TW_QUANTILE_NAMES:
+        row[name] = np.nan
+    return row
+
+
 def _bucket_stats(group: pd.DataFrame, value_col: str, bar_start: int, bar_ms: int) -> dict:
     y = group[value_col].to_numpy(dtype="float64")
     ts = group["event_local_ts_ms"].to_numpy(dtype="int64")
@@ -48,25 +82,7 @@ def _bucket_stats(group: pd.DataFrame, value_col: str, bar_start: int, bar_ms: i
     n = int(yf.size)
     bar_end = bar_start + bar_ms
     if n == 0:
-        return {
-            "bar_start_ms": bar_start,
-            "bar_end_ms": bar_end,
-            "open": np.nan,
-            "high": np.nan,
-            "low": np.nan,
-            "close": np.nan,
-            "tick_count": 0,
-            "mean": np.nan,
-            "std": np.nan,
-            "min": np.nan,
-            "max": np.nan,
-            "q25": np.nan,
-            "q75": np.nan,
-            "iqr": np.nan,
-            "gap_fraction": 1.0,
-            "update_rate_hz": 0.0,
-            "span_ms": 0,
-        }
+        return _empty_bucket(bar_start, bar_end)
     # OHLC in tick order (already sorted by caller).
     order = np.argsort(tsf, kind="mergesort")
     yf = yf[order]
@@ -74,10 +90,13 @@ def _bucket_stats(group: pd.DataFrame, value_col: str, bar_start: int, bar_ms: i
     span_ms = int(tsf[-1] - tsf[0]) if n >= 2 else 0
     # Extent-based hole score: time before first tick + time after last tick.
     # n==1 → first==last → uncovered == bar_ms → gap_fraction 1.0.
+    # (Inter-tick holes are the red vrects, not this panel.)
     uncovered = (int(tsf[0]) - bar_start) + (bar_end - int(tsf[-1]))
     gap_fraction = float(np.clip(float(uncovered) / float(bar_ms), 0.0, 1.0))
     q25, q75 = np.percentile(yf, [25, 75])
-    return {
+    weights = tick_hold_weights_ms(tsf, last_end_ms=bar_end)
+    tw = time_weighted_quantiles(yf, weights)
+    row = {
         "bar_start_ms": bar_start,
         "bar_end_ms": bar_end,
         "open": float(yf[0]),
@@ -96,12 +115,15 @@ def _bucket_stats(group: pd.DataFrame, value_col: str, bar_start: int, bar_ms: i
         "update_rate_hz": float(n) / (float(bar_ms) / 1000.0),
         "span_ms": span_ms,
     }
+    row.update(tw)
+    return row
+
 
 
 def build_5m_bucket_stats(
     ticks: pd.DataFrame,
     *,
-    value_col: str = "edge_pct",
+    value_col: str = SPREAD_LONG_COL,
     bar_ms: int = BAR_MS,
     start_ms: Optional[int] = None,
     end_ms: Optional[int] = None,

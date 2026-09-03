@@ -190,16 +190,16 @@ def _read_csv_filtered(
 
 
 def derive_research_series(df: pd.DataFrame) -> pd.DataFrame:
-    """Add mid, OKX−Bybit mid edge (%), and classic arb spreads.
+    """Add mid, mid-edge, and policy-aligned long/short spreads.
 
-    Primary research series for quiet-regime observation::
+    Primary research series (match ``app.policy.features`` / gear2)::
+
+        spread_long  = (bybit_bid - okx_ask) / bybit_bid * 100   → open_long
+        spread_short = (okx_bid - bybit_ask) / okx_bid * 100     → open_short
+
+    Also derived for context (not the dual-stack primary)::
 
         edge_pct = (okx_mid - bybit_mid) / bybit_mid * 100
-
-    Classic model spreads (for context / future overlays)::
-
-        spread_long  = (bybit_bid - okx_ask) / bybit_bid * 100
-        spread_short = (okx_bid - bybit_ask) / okx_bid * 100
     """
     out = df.copy()
     missing = [c for c in _PRICE_COLS if c not in out.columns]
