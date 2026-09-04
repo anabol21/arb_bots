@@ -539,8 +539,8 @@ def _candle_inspect_panel_html() -> str:
     <div>
       <strong id="candle-inspect-title">Click a 5m candle</strong>
       <p id="candle-inspect-sub" class="candle-inspect-sub">
-        In-bar TW-mass hist (hold→next; last→bar end) + TW p50/p95/p99,
-        equal-time means, plus venue latency. Compact build-time bins; not full ticks.
+        Spread: TW-mass hist (hold→next; last→bar end) + TW p50/p95/p99.
+        Latency: triggering venue only, equal-weight ticks. Compact bins; not full ticks.
       </p>
     </div>
     <button type="button" id="candle-inspect-close" aria-label="Close inspect panel">×</button>
@@ -670,10 +670,10 @@ def _candle_inspect_script() -> str:
     const bybit = lat.bybit || null;
     const okxN = okx ? (okx.n || 0) : 0;
     const bybitN = bybit ? (bybit.n || 0) : 0;
-    let latNote = "latency cols absent";
+    let latNote = "latency omitted (need trigger + venue latency cols)";
     if (okx || bybit) {
-      latNote = "latency TW n okx=" + okxN + " bybit=" + bybitN +
-        " (NaN/missing skipped)";
+      latNote = "latency (trigger venue only, c_w=count) n okx=" + okxN +
+        " bybit=" + bybitN + " (NaN/missing skipped)";
     }
     const sub =
       col + " TW hist (c_w=tw_ms, range≈p01–p99) · " +
@@ -736,11 +736,11 @@ def _candle_inspect_script() -> str:
         x: h.x,
         y: h.y,
         width: h.width,
-        name: "okx_latency_ms TW",
+        name: "okx_latency_ms (trigger, count)",
         marker: {color: "rgba(31,119,180,0.55)"},
         xaxis: "x3",
         yaxis: "y3",
-        hovertemplate: "%{x:.2f} ms<br>TW mass=%{y:.1f}<extra>okx</extra>"
+        hovertemplate: "%{x:.2f} ms<br>count=%{y}<extra>okx</extra>"
       });
       const t = temporalSeries(cd.bs, cd.bar_ms || 300000, okx.tv || []);
       traces.push({
@@ -763,11 +763,11 @@ def _candle_inspect_script() -> str:
         x: h.x,
         y: h.y,
         width: h.width,
-        name: "bybit_latency_ms TW",
+        name: "bybit_latency_ms (trigger, count)",
         marker: {color: "rgba(44,160,44,0.55)"},
         xaxis: "x3",
         yaxis: "y3",
-        hovertemplate: "%{x:.2f} ms<br>TW mass=%{y:.1f}<extra>bybit</extra>"
+        hovertemplate: "%{x:.2f} ms<br>count=%{y}<extra>bybit</extra>"
       });
       const t = temporalSeries(cd.bs, cd.bar_ms || 300000, bybit.tv || []);
       traces.push({
@@ -805,7 +805,7 @@ def _candle_inspect_script() -> str:
       showlegend: true,
       legend: {orientation: "h", y: 1.14, x: 0, font: {size: 10}},
       title: {
-        text: "In-bar TW-mass hist + equal-time temporal (compact)",
+        text: "Spread TW-mass + latency equal-weight (trigger venue) · compact",
         font: {size: 12}
       },
       shapes: shapes,
@@ -829,11 +829,11 @@ def _candle_inspect_script() -> str:
     };
     if (hasLat) {
       layout.xaxis3 = {
-        title: "latency (ms) [TW p01–p99]",
+        title: "latency (ms) [equal-weight p01–p99, trigger venue]",
         domain: [0, 0.46],
         anchor: "y3"
       };
-      layout.yaxis3 = {title: "TW mass (ms)", domain: [0, 0.42]};
+      layout.yaxis3 = {title: "tick count", domain: [0, 0.42]};
       layout.xaxis4 = {title: "UTC (within 5m)", domain: [0.54, 1], anchor: "y4"};
       layout.yaxis4 = {title: "latency (ms)", anchor: "x4", domain: [0, 0.42]};
     }
@@ -1087,11 +1087,15 @@ Research visualizer for noisy/gappy cross-exchange L1. Stacked blocks match live
 spreads from <code>app.policy.features</code>: <strong>long</strong> then <strong>short</strong>.
 Red bands mark inter-tick gaps. Time-weighted quantile panels use hold-until-next-tick
 weights (last tick → bar end). Window histograms are equal-weight over all loaded ticks.
-<strong>Click a 5m candle</strong> to open the in-bar panel: <strong>TW-mass</strong>
-histograms (robust p01–p99 axis) with TW p50/p95/p99, equal-time temporal means, plus
-venue latency (<code>okx_latency_ms</code> / <code>bybit_latency_ms</code> = local_recv −
-exchange_ts; NaN/missing skipped). Compact bins only — not full ticks. Not a live
-trading terminal; no threshold candidates are invented on this page.
+<strong>Click a 5m candle</strong> to open the in-bar panel: spread
+<strong>TW-mass</strong> hist (robust p01–p99 axis) with TW p50/p95/p99 and
+equal-time temporal means; plus <strong>trigger-venue latency</strong>
+(equal-weight ticks, <code>c_w=count</code>) — only
+<code>okx_latency_ms</code> on <code>trigger=okx</code> rows and only
+<code>bybit_latency_ms</code> on <code>trigger=bybit</code> rows
+(local_recv − exchange_ts; NaN/missing skipped). Compact bins only — not
+full ticks. Not a live trading terminal; no threshold candidates are
+invented on this page.
 </p>
 <table class="meta"><tbody>{meta_rows}</tbody></table>
 
