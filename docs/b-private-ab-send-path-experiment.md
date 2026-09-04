@@ -40,9 +40,11 @@ This isolates **handler / manager overhead**, not strategy.
 | Clock start | `signal` — immediately after the 5 s warm hold |
 | Primary metric | p50/p95 of `signal_to_first_request_sent` (A − B = manager X ms) |
 | Secondary | p50/p95 of `signal_to_terminal_flat` (includes venue RTT + 5 s hold + close) |
-| Not claimed | Profitability, `Trade_Lat` rewrite, live-bot readiness |
+| Not claimed | Profitability, `Trade_Lat` rewrite, live-bot readiness. Do not interpret A vs B as sequential vs parallel send. |
 
 `Trade_Lat` in gear 1.0 stays **100 ms**. One VPS packet does not change it.
+
+**Both contours place in parallel.** Classic sequential W6 (Bybit fill, then OKX) is **not** Contour A. Production live gear2 already calls `run_w6_dual_leg(..., parallel_open=True, parallel_flatten=True)`. Contour A must match that or the AB is unfair versus the bot the operator runs and versus Contour B’s dual `queue.put`. The primary metric `signal_to_first_request_sent` measures manager overhead **on that parallel path**.
 
 ---
 
@@ -59,18 +61,18 @@ This isolates **handler / manager overhead**, not strategy.
 | Protocol | connect → wait 5 s → dual-leg **open** → wait 5 s → dual-leg **close** → shutdown → fresh session next trial |
 | N | 5 trials A, 5 trials B (live start with **n=1**) |
 | Public WS | optional / unused (no strategy) |
+| Place shape | **Parallel place** of both legs at the same moment. A: `parallel_open=True` + `parallel_flatten=True` (same as `live_broker.default_live_send_pair`). B: dual `queue.put` in one `enqueue_dual`. Not classic sequential W6. |
 
 ### Differs (the independent variable)
 
 | | Contour A — full manager | Contour B — primitive send |
 |--|--------------------------|----------------------------|
 | After `signal` | `_recover_inflight_w6` → `ApprovalVault.issue` → `ApprovalBoundSender.send_approved` (lease `assert_can_send`, preflight, revalidate, consume, `order_prepared` journal fsync) → `_WsTradePlaceTransport` / `send_trade_place` | `build_w6_dual_payloads` → `PrimitiveDualSender.enqueue_dual` (`asyncio.Queue.put` both) → long-lived sender `ws.send` / dry dump |
-| Sequential vs simultaneous | W6 sequential: Bybit must fill before OKX is sent | Both legs enqueued immediately (historic `trade_manager`) |
 | Journal prepare on send path | Yes (`request_sent` fsync before transport) | No |
 | Recover / leftover scan | Yes, on the critical path | Skipped |
 | Operator approval | Required (`--ab-approve-one-shot` live) | Live still requires the CLI approve flag as a process gate; **not** on the send path |
 
-Dry run (`--ab-send=false`, default): A exercises the real journal/vault/lease/prepare with `dispatch_transport=False` (would-send). B runs the real queue→sender against a fake `send_fn`. No sockets. Dry A `signal_to_first_request_sent` is local manager cost, not VPS proof.
+Dry run (`--ab-send=false`, default): A exercises the real journal/vault/lease/prepare with `dispatch_transport=False` (would-send). Both venues are issued before prepare; would-send stamps for a wave share one monotonic instant (parallel-place analogue — journal is not assumed thread-safe, so dry does not spawn two W6 threads). B runs the real queue→sender against a fake `send_fn`. No sockets. Dry A `signal_to_first_request_sent` is local manager cost on the parallel-intent path, not VPS proof.
 
 ---
 
@@ -80,19 +82,19 @@ Dry run (`--ab-send=false`, default): A exercises the real journal/vault/lease/p
 
 | Path | What it contains / critical-path functions |
 |------|--------------------------------------------|
-| `app/bot/private/ws_ab_send_path.py` | CLI + protocol. `parse_ab_send_path_cli_args`, `main_ab_send_path`, `run_contour_a_dry_trial`, `run_contour_b_dry_trial`, `_run_contour_a_live`, `_run_contour_b_live`. Live A calls `run_w6_dual_leg(..., hold_after_open_sec=5)`. |
+| `app/bot/private/ws_ab_send_path.py` | CLI + protocol. `parse_ab_send_path_cli_args`, `main_ab_send_path`, `run_contour_a_dry_trial`, `run_contour_b_dry_trial`, `_run_contour_a_live`, `_run_contour_b_live`. Live A calls `run_w6_dual_leg(..., parallel_open=True, parallel_flatten=True, hold_after_open_sec=5)` via `CONTOUR_A_LIVE_W6_KWARGS` (same intent as `live_broker.default_live_send_pair`). |
 | `app/bot/private/ab_send_path_stages.py` | Stage labels, `StageTrace.mark`, p50/p95, JSON/CSV. No network. |
 | `app/bot/private/ws_warm_session.py` | Process-lifetime private+trade. `start_warm_private_session`, `ensure_ready`, `place_io_section`. **Off** the post-signal path once warm. |
 | `app/bot/private/ws_socket.py` | `PrivateWsSocket.send_text` / owner-loop (PR #12). Contour B live sender calls this. |
 | `app/bot/private/ws_gates.py` | `assert_ws_ab_send_path_gates` — fail-closed before any live socket. |
 | `app/bot/private/harness_readonly.py` | Dispatches `--ab-send-path` → `main_ab_send_path`. Default CLI still read-only. |
-| `app/bot/private/ws_w6_dual_leg.py` | W6 profile + `hold_after_open_sec` (default `0`; experiment only). Production W6 CLI unchanged. |
+| `app/bot/private/ws_w6_dual_leg.py` | W6 profile + `hold_after_open_sec` (default `0`) + optional `parallel_flatten` (default `False` so classic W6/W7 CLI flatten stays sequential). Experiment-only kwargs; production W6 CLI unchanged. |
 
 ### Contour A only (critical path after `signal`)
 
 | Path | Functions on the send path |
 |------|----------------------------|
-| `app/bot/private/ws_w6_dual_leg.py` | `run_w6_dual_leg` → `_recover_inflight_w6` → `vault.issue` → `_place_and_wait_fill` → `sender.send_approved` → `_flatten_venue` |
+| `app/bot/private/ws_w6_dual_leg.py` | `run_w6_dual_leg` → `_recover_inflight_w6` → `vault.issue` → `_place_pair_parallel` → `sender.send_approved` → `_flatten_pair_parallel` |
 | `app/bot/private/order_sender.py` | `ApprovalBoundSender.send_approved` — preflight, lease, consume, `_journal_prepared`, `_journal_request_sent`, `transport()` |
 | `app/bot/private/order_approval.py` | `ApprovalVault.issue` / `consume` (journal `operator_approval`) |
 | `app/bot/private/order_lease.py` | `LeaseSupervisor.assert_can_send` / reconstruct |
@@ -105,7 +107,7 @@ Dry run (`--ab-send=false`, default): A exercises the real journal/vault/lease/p
 |------|----------------------------|
 | `app/bot/private/ws_ab_primitive_send.py` | `build_w6_dual_payloads`, `PrimitiveDualSender.enqueue_dual`, async `_sender` (`queue.get` → `send_fn`). Historic analogue: `trade_manager` + `sender()` in `a1ba2b1:bybit_ws.py`. |
 
-B may use warm `trade_socket.send_text` as `send_fn`. It does **not** call `send_approved`, vault, or recover on the send path.
+B may use warm `trade_socket.send_text` as `send_fn`. It does **not** call `send_approved`, vault, or recover on the send path. Live B `enqueue_dual` puts both legs inside one `place_io_section` with no sequential venue wait (no Bybit-fill-then-OKX).
 
 ---
 
@@ -134,9 +136,9 @@ Contour B **skips** `recover` / `operator_approval` / `lease` / `order_prepared`
 
 1. Run A n=5 and B n=5 (or merge two JSON reports).
 2. Read `summary.contour_A` and `summary.contour_B`.
-3. Primary: `signal_to_first_request_sent` p50 and p95.
+3. Primary: `signal_to_first_request_sent` p50 and p95 (A − B = manager X ms on the **parallel** place path).
 4. `contour_ab_delta_ms.A_minus_B_p50_ms` on that interval is **X ms**.
-5. Also report `signal_to_terminal_flat` p50/p95 (venue + hold + close; do not treat as manager-only).
+5. Also report `signal_to_terminal_flat` p50/p95 (venue + hold + close; do not treat as manager-only). Parallel place means both venues can accept at the same moment; secondary still waits for **both** legs to reach a terminal flatten state.
 
 ```bash
 python3 - <<'PY'

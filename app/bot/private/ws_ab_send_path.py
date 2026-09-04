@@ -49,6 +49,14 @@ AB_LIVE_N_MAX = 5
 AB_PROTOCOL_HOLD_SEC = 5.0
 TRADE_LAT_MODEL_MS = 100.0
 
+# Match VPS-local live_broker.default_live_send_pair intent (not in git):
+# parallel open + parallel flatten on the same warm session. Default W6 CLI
+# stays sequential; only this experiment passes these kwargs.
+CONTOUR_A_LIVE_W6_KWARGS: dict[str, Any] = {
+    "parallel_open": True,
+    "parallel_flatten": True,
+}
+
 VPS_HOST = "root@38.180.94.108"
 VPS_STAGING = "/root/spread_staging"
 VPS_RESULTS_DIR = "/data/bbot-gear2/private/ab_send_path"
@@ -77,6 +85,7 @@ def print_vps_live_recipe() -> str:
 # Read docs/b-private-ab-send-path-experiment.md FIRST.
 # Host: {VPS_HOST}  Staging: {VPS_STAGING}
 # Profile: W6 TRUMP dual-leg (~$6–8/leg, ≪ $100/venue). Not SOL/XRP. Not gear2 strategy.
+# Place: both contours parallel (A: parallel_open+parallel_flatten like live_broker.default_live_send_pair).
 
 # --- 0) Preflight (read-only) ---
 # ssh {VPS_HOST} 'systemctl is-active spread-collector; systemctl show -p MainPID --value spread-collector'
@@ -271,7 +280,12 @@ def run_contour_a_dry_trial(
     data_root: Path,
     hold_sec: float = 0.0,
 ) -> StageTrace:
-    """Contour A dry: real journal/vault/lease/prepare; no ws.send."""
+    """Contour A dry: real journal/vault/lease/prepare; no ws.send.
+
+    Parallel-intent: both open plans are issued before any prepare; would-send
+    stamps fire together after both prepares (no Bybit-fill-then-OKX wait).
+    Same for flatten. Live uses ``parallel_open`` / ``parallel_flatten``.
+    """
     trace = StageTrace(trial_id=trial_id, contour="A", send_enabled=False)
     env = _dry_live_env(data_root)
     journal = PrivateJournalWriter(data_root, run_id=new_opaque_id("run"))
@@ -339,9 +353,10 @@ def run_contour_a_dry_trial(
         dispatch_transport=False,
         journal_transport="ws_trade",
     )
-    # Dry would-send: manager finished; no socket.
-    trace.mark("first_request_sent")
-    trace.mark("second_request_sent")
+    # Would-send together after both prepares (parallel-intent, no fill wait).
+    sent_ns = time.monotonic_ns()
+    trace.mark("first_request_sent", mono_ns=sent_ns)
+    trace.mark("second_request_sent", mono_ns=sent_ns)
     trace.mark("first_ack")
     trace.mark("second_ack")
     trace.mark("terminal_fill")
@@ -377,11 +392,14 @@ def run_contour_a_dry_trial(
     sender.send_approved(
         okx_flat, fo, creds, env, dispatch_transport=False, journal_transport="ws_trade"
     )
-    trace.mark("close_first_request_sent")
-    trace.mark("close_second_request_sent")
+    close_ns = time.monotonic_ns()
+    trace.mark("close_first_request_sent", mono_ns=close_ns)
+    trace.mark("close_second_request_sent", mono_ns=close_ns)
     trace.mark("terminal_flat")
     trace.notes["send_result_status"] = b_res.status
     trace.notes["dry_dispatch"] = False
+    trace.notes["parallel_open"] = True
+    trace.notes["parallel_flatten"] = True
     return trace
 
 
@@ -605,6 +623,7 @@ def _run_contour_a_live(
             warm_session=warm,
             send_gate=assert_ws_ab_send_path_gates,
             hold_after_open_sec=cli.hold_sec,
+            **CONTOUR_A_LIVE_W6_KWARGS,
         )
         events_after = [
             ev
@@ -632,6 +651,9 @@ def _run_contour_a_live(
         trace.notes["w6_status"] = w6.status
         trace.notes["w6_flat_after"] = w6.flat_after
         trace.notes["w6_orders_sent"] = w6.orders_sent
+        trace.notes["parallel_open"] = True
+        trace.notes["parallel_flatten"] = True
+        trace.notes["open_mode"] = w6.open_mode
         report.add_trial(trace)
         report.notes["w6_status"] = w6.status
         report.notes["flat_after"] = w6.flat_after

@@ -151,6 +151,16 @@ class DryContourBranchTests(unittest.TestCase):
             self.assertIn(name, t.stamps_ns, msg=name)
         self.assertIn("signal_to_first_request_sent", t.intervals_ms())
         self.assertEqual(t.notes.get("send_result_status"), "prepared_not_dispatched")
+        self.assertTrue(t.notes.get("parallel_open"))
+        self.assertTrue(t.notes.get("parallel_flatten"))
+        self.assertEqual(
+            t.stamps_ns["first_request_sent"],
+            t.stamps_ns["second_request_sent"],
+        )
+        self.assertEqual(
+            t.stamps_ns["close_first_request_sent"],
+            t.stamps_ns["close_second_request_sent"],
+        )
 
     def test_dry_b_skips_manager_and_enqueues_both(self) -> None:
         from app.bot.private.ws_ab_send_path import run_contour_b_dry_trial
@@ -355,6 +365,76 @@ class PrimitivePayloadTests(unittest.TestCase):
         cb, co, _, _ = build_w6_dual_payloads(phase="close")
         self.assertTrue(cb["args"][0]["reduceOnly"])
         self.assertTrue(co["args"][0]["reduceOnly"])
+
+
+class ParallelPlaceContractTests(unittest.TestCase):
+    """AB must match production parallel dual-leg, not classic sequential W6."""
+
+    def test_contour_a_live_kwargs_match_live_broker_intent(self) -> None:
+        from app.bot.private.ws_ab_send_path import CONTOUR_A_LIVE_W6_KWARGS
+
+        self.assertEqual(
+            CONTOUR_A_LIVE_W6_KWARGS,
+            {"parallel_open": True, "parallel_flatten": True},
+        )
+
+    def test_w6_parallel_flatten_exists_and_defaults_off(self) -> None:
+        import inspect
+
+        from app.bot.private.ws_w6_dual_leg import run_w6_dual_leg
+
+        params = inspect.signature(run_w6_dual_leg).parameters
+        self.assertIn("parallel_open", params)
+        self.assertIn("parallel_flatten", params)
+        self.assertIs(params["parallel_open"].default, False)
+        self.assertIs(params["parallel_flatten"].default, False)
+
+    def test_contour_b_enqueues_both_legs_without_venue_wait(self) -> None:
+        import time
+
+        from app.bot.private.ws_ab_primitive_send import (
+            PrimitiveDualSender,
+            build_w6_dual_payloads,
+        )
+
+        starts: list[tuple[str, int]] = []
+
+        def send_fn(item) -> None:
+            starts.append((item.venue, time.monotonic_ns()))
+            time.sleep(0.08)
+
+        loop = PrimitiveDualSender(send_fn=send_fn)
+        try:
+            b_pay, o_pay, b_req, o_req = build_w6_dual_payloads(phase="open")
+            opened = loop.enqueue_dual(
+                bybit_payload=b_pay,
+                okx_payload=o_pay,
+                bybit_req_id=b_req,
+                okx_req_id=o_req,
+                phase="open",
+            )
+        finally:
+            loop.close()
+
+        self.assertEqual({v for v, _ in starts}, {"bybit", "okx"})
+        gap_ms = abs(starts[0][1] - starts[1][1]) / 1_000_000
+        # Sequential Bybit-fill-then-OKX would be ≥ sleep (80 ms). Parallel
+        # enqueue starts both senders in the same moment.
+        self.assertLess(gap_ms, 40.0)
+        self.assertIsNotNone(opened.first_enqueued_ns)
+        self.assertIsNotNone(opened.second_enqueued_ns)
+        enqueue_gap_ms = (
+            abs(opened.second_enqueued_ns - opened.first_enqueued_ns) / 1_000_000
+        )
+        self.assertLess(enqueue_gap_ms, 10.0)
+
+    def test_vps_recipe_states_parallel_place(self) -> None:
+        from app.bot.private.ws_ab_send_path import print_vps_live_recipe
+
+        text = print_vps_live_recipe()
+        self.assertIn("parallel_open", text)
+        self.assertIn("parallel_flatten", text)
+        self.assertNotIn("Bybit must fill before OKX", text)
 
 
 if __name__ == "__main__":

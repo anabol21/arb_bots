@@ -261,7 +261,9 @@ class AbSendPathReport:
             "historic_shape_ref": "a1ba2b1:bybit_ws.py (queue.put both legs → sender ws.send)",
             "contour_a_shape": (
                 "warm private+trade → W6 recover/leases → operator_approval "
-                "→ lease → prepare/journal/preflight → dispatch/ws.send"
+                "→ lease → prepare/journal/preflight → parallel dual-leg "
+                "dispatch/ws.send (parallel_open + parallel_flatten, same as "
+                "live_broker.default_live_send_pair)"
             ),
             "contour_b_shape": (
                 "warm private+trade → signal → asyncio.Queue.put both legs "
@@ -274,7 +276,8 @@ class AbSendPathReport:
                 "primary_live_intervals": list(PRIMARY_COMPARE_INTERVALS),
                 "hypothesis": (
                     "A_minus_B on signal_to_first_request_sent is the W6/manager "
-                    "overhead vs primitive queue→send (X ms)."
+                    "overhead vs primitive queue→send (X ms) on the production-like "
+                    "parallel place path (not classic sequential W6)."
                 ),
             },
         }
