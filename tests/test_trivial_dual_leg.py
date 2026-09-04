@@ -44,7 +44,7 @@ def _meta(coin: str = "SOL") -> InstrumentMeta:
     )
 
 
-def _book(*, bid: float = 100.0, ask: float = 100.1) -> dict:
+def _book(*, bid: float = 1.0, ask: float = 1.01) -> dict:
     return {"bid_price": bid, "ask_price": ask, "bid_qty": 10.0, "ask_qty": 10.0}
 
 
