@@ -241,12 +241,51 @@ def assert_ws_warm_private_gates(env: Optional[Mapping[str, str]] = None) -> str
     return venue
 
 
+def _warm_lat_opt_in(env: Mapping[str, str]) -> bool:
+    raw = (
+        env.get("BBOT_PRIVATE_WARM_LAT") or env.get("WARM_LAT") or ""
+    ).strip().lower()
+    return raw in {"1", "true", "yes", "on"}
+
+
+def assert_ws_warm_lat_gates(env: Optional[Mapping[str, str]] = None) -> str:
+    """Warm-Lat live-send gate: VENUE=live, LIVE_ORDERS=1, live profile, opt-in.
+
+    Separate from W3–W7. Never opens a socket by itself. Dry
+    ``--ws-warm-latency`` with ``--warm-lat-send=false`` does not use this gate.
+    """
+    if env is None:
+        raise WsProfileGateError("Warm-Lat requires an explicit env mapping")
+    try:
+        venue = resolve_venue(env)
+    except ValueError as exc:
+        raise WsProfileGateError(str(exc)) from exc
+    if venue != "live":
+        raise WsProfileGateError(f"Warm-Lat refuses VENUE={venue!r}; require live")
+    if not live_orders_enabled(env):
+        raise WsProfileGateError("Warm-Lat requires LIVE_ORDERS=1")
+    if not _warm_lat_opt_in(env):
+        raise WsProfileGateError(
+            "Warm-Lat requires explicit opt-in BBOT_PRIVATE_WARM_LAT=1 "
+            "(plus CLI --ws-warm-latency --warm-lat-approve-one-shot)"
+        )
+    profile = resolve_private_profile(env)
+    if profile.name != "live":
+        raise WsProfileGateError(
+            f"Warm-Lat refuses credential profile {profile.name!r}; require live"
+        )
+    if not profile.live_orders_flag:
+        raise WsProfileGateError("Warm-Lat requires live profile LIVE_ORDERS flag")
+    return venue
+
+
 def is_live_send_ws_profile_gate(gate: object) -> bool:
-    """True for W4/W5/W6/W7/warm send gates (call with env only; no environment= kwarg)."""
+    """True for W4/W5/W6/W7/warm/Warm-Lat send gates (env only; no environment=)."""
     return (
         gate is assert_ws_w4_send_gates
         or gate is assert_ws_w5_send_gates
         or gate is assert_ws_w6_send_gates
         or gate is assert_ws_w7_send_gates
         or gate is assert_ws_warm_private_gates
+        or gate is assert_ws_warm_lat_gates
     )

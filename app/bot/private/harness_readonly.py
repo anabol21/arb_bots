@@ -592,6 +592,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
         return main_ws_w7_parallel_dual_leg(argv)
 
+    if "--ws-warm-latency" in argv:
+        from app.bot.private.ws_warm_latency import main_ws_warm_latency
+
+        return main_ws_warm_latency(argv)
+
     report = run_readonly_harness()
     print(json.dumps(scrub_public_record(report), ensure_ascii=False, indent=2, sort_keys=True))
     if report.get("status") == "ok":
