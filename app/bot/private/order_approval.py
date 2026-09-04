@@ -82,7 +82,12 @@ def _index_approvals(events: list[dict[str, Any]]) -> tuple[dict[str, dict[str, 
 
 
 class ApprovalVault:
-    """Issues/consumes plan-bound approvals via exclusive journal lock."""
+    """Issues/consumes plan-bound approvals via exclusive journal lock.
+
+    Warm dual-leg hot path: grant/consume indexes load from durable journal at
+    most once per vault, then update in memory under the approval lock so each
+    leg does not rescan ``events.jsonl``.
+    """
 
     def __init__(
         self,
@@ -96,10 +101,32 @@ class ApprovalVault:
         self._key = hmac_key if hmac_key is not None else secrets.token_bytes(32)
         self._venue = venue
         self._environment = environment
+        self._index_loaded = False
+        self._grants: dict[str, dict[str, Any]] = {}
+        self._consumed: set[str] = set()
+        self._fps_granted: set[str] = set()
 
     @property
     def data_root(self) -> Path:
         return self._journal.data_root
+
+    def _ensure_index_locked(self) -> None:
+        """Caller must hold approval lock. Full scan at most once per vault."""
+        if self._index_loaded:
+            return
+        events = scan_operator_approvals(self.data_root)
+        grants, consumed = _index_approvals(events)
+        self._grants = dict(grants)
+        self._consumed = set(consumed)
+        self._fps_granted = {
+            str(g.get("approval_token_fingerprint")) for g in grants.values()
+        }
+        self._index_loaded = True
+
+    def prefetch_index(self) -> None:
+        """Optional warm-up: load approval index before the dual-leg critical path."""
+        with self._journal.approval_lock():
+            self._ensure_index_locked()
 
     def issue(
         self,
@@ -119,13 +146,10 @@ class ApprovalVault:
         binding = _plan_binding(self._key, plan)
 
         with self._journal.approval_lock() as lock:
-            events = scan_operator_approvals(self.data_root)
-            grants, consumed = _index_approvals(events)
-            if fingerprint in {
-                str(g.get("approval_token_fingerprint")) for g in grants.values()
-            }:
+            self._ensure_index_locked()
+            if fingerprint in self._fps_granted:
                 raise ApprovalError("approval fingerprint collision")
-            if record_id in grants:
+            if record_id in self._grants:
                 raise ApprovalError("approval_record_id collision")
             granted = self._journal.append_under_approval_lock(
                 lock,
@@ -144,6 +168,8 @@ class ApprovalVault:
                     "approval_expires_at_utc": expires_at,
                 },
             )
+            self._grants[record_id] = dict(granted)
+            self._fps_granted.add(fingerprint)
         return ApprovalToken(
             approval_record_id=record_id,
             approval_token_fingerprint=fingerprint,
@@ -181,11 +207,10 @@ class ApprovalVault:
         consumed_for = plan.order_attempt_id
 
         with self._journal.approval_lock() as lock:
-            events = scan_operator_approvals(self.data_root)
-            grants, consumed = _index_approvals(events)
-            if token.approval_record_id in consumed:
+            self._ensure_index_locked()
+            if token.approval_record_id in self._consumed:
                 raise ApprovalError("approval token already consumed")
-            grant = grants.get(token.approval_record_id)
+            grant = self._grants.get(token.approval_record_id)
             if grant is None:
                 raise ApprovalError("unknown approval grant")
             if str(grant["approval_token_fingerprint"]) != token.approval_token_fingerprint:
@@ -200,7 +225,7 @@ class ApprovalVault:
             if now is not None and _rfc3339(now) > expires:
                 raise ApprovalError("approval token expired")
 
-            return self._journal.append_under_approval_lock(
+            consumed_ev = self._journal.append_under_approval_lock(
                 lock,
                 {
                     "event_type": "operator_approval",
@@ -218,6 +243,8 @@ class ApprovalVault:
                     "consumed_for_operation_id": consumed_for,
                 },
             )
+            self._consumed.add(token.approval_record_id)
+            return consumed_ev
 
 
 def assert_plan_unmutated(original: OrderPlan, candidate: OrderPlan) -> None:

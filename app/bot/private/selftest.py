@@ -8854,24 +8854,23 @@ class W7PrivateWsParallelDualLegTests(unittest.TestCase):
             self.assertEqual(len(aborts), 1)
 
     def test_peer_does_not_dispatch_if_barrier_aborted(self) -> None:
-        """Pre-barrier fail on one venue must not transport the peer open."""
+        """Pre-dispatch prepare fail on one venue must not transport the peer open."""
         from app.bot.private.journal_v1 import PrivateJournalWriter, new_opaque_id
-        from app.bot.private.order_sender import ApprovalBoundSender, SendResult
+        from app.bot.private.order_sender import (
+            ApprovalBoundSender,
+            PreparedDispatch,
+            SendResult,
+        )
         from app.bot.private.ws_private import RestReseedResult
         from app.bot.private.ws_socket import FakePrivateWsSocket
         from app.bot.private.ws_w4_baseline import FakeFlatBaseline
         from app.bot.private.ws_w7_parallel_dual_leg import run_w7_parallel_dual_leg
 
-        orig = ApprovalBoundSender.send_approved
+        orig_prep = ApprovalBoundSender.prepare_approved
 
-        def wrapped(self, plan, token, credentials, env, **kwargs):  # type: ignore[no-untyped-def]
+        def wrapped_prep(self, plan, token, credentials, env, **kwargs):  # type: ignore[no-untyped-def]
+            # Fail OKX open prepare before dual enqueue/dispatch (old barrier abort).
             if str(plan.venue).startswith("okx") and not bool(plan.reduce_only):
-                barrier = kwargs.get("dispatch_barrier")
-                if barrier is not None:
-                    try:
-                        barrier.abort()
-                    except Exception:  # noqa: BLE001
-                        pass
                 return SendResult(
                     status="gate_failed",
                     plan_summary=plan.public_summary(),
@@ -8879,7 +8878,7 @@ class W7PrivateWsParallelDualLegTests(unittest.TestCase):
                     transport_invoked=False,
                     error_code="invalid_request",
                 )
-            return orig(self, plan, token, credentials, env, **kwargs)
+            return orig_prep(self, plan, token, credentials, env, **kwargs)
 
         with tempfile.TemporaryDirectory() as td:
             env = self._live_env(td)
@@ -8892,7 +8891,7 @@ class W7PrivateWsParallelDualLegTests(unittest.TestCase):
             otrade = FakePrivateWsSocket(auto_trade_ack=True, exchange="okx")
             self._push_hs(bpriv, btrade, okx=False)
             self._push_hs(opriv, otrade, okx=True)
-            ApprovalBoundSender.send_approved = wrapped  # type: ignore[assignment]
+            ApprovalBoundSender.prepare_approved = wrapped_prep  # type: ignore[assignment]
             try:
                 rep = run_w7_parallel_dual_leg(
                     n=1,
@@ -8913,10 +8912,11 @@ class W7PrivateWsParallelDualLegTests(unittest.TestCase):
                     terminal_wait_sec=0.2,
                 )
             finally:
-                ApprovalBoundSender.send_approved = orig  # type: ignore[assignment]
+                ApprovalBoundSender.prepare_approved = orig_prep  # type: ignore[assignment]
 
             self.assertEqual(rep.n_completed, 0, rep.as_public_dict())
             self.assertEqual(rep.orders_sent, 0, rep.as_public_dict())
+            # Handshake may write to trade outbox; only place frames must be absent.
             bybit_places = [
                 msg
                 for msg in btrade._outbox  # noqa: SLF001
@@ -8929,6 +8929,7 @@ class W7PrivateWsParallelDualLegTests(unittest.TestCase):
             ]
             self.assertEqual(bybit_places, [])
             self.assertEqual(okx_places, [])
+            _ = PreparedDispatch  # prepare/dispatch split is the abort surface
 
     def test_abort_journal_failure_is_visible(self) -> None:
         from app.bot.private.journal_v1 import (
