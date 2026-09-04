@@ -42,6 +42,8 @@ PYTHONPATH=. python -m research.gear22_quiet_regime_viz.build_fixture
 | `--gap-threshold-ms` | Inter-tick gap mark threshold (default `30000`) |
 | `--ma-bars` | Causal SMA windows in **5m bars** (default `3,12` → 15m / 60m) |
 | `--max-tick-points` | Even downsample cap for sparse tick overlay (default `4000`) |
+| `--candle-bins` | In-bar hist bins for click-to-inspect (default `32`; `0` disables) |
+| `--candle-temporal-bins` | Equal-time mean slots per 5m bar (default `16`) |
 | `--inline-plotly` | Embed plotly.js inside each HTML (large single-file). Default = sibling `plotly.min.js` |
 
 ### `--since` = last restart
@@ -94,6 +96,11 @@ context but is not the dual-stack primary.
    - mean ± std; min / max / IQR (equal-weight ticks)
    - **Time-weighted p25 / p50 / p95 / p99** as chart series
    - **Window histogram** of all ticks in `--since`/`--until` (equal weight)
+4. **Click-to-inspect (in-bar)** — click a 5m candlestick → fixed bottom panel with
+   (a) equal-weight histogram of that bar’s spread series and (b) equal-time bin
+   means across the 5m window. Compact payloads are computed at **build time**
+   from full ticks and attached as candlestick `customdata` (tens of bins, not
+   raw ticks). Prefer click over hover. Disable with `--candle-bins 0`.
 
 ## Time-weighted quantile convention
 
@@ -156,10 +163,10 @@ Return `MetricTrace` with `panel` in
 | Module | Role |
 |--------|------|
 | `load.py` | Discover / read parquet\|CSV, derive mid + spreads |
-| `candles.py` | 5m OHLC + intra-stats + causal SMA + TW quantile columns |
+| `candles.py` | 5m OHLC + intra-stats + causal SMA + TW quantile columns + click-inspect payloads |
 | `quantiles.py` | Hold weights + time-weighted quantile helper |
 | `gaps.py` | Inter-tick gap intervals |
-| `plot.py` | Plotly multi-block HTML writer + coin nav |
+| `plot.py` | Plotly multi-block HTML writer + coin nav + candle click inspect |
 | `metrics_ext.py` | Empty extension hook |
 | `cli.py` / `__main__.py` | CLI entry |
 

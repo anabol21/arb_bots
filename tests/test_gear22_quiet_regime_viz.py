@@ -12,9 +12,12 @@ import pandas as pd
 
 from research.gear22_quiet_regime_viz.candles import (
     BAR_MS,
+    DEFAULT_CANDLE_BINS,
     SPREAD_LONG_COL,
     SPREAD_SHORT_COL,
+    align_inspect_customdata,
     build_5m_bucket_stats,
+    build_bar_inspect_payloads,
     causal_sma,
 )
 from research.gear22_quiet_regime_viz.cli import run_viz
@@ -161,6 +164,70 @@ class TestLoadAndCandles(unittest.TestCase):
         )
 
 
+class TestBarInspectPayloads(unittest.TestCase):
+    def test_hist_and_temporal_compact(self) -> None:
+        df = load_ticks(
+            FIXTURE_TICKS,
+            coins=["SOL"],
+            since_ms=parse_since_ms(SINCE),
+            until_ms=parse_since_ms(UNTIL),
+        )
+        payloads = build_bar_inspect_payloads(
+            df,
+            value_col=SPREAD_LONG_COL,
+            n_bins=24,
+            n_temporal=12,
+            side="long",
+        )
+        self.assertGreater(len(payloads), 0)
+        sample = next(iter(payloads.values()))
+        self.assertEqual(sample["side"], "long")
+        self.assertEqual(sample["col"], SPREAD_LONG_COL)
+        self.assertEqual(len(sample["c"]), 24)
+        self.assertEqual(len(sample["tv"]), 12)
+        self.assertEqual(sum(sample["c"]), sample["n"])
+        self.assertGreater(sample["n"], 0)
+        self.assertIsNotNone(sample["lo"])
+        self.assertIsNotNone(sample["hi"])
+        # Compact: no per-tick arrays.
+        self.assertNotIn("ticks", sample)
+        self.assertNotIn("ts", sample)
+
+    def test_align_customdata_matches_ohlc_rows(self) -> None:
+        df = load_ticks(
+            FIXTURE_TICKS,
+            coins=["SOL"],
+            since_ms=parse_since_ms(SINCE),
+            until_ms=parse_since_ms(UNTIL),
+        )
+        buckets = build_5m_bucket_stats(
+            df,
+            value_col=SPREAD_LONG_COL,
+            start_ms=parse_since_ms(SINCE),
+            end_ms=parse_since_ms(UNTIL),
+            fill_empty_buckets=True,
+        )
+        payloads = build_bar_inspect_payloads(
+            df, value_col=SPREAD_LONG_COL, n_bins=DEFAULT_CANDLE_BINS, side="long"
+        )
+        custom = align_inspect_customdata(buckets, payloads)
+        n_ohlc = int((buckets["tick_count"].fillna(0).astype(int) > 0).sum())
+        self.assertEqual(len(custom), n_ohlc)
+        self.assertTrue(any(cd is not None for cd in custom))
+
+    def test_zero_bins_disables(self) -> None:
+        df = load_ticks(
+            FIXTURE_TICKS,
+            coins=["SOL"],
+            since_ms=parse_since_ms(SINCE),
+            until_ms=parse_since_ms(UNTIL),
+        )
+        self.assertEqual(
+            build_bar_inspect_payloads(df, value_col=SPREAD_LONG_COL, n_bins=0),
+            {},
+        )
+
+
 class TestSmokeHtml(unittest.TestCase):
     def test_cli_writes_html_nav_and_plotly(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -190,6 +257,36 @@ class TestSmokeHtml(unittest.TestCase):
                 self.assertIn("plotly.min.js", text)
                 self.assertIn("Extension point", text)
                 self.assertIn("gap_fraction", text)
+                # Click-to-inspect panel + compact customdata markers.
+                self.assertIn("candle-inspect", text)
+                self.assertIn("plotly_click", text)
+                self.assertIn("equal-time mean", text)
+                self.assertIn('"c":', text)
+                self.assertIn('"tv":', text)
+                self.assertIn("click for in-bar distribution", text)
+                # Must not embed raw tick dumps for inspect.
+                self.assertNotIn("full_ticks", text)
+
+    def test_inspect_payload_size_vs_tick_overlay(self) -> None:
+        """Inspect customdata should stay << sparse tick overlay cost."""
+        df = load_ticks(
+            FIXTURE_TICKS,
+            coins=["SOL"],
+            since_ms=parse_since_ms(SINCE),
+            until_ms=parse_since_ms(UNTIL),
+        )
+        payloads = build_bar_inspect_payloads(
+            df,
+            value_col=SPREAD_LONG_COL,
+            n_bins=32,
+            n_temporal=16,
+            side="long",
+        )
+        inspect_bytes = len(json.dumps(payloads, separators=(",", ":")))
+        # Rough tick-overlay proxy: 4000 points × 2 floats × ~12 chars.
+        tick_overlay_proxy = min(len(df), 4_000) * 2 * 12
+        self.assertLess(inspect_bytes, max(tick_overlay_proxy // 4, 2_000))
+        self.assertLess(inspect_bytes, 50_000)  # fixture window: tiny
 
 
 if __name__ == "__main__":

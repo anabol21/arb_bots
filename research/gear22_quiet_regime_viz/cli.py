@@ -9,6 +9,8 @@ from typing import Sequence
 
 from research.gear22_quiet_regime_viz.candles import (
     DEFAULT_MA_BARS,
+    DEFAULT_CANDLE_BINS,
+    DEFAULT_CANDLE_TEMPORAL_BINS,
     BAR_MS,
     SPREAD_LONG_COL,
     SPREAD_SHORT_COL,
@@ -107,6 +109,24 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="Even downsample cap for sparse tick overlay.",
     )
     p.add_argument(
+        "--candle-bins",
+        type=int,
+        default=DEFAULT_CANDLE_BINS,
+        help=(
+            "Equal-weight in-bar histogram bins for click-to-inspect "
+            f"(default {DEFAULT_CANDLE_BINS}; 0 disables inspect payloads)."
+        ),
+    )
+    p.add_argument(
+        "--candle-temporal-bins",
+        type=int,
+        default=DEFAULT_CANDLE_TEMPORAL_BINS,
+        help=(
+            "Equal-time mean slots per 5m bar for click-to-inspect temporal view "
+            f"(default {DEFAULT_CANDLE_TEMPORAL_BINS})."
+        ),
+    )
+    p.add_argument(
         "--inline-plotly",
         action="store_true",
         help=(
@@ -128,6 +148,8 @@ def run_viz(
     ma_bars: Sequence[int] = DEFAULT_MA_BARS,
     max_tick_points: int = 4_000,
     inline_plotly: bool = False,
+    candle_bins: int = DEFAULT_CANDLE_BINS,
+    candle_temporal_bins: int = DEFAULT_CANDLE_TEMPORAL_BINS,
 ) -> list[Path]:
     since_ms = parse_since_ms(since)
     until_ms = parse_since_ms(until) if until else int(
@@ -194,6 +216,8 @@ def run_viz(
             "n_gaps": len(gaps),
             "gap_threshold_ms": gap_threshold_ms,
             "ma_bars": ",".join(str(x) for x in ma_bars),
+            "candle_bins": candle_bins,
+            "candle_temporal_bins": candle_temporal_bins,
             "spread_long": "(bybit_bid-okx_ask)/bybit_bid*100 → open_long",
             "spread_short": "(okx_bid-bybit_ask)/okx_bid*100 → open_short",
             "tw_weights": "hold until next tick; last tick → 5m bar end",
@@ -213,6 +237,8 @@ def run_viz(
             ma_bars=ma_bars,
             max_tick_points=max_tick_points,
             inline_plotly=inline_plotly,
+            candle_bins=candle_bins,
+            candle_temporal_bins=candle_temporal_bins,
         )
         print(f"wrote {path} (ticks={len(sub)} gaps={len(gaps)})")
         written.append(path)
@@ -231,6 +257,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         ma_bars=args.ma_bars,
         max_tick_points=args.max_tick_points,
         inline_plotly=args.inline_plotly,
+        candle_bins=args.candle_bins,
+        candle_temporal_bins=args.candle_temporal_bins,
     )
     return 0
 

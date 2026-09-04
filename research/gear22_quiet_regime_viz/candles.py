@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Optional, Sequence
+from typing import Any, Optional, Sequence
 
 import numpy as np
 import pandas as pd
@@ -18,6 +18,10 @@ BAR_MS = int(BAR_INTERVAL_MS)  # 300_000
 
 # Causal SMA windows on **candle closes** (number of completed 5m bars).
 DEFAULT_MA_BARS: tuple[int, ...] = (3, 12)  # 15m and 60m lookbacks
+
+# Compact click-to-inspect payloads (build-time; not full ticks in HTML).
+DEFAULT_CANDLE_BINS = 32
+DEFAULT_CANDLE_TEMPORAL_BINS = 16
 
 # Policy-aligned primary series (see app.policy.features).
 SPREAD_LONG_COL = "spread_long"
@@ -208,3 +212,121 @@ def downsample_ticks(
         np.round(np.linspace(0, n - 1, max_points)).astype(np.int64)
     )
     return ticks.iloc[idx].copy()
+
+
+def _bar_hist_and_temporal(
+    y: np.ndarray,
+    ts: np.ndarray,
+    *,
+    bar_start: int,
+    bar_ms: int,
+    n_bins: int,
+    n_temporal: int,
+) -> dict[str, Any]:
+    """Compact equal-weight hist + equal-time bin means for one bar."""
+    finite = np.isfinite(y)
+    yf = y[finite]
+    tsf = ts[finite]
+    n = int(yf.size)
+    payload: dict[str, Any] = {
+        "n": n,
+        "lo": None,
+        "hi": None,
+        "c": [0] * max(int(n_bins), 0),
+        "tv": [None] * max(int(n_temporal), 0),
+    }
+    if n == 0 or n_bins <= 0:
+        return payload
+
+    y_min = float(np.min(yf))
+    y_max = float(np.max(yf))
+    if y_min == y_max:
+        pad = max(abs(y_min) * 1e-6, 1e-6)
+        y_min -= pad
+        y_max += pad
+    counts, edges = np.histogram(yf, bins=int(n_bins), range=(y_min, y_max))
+    payload["lo"] = round(float(edges[0]), 5)
+    payload["hi"] = round(float(edges[-1]), 5)
+    payload["c"] = [int(v) for v in counts.tolist()]
+
+    n_t = int(n_temporal)
+    if n_t > 0:
+        # Equal-time bins over [bar_start, bar_end); mean of ticks in each slot.
+        rel = (tsf.astype("float64") - float(bar_start)) / float(bar_ms)
+        slot = np.clip(np.floor(rel * n_t).astype("int64"), 0, n_t - 1)
+        sums = np.zeros(n_t, dtype="float64")
+        cnts = np.zeros(n_t, dtype="int64")
+        for i in range(n):
+            s = int(slot[i])
+            sums[s] += float(yf[i])
+            cnts[s] += 1
+        tv: list[float | None] = []
+        for s in range(n_t):
+            if cnts[s] > 0:
+                tv.append(round(float(sums[s] / float(cnts[s])), 5))
+            else:
+                tv.append(None)
+        payload["tv"] = tv
+    return payload
+
+
+def build_bar_inspect_payloads(
+    ticks: pd.DataFrame,
+    *,
+    value_col: str = SPREAD_LONG_COL,
+    bar_ms: int = BAR_MS,
+    n_bins: int = DEFAULT_CANDLE_BINS,
+    n_temporal: int = DEFAULT_CANDLE_TEMPORAL_BINS,
+    side: str = "long",
+) -> dict[int, dict[str, Any]]:
+    """Build compact per-bar hist + temporal payloads keyed by ``bar_start_ms``.
+
+    Intended for click-to-inspect HTML: tens of bins / coarse equal-time means,
+    not full tick embedding. Empty bars are omitted.
+    """
+    if n_bins <= 0:
+        return {}
+    if value_col not in ticks.columns or ticks.empty:
+        return {}
+    work = ticks.sort_values("event_local_ts_ms", kind="mergesort")
+    bar_starts = (work["event_local_ts_ms"].to_numpy(dtype="int64") // int(bar_ms)) * int(
+        bar_ms
+    )
+    y_all = work[value_col].to_numpy(dtype="float64")
+    ts_all = work["event_local_ts_ms"].to_numpy(dtype="int64")
+    out: dict[int, dict[str, Any]] = {}
+    for bs in np.unique(bar_starts):
+        mask = bar_starts == int(bs)
+        payload = _bar_hist_and_temporal(
+            y_all[mask],
+            ts_all[mask],
+            bar_start=int(bs),
+            bar_ms=int(bar_ms),
+            n_bins=int(n_bins),
+            n_temporal=int(n_temporal),
+        )
+        if int(payload["n"]) <= 0:
+            continue
+        payload["side"] = str(side)
+        payload["col"] = str(value_col)
+        payload["bs"] = int(bs)
+        payload["bar_ms"] = int(bar_ms)
+        payload["nb"] = int(n_bins)
+        payload["nt"] = int(n_temporal)
+        out[int(bs)] = payload
+    return out
+
+
+def align_inspect_customdata(
+    buckets: pd.DataFrame,
+    payloads: dict[int, dict[str, Any]],
+) -> list[Any]:
+    """Align inspect payloads to non-empty OHLC rows (candlestick ``customdata``)."""
+    if buckets.empty:
+        return []
+    has_ohlc = buckets["tick_count"].fillna(0).astype(int) > 0
+    rows = buckets.loc[has_ohlc]
+    out: list[Any] = []
+    for bs in rows["bar_start_ms"].to_numpy(dtype="int64"):
+        out.append(payloads.get(int(bs)))
+    return out
