@@ -42,9 +42,9 @@ PYTHONPATH=. python -m research.gear22_quiet_regime_viz.build_fixture
 | `--gap-threshold-ms` | Inter-tick gap mark threshold (default `30000`) |
 | `--ma-bars` | Causal SMA windows in **5m bars** (default `3,12` → 15m / 60m) |
 | `--max-tick-points` | Even downsample cap for sparse tick overlay (default `4000`) |
-| `--candle-bins` | In-bar hist bins for click-to-inspect (default `32`; `0` disables) |
+| `--candle-bins` | In-bar **TW-mass** hist bins for click-to-inspect (default `32`; `0` disables) |
 | `--candle-temporal-bins` | Equal-time mean slots per 5m bar (default `16`) |
-| `--latency-bins` | In-bar venue latency hist bins (default `24`; `0` disables) |
+| `--latency-bins` | In-bar venue latency **TW-mass** hist bins (default `24`; `0` disables) |
 | `--latency-temporal-bins` | Equal-time mean slots for latency temporal view (default `12`) |
 | `--inline-plotly` | Embed plotly.js inside each HTML (large single-file). Default = sibling `plotly.min.js` |
 
@@ -100,14 +100,30 @@ context but is not the dual-stack primary.
    - **Window histogram** of all ticks in `--since`/`--until` (equal weight)
 4. **Click-to-inspect (in-bar)** — click a 5m candlestick (or its MA / sparse-tick
    overlay in the candle row) → fixed bottom panel with
-   (a) equal-weight histogram of that bar’s spread series, (b) equal-time bin means,
-   and (c) **venue latency** hist + equal-time means for `okx_latency_ms` /
+   (a) **time-weighted mass** histogram of that bar’s spread (robust x-range ≈
+   TW p01–p99; rare spikes no longer stretch the axis to empty space),
+   (b) **TW p50 / p95 / p99** (and mean) in the subtitle + vlines on the hist,
+   (c) equal-time bin means (temporal; not TW — see below), and
+   (d) **venue latency** TW-mass hist + equal-time means for `okx_latency_ms` /
    `bybit_latency_ms` when those columns are available.
    Compact payloads are computed at **build time** from full ticks and attached as
    candlestick `customdata` (tens of bins, not raw ticks). Clicks on overlays resolve
    the bar by time against that `customdata` (overlays sit above the candle trace).
    Prefer click over hover. Disable spread inspect with `--candle-bins 0`; latency
    with `--latency-bins 0`.
+
+### Inspect payload weighting
+
+| Field | Weighting | Notes |
+|-------|-----------|-------|
+| `c` (hist bins) | **TW mass (ms)** | Hold-until-next-tick; last → bar end. Key `c_w=tw_ms`. |
+| `tw.mean` / `tw.p50` / `tw.p95` / `tw.p99` | **TW** | Same hold rule as `quantiles.py`. |
+| `lo` / `hi` | TW p01–p99 (+ pad) | Robust axis; outliers clipped into edge bins. |
+| `tv` (temporal) | Equal-time slot means | Documented `tv_w=equal_time`; not TW. |
+| latency nested `lat.okx` / `lat.bybit` | Same as above | Per-venue finite samples only. |
+
+Equal-weight tick counts + `hi = max` (rare spike) caused crushed-left / empty-right
+hists; TW mass + robust range is the fix.
 
 ### Latency columns
 
@@ -121,7 +137,7 @@ Derived in `load.derive_research_series` (same convention as `research/lean_tick
 If precomputed latency columns already exist in the dump, they are kept (numeric
 coerce). If source timestamps are missing for a venue, that venue’s latency key is
 omitted from the inspect payload. Non-finite latency values are **skipped** in the
-per-bar hist / temporal means (`n` counts only finite samples).
+per-bar TW hist / temporal means (`n` counts only finite samples).
 
 ## Time-weighted quantile convention
 
@@ -185,7 +201,7 @@ Return `MetricTrace` with `panel` in
 |--------|------|
 | `load.py` | Discover / read parquet\|CSV, derive mid + spreads |
 | `candles.py` | 5m OHLC + intra-stats + causal SMA + TW quantile columns + click-inspect payloads |
-| `quantiles.py` | Hold weights + time-weighted quantile helper |
+| `quantiles.py` | Hold weights + TW quantile / mean / hist helpers |
 | `gaps.py` | Inter-tick gap intervals |
 | `plot.py` | Plotly multi-block HTML writer + coin nav + candle click inspect |
 | `metrics_ext.py` | Empty extension hook |

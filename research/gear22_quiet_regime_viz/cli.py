@@ -115,7 +115,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
         type=int,
         default=DEFAULT_CANDLE_BINS,
         help=(
-            "Equal-weight in-bar histogram bins for click-to-inspect "
+            "TW-mass in-bar histogram bins for click-to-inspect "
             f"(default {DEFAULT_CANDLE_BINS}; 0 disables inspect payloads)."
         ),
     )
@@ -133,7 +133,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
         type=int,
         default=DEFAULT_LATENCY_BINS,
         help=(
-            "In-bar venue latency histogram bins for click-to-inspect "
+            "In-bar venue latency TW-mass histogram bins for click-to-inspect "
             f"(default {DEFAULT_LATENCY_BINS}; 0 disables latency payloads)."
         ),
     )

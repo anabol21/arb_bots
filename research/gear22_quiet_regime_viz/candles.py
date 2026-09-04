@@ -10,7 +10,9 @@ import pandas as pd
 from app.schema.lean_event import BAR_INTERVAL_MS
 from research.gear22_quiet_regime_viz.quantiles import (
     TW_QUANTILE_NAMES,
+    inspect_tw_summary,
     tick_hold_weights_ms,
+    time_weighted_histogram,
     time_weighted_quantiles,
 )
 
@@ -218,6 +220,28 @@ def downsample_ticks(
     return ticks.iloc[idx].copy()
 
 
+def _robust_hist_range(
+    yf: np.ndarray,
+    weights: np.ndarray,
+) -> tuple[float, float]:
+    """TW p01–p99 axis range (pad slightly); falls back to min/max when needed."""
+    q = time_weighted_quantiles(yf, weights, levels=(0.01, 0.99))
+    lo = q.get("tw_p01", float("nan"))
+    hi = q.get("tw_p99", float("nan"))
+    if not (np.isfinite(lo) and np.isfinite(hi)):
+        lo = float(np.min(yf))
+        hi = float(np.max(yf))
+    if hi < lo:
+        lo, hi = hi, lo
+    if lo == hi:
+        pad = max(abs(lo) * 1e-6, 1e-6)
+        return lo - pad, hi + pad
+    # Small pad so edge mass is visible (~1% of span).
+    span = hi - lo
+    pad = max(span * 0.02, 1e-6)
+    return float(lo - pad), float(hi + pad)
+
+
 def _bar_hist_and_temporal(
     y: np.ndarray,
     ts: np.ndarray,
@@ -227,45 +251,70 @@ def _bar_hist_and_temporal(
     n_bins: int,
     n_temporal: int,
 ) -> dict[str, Any]:
-    """Compact equal-weight hist + equal-time bin means for one bar."""
+    """Compact TW-mass hist + TW summary + equal-time bin means for one bar.
+
+    Histogram ``c`` is time-weighted mass (ms) under the hold-until-next-tick
+    convention (last tick → bar end), binned on a robust TW p01–p99 x-range.
+    Temporal ``tv`` stays equal-time slot means (documented via ``tv_w``).
+    """
     finite = np.isfinite(y)
     yf = y[finite]
     tsf = ts[finite]
     n = int(yf.size)
+    nb = max(int(n_bins), 0)
+    nt = max(int(n_temporal), 0)
     payload: dict[str, Any] = {
         "n": n,
         "lo": None,
         "hi": None,
-        "c": [0] * max(int(n_bins), 0),
-        "tv": [None] * max(int(n_temporal), 0),
+        "c": [0.0] * nb,
+        "c_w": "tw_ms",
+        "tv": [None] * nt,
+        "tv_w": "equal_time",
+        "tw": {
+            "mean": None,
+            "p01": None,
+            "p50": None,
+            "p95": None,
+            "p99": None,
+        },
+        "w_ms": 0.0,
     }
-    if n == 0 or n_bins <= 0:
+    if n == 0 or nb <= 0:
         return payload
 
-    y_min = float(np.min(yf))
-    y_max = float(np.max(yf))
-    if y_min == y_max:
-        pad = max(abs(y_min) * 1e-6, 1e-6)
-        y_min -= pad
-        y_max += pad
-    counts, edges = np.histogram(yf, bins=int(n_bins), range=(y_min, y_max))
-    payload["lo"] = round(float(edges[0]), 5)
-    payload["hi"] = round(float(edges[-1]), 5)
-    payload["c"] = [int(v) for v in counts.tolist()]
+    # Sort by time for hold weights (same convention as bucket TW quantiles).
+    order = np.argsort(tsf, kind="mergesort")
+    yf = yf[order]
+    tsf = tsf[order]
+    bar_end = int(bar_start) + int(bar_ms)
+    weights = tick_hold_weights_ms(tsf, last_end_ms=bar_end)
+    tw = inspect_tw_summary(yf, weights)
+    payload["tw"] = tw
+    payload["w_ms"] = round(float(np.sum(weights[weights > 0])), 3)
 
-    n_t = int(n_temporal)
-    if n_t > 0:
+    lo, hi = _robust_hist_range(yf, weights)
+    mass, lo_out, hi_out = time_weighted_histogram(
+        yf, weights, n_bins=nb, lo=lo, hi=hi
+    )
+    payload["lo"] = round(float(lo_out), 5)
+    payload["hi"] = round(float(hi_out), 5)
+    # Round mass for compact JSON; keep floats (not tick counts).
+    payload["c"] = [round(float(v), 3) for v in mass.tolist()]
+
+    if nt > 0:
         # Equal-time bins over [bar_start, bar_end); mean of ticks in each slot.
+        # Documented as equal-time (not TW) for temporal readability.
         rel = (tsf.astype("float64") - float(bar_start)) / float(bar_ms)
-        slot = np.clip(np.floor(rel * n_t).astype("int64"), 0, n_t - 1)
-        sums = np.zeros(n_t, dtype="float64")
-        cnts = np.zeros(n_t, dtype="int64")
+        slot = np.clip(np.floor(rel * nt).astype("int64"), 0, nt - 1)
+        sums = np.zeros(nt, dtype="float64")
+        cnts = np.zeros(nt, dtype="int64")
         for i in range(n):
             s = int(slot[i])
             sums[s] += float(yf[i])
             cnts[s] += 1
         tv: list[float | None] = []
-        for s in range(n_t):
+        for s in range(nt):
             if cnts[s] > 0:
                 tv.append(round(float(sums[s] / float(cnts[s])), 5))
             else:
@@ -285,14 +334,17 @@ def build_bar_inspect_payloads(
     latency_temporal_bins: int = DEFAULT_LATENCY_TEMPORAL_BINS,
     side: str = "long",
 ) -> dict[int, dict[str, Any]]:
-    """Build compact per-bar hist + temporal payloads keyed by ``bar_start_ms``.
+    """Build compact per-bar TW hist + temporal payloads keyed by ``bar_start_ms``.
 
-    Includes optional venue latency hists (``okx_latency_ms`` /
-    ``bybit_latency_ms``) when those columns exist. Non-finite latency values
-    are skipped per venue; if a venue has zero finite samples in the bar, its
-    sub-payload has ``n=0`` and empty counts.
+    Spread and venue-latency histograms use **time-weighted mass** (hold until
+    next tick; last → bar end) on a robust TW p01–p99 x-range. Summary stats
+    in ``tw`` (mean / p50 / p95 / p99) are the same TW convention. Temporal
+    series remain equal-time slot means (``tv_w=equal_time``).
 
-    Intended for click-to-inspect HTML: tens of bins / coarse equal-time means,
+    Non-finite latency values are skipped per venue; if a venue has zero finite
+    samples in the bar, its sub-payload has ``n=0`` and empty mass.
+
+    Intended for click-to-inspect HTML: tens of bins / coarse temporal means,
     not full tick embedding. Empty bars are omitted.
     """
     if n_bins <= 0:
