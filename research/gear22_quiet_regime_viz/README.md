@@ -98,13 +98,16 @@ context but is not the dual-stack primary.
    - mean ± std; min / max / IQR (equal-weight ticks)
    - **Time-weighted p25 / p50 / p95 / p99** as chart series
    - **Window histogram** of all ticks in `--since`/`--until` (equal weight)
-4. **Click-to-inspect (in-bar)** — click a 5m candlestick → fixed bottom panel with
+4. **Click-to-inspect (in-bar)** — click a 5m candlestick (or its MA / sparse-tick
+   overlay in the candle row) → fixed bottom panel with
    (a) equal-weight histogram of that bar’s spread series, (b) equal-time bin means,
    and (c) **venue latency** hist + equal-time means for `okx_latency_ms` /
    `bybit_latency_ms` when those columns are available.
    Compact payloads are computed at **build time** from full ticks and attached as
-   candlestick `customdata` (tens of bins, not raw ticks). Prefer click over hover.
-   Disable spread inspect with `--candle-bins 0`; latency with `--latency-bins 0`.
+   candlestick `customdata` (tens of bins, not raw ticks). Clicks on overlays resolve
+   the bar by time against that `customdata` (overlays sit above the candle trace).
+   Prefer click over hover. Disable spread inspect with `--candle-bins 0`; latency
+   with `--latency-bins 0`.
 
 ### Latency columns
 

@@ -722,20 +722,82 @@ def _candle_inspect_script() -> str:
     });
   }
 
+  function toMs(v) {
+    if (v == null) return NaN;
+    if (typeof v === "number" && isFinite(v)) return v;
+    const ms = new Date(v).getTime();
+    return isFinite(ms) ? ms : NaN;
+  }
+
+  function axisId(tr, key, fallback) {
+    if (!tr || tr[key] == null || tr[key] === "") return fallback;
+    return tr[key];
+  }
+
+  /**
+   * Resolve inspect payload by click time against a candlestick's x + customdata.
+   * Needed because MA / sparse-tick overlays sit above the candle and steal plotly_click.
+   * Prefer bar containment [bar_start, bar_start + bar_ms); else nearest within half-bar.
+   */
+  function lookupCandleByTime(candleTraces, xVal) {
+    const target = toMs(xVal);
+    if (!isFinite(target)) return null;
+    let best = null;
+    let bestDist = Infinity;
+    for (let ti = 0; ti < candleTraces.length; ti++) {
+      const tr = candleTraces[ti];
+      const xs = tr.x || [];
+      const cds = tr.customdata || [];
+      for (let i = 0; i < xs.length; i++) {
+        const xm = toMs(xs[i]);
+        if (!isFinite(xm)) continue;
+        const cd = cds[i];
+        const barMs = (cd && cd.bar_ms) ? cd.bar_ms : 300000;
+        if (target >= xm && target < xm + barMs) {
+          return {cd: cd, x: xs[i]};
+        }
+        const dist = Math.abs(xm - target);
+        if (dist < bestDist) {
+          bestDist = dist;
+          best = {cd: cd, x: xs[i], dist: dist};
+        }
+      }
+    }
+    if (best && best.cd && best.dist <= 150000) return best;
+    return null;
+  }
+
   function bindGraph(gd) {
     if (!gd || gd._gear22InspectBound) return;
     const data = gd.data || [];
-    const hasCandle = data.some(function(t) { return t && t.type === "candlestick"; });
-    if (!hasCandle) return;
+    const candleTraces = data.filter(function(t) {
+      return t && t.type === "candlestick";
+    });
+    if (!candleTraces.length) return;
     gd._gear22InspectBound = true;
     gd.on("plotly_click", function(ev) {
       if (!ev || !ev.points || !ev.points.length) return;
       const pt = ev.points[0];
       const tr = (gd.data || [])[pt.curveNumber];
-      if (!tr || tr.type !== "candlestick") return;
-      const cd = pt.customdata;
+      let cd = null;
+      let xLabel = pt.x;
+      if (tr && tr.type === "candlestick") {
+        cd = pt.customdata;
+      } else {
+        // Overlay (MA / sparse ticks) or other row: only resolve when click
+        // shares the candle subplot y-axis so lower panels stay unchanged.
+        const clickY = axisId(tr, "yaxis", "y");
+        const onCandleRow = candleTraces.filter(function(ct) {
+          return axisId(ct, "yaxis", "y") === clickY;
+        });
+        if (!onCandleRow.length) return;
+        const hit = lookupCandleByTime(onCandleRow, pt.x);
+        if (!hit || !hit.cd) return;
+        cd = hit.cd;
+        xLabel = hit.x;
+      }
       if (!cd) return;
-      renderInspect(cd, pt.x);
+      renderInspect(cd, xLabel);
     });
   }
 
