@@ -151,6 +151,29 @@ def time_weighted_histogram(
     return mass, float(lo), float(hi)
 
 
+def inspect_equal_weight_summary(values: np.ndarray) -> dict[str, Any]:
+    """Equal-weight mean + p01/p50/p95/p99 (same compact keys as TW summary).
+
+    Used for venue-scoped latency inspect. Not time-weighted.
+    """
+    y = np.asarray(values, dtype="float64")
+    y = y[np.isfinite(y)]
+    out: dict[str, Any] = {
+        "mean": None,
+        "p01": None,
+        "p50": None,
+        "p95": None,
+        "p99": None,
+    }
+    if y.size == 0:
+        return out
+    out["mean"] = round(float(np.mean(y)), 5)
+    qs = np.percentile(y, [1, 50, 95, 99])
+    for key, val in zip(("p01", "p50", "p95", "p99"), qs):
+        out[key] = round(float(val), 5)
+    return out
+
+
 def inspect_tw_summary(
     values: np.ndarray,
     weights_ms: np.ndarray,

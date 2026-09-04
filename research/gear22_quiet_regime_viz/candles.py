@@ -10,6 +10,7 @@ import pandas as pd
 from app.schema.lean_event import BAR_INTERVAL_MS
 from research.gear22_quiet_regime_viz.quantiles import (
     TW_QUANTILE_NAMES,
+    inspect_equal_weight_summary,
     inspect_tw_summary,
     tick_hold_weights_ms,
     time_weighted_histogram,
@@ -28,6 +29,9 @@ DEFAULT_LATENCY_BINS = 24
 DEFAULT_LATENCY_TEMPORAL_BINS = 12
 LATENCY_OKX_COL = "okx_latency_ms"
 LATENCY_BYBIT_COL = "bybit_latency_ms"
+TRIGGER_COL = "trigger"
+TRIGGER_OKX = "okx"
+TRIGGER_BYBIT = "bybit"
 
 # Policy-aligned primary series (see app.policy.features).
 SPREAD_LONG_COL = "spread_long"
@@ -323,6 +327,117 @@ def _bar_hist_and_temporal(
     return payload
 
 
+def _ew_robust_hist_range(yf: np.ndarray) -> tuple[float, float]:
+    """Equal-weight p01–p99 axis range (pad slightly); min/max fallback."""
+    if yf.size == 0:
+        return float("nan"), float("nan")
+    if yf.size == 1:
+        v = float(yf[0])
+        pad = max(abs(v) * 1e-6, 1e-6)
+        return v - pad, v + pad
+    lo = float(np.percentile(yf, 1))
+    hi = float(np.percentile(yf, 99))
+    if not (np.isfinite(lo) and np.isfinite(hi)):
+        lo = float(np.min(yf))
+        hi = float(np.max(yf))
+    if hi < lo:
+        lo, hi = hi, lo
+    if lo == hi:
+        pad = max(abs(lo) * 1e-6, 1e-6)
+        return lo - pad, hi + pad
+    span = hi - lo
+    pad = max(span * 0.02, 1e-6)
+    return float(lo - pad), float(hi + pad)
+
+
+def _bar_count_hist_and_temporal(
+    y: np.ndarray,
+    ts: np.ndarray,
+    *,
+    bar_start: int,
+    bar_ms: int,
+    n_bins: int,
+    n_temporal: int,
+) -> dict[str, Any]:
+    """Equal-weight tick-count hist + equal-weight percentiles + equal-time means.
+
+    Histogram ``c`` is a tick count (``c_w=count``), not TW mass. Summary
+    keys reuse the compact ``tw`` shape (mean / p50 / p95 / p99) but the
+    values are equal-weight over the supplied samples. Temporal ``tv`` stays
+    equal-time slot means of those samples.
+    """
+    finite = np.isfinite(y)
+    yf = y[finite]
+    tsf = ts[finite]
+    n = int(yf.size)
+    nb = max(int(n_bins), 0)
+    nt = max(int(n_temporal), 0)
+    payload: dict[str, Any] = {
+        "n": n,
+        "lo": None,
+        "hi": None,
+        "c": [0] * nb,
+        "c_w": "count",
+        "tv": [None] * nt,
+        "tv_w": "equal_time",
+        "tw": {
+            "mean": None,
+            "p01": None,
+            "p50": None,
+            "p95": None,
+            "p99": None,
+        },
+    }
+    if n == 0 or nb <= 0:
+        return payload
+
+    order = np.argsort(tsf, kind="mergesort")
+    yf = yf[order]
+    tsf = tsf[order]
+    payload["tw"] = inspect_equal_weight_summary(yf)
+
+    lo, hi = _ew_robust_hist_range(yf)
+    ones = np.ones(n, dtype="float64")
+    mass, lo_out, hi_out = time_weighted_histogram(
+        yf, ones, n_bins=nb, lo=lo, hi=hi
+    )
+    payload["lo"] = round(float(lo_out), 5)
+    payload["hi"] = round(float(hi_out), 5)
+    # Integer tick counts (equal-weight); sum(c) == n.
+    payload["c"] = [int(round(float(v))) for v in mass.tolist()]
+
+    if nt > 0:
+        rel = (tsf.astype("float64") - float(bar_start)) / float(bar_ms)
+        slot = np.clip(np.floor(rel * nt).astype("int64"), 0, nt - 1)
+        sums = np.zeros(nt, dtype="float64")
+        cnts = np.zeros(nt, dtype="int64")
+        for i in range(n):
+            s = int(slot[i])
+            sums[s] += float(yf[i])
+            cnts[s] += 1
+        tv: list[float | None] = []
+        for s in range(nt):
+            if cnts[s] > 0:
+                tv.append(round(float(sums[s] / float(cnts[s])), 5))
+            else:
+                tv.append(None)
+        payload["tv"] = tv
+    return payload
+
+
+def _normalized_trigger_array(work: pd.DataFrame) -> Optional[np.ndarray]:
+    """Lowercased trigger strings, or ``None`` when the column is absent."""
+    if TRIGGER_COL not in work.columns:
+        return None
+    raw = work[TRIGGER_COL]
+    out = np.full(len(raw), "", dtype=object)
+    valid = raw.notna().to_numpy()
+    if np.any(valid):
+        cleaned = raw.loc[raw.notna()].astype(str).str.strip().str.lower().to_numpy()
+        out[valid] = cleaned
+    return out
+
+
 def build_bar_inspect_payloads(
     ticks: pd.DataFrame,
     *,
@@ -334,15 +449,22 @@ def build_bar_inspect_payloads(
     latency_temporal_bins: int = DEFAULT_LATENCY_TEMPORAL_BINS,
     side: str = "long",
 ) -> dict[int, dict[str, Any]]:
-    """Build compact per-bar TW hist + temporal payloads keyed by ``bar_start_ms``.
+    """Build compact per-bar inspect payloads keyed by ``bar_start_ms``.
 
-    Spread and venue-latency histograms use **time-weighted mass** (hold until
-    next tick; last → bar end) on a robust TW p01–p99 x-range. Summary stats
-    in ``tw`` (mean / p50 / p95 / p99) are the same TW convention. Temporal
-    series remain equal-time slot means (``tv_w=equal_time``).
+    **Spread** histogram uses **time-weighted mass** (hold until next tick;
+    last → bar end) on a robust TW p01–p99 x-range. Spread ``tw`` stats are
+    the same TW convention. Temporal series remain equal-time slot means
+    (``tv_w=equal_time``).
 
-    Non-finite latency values are skipped per venue; if a venue has zero finite
-    samples in the bar, its sub-payload has ``n=0`` and empty mass.
+    **Latency** is different: only the triggering venue's latency column is
+    used (``trigger==okx`` → ``okx_latency_ms`` only; ``trigger==bybit`` →
+    ``bybit_latency_ms`` only). Hist ``c`` is **equal-weight tick counts**
+    (``c_w=count``), not TW mass. Summary percentiles are equal-weight over
+    those venue-triggered ticks. If ``trigger`` is missing (legacy dump),
+    latency payloads are omitted entirely (``n`` would be unscoped).
+
+    Non-finite latency values are skipped per venue; a venue with zero
+    finite trigger-scoped samples has ``n=0`` and empty mass.
 
     Intended for click-to-inspect HTML: tens of bins / coarse temporal means,
     not full tick embedding. Empty bars are omitted.
@@ -357,6 +479,7 @@ def build_bar_inspect_payloads(
     )
     y_all = work[value_col].to_numpy(dtype="float64")
     ts_all = work["event_local_ts_ms"].to_numpy(dtype="int64")
+    trigger_all = _normalized_trigger_array(work)
     has_okx = LATENCY_OKX_COL in work.columns
     has_bybit = LATENCY_BYBIT_COL in work.columns
     okx_all = (
@@ -388,29 +511,35 @@ def build_bar_inspect_payloads(
         payload["bar_ms"] = int(bar_ms)
         payload["nb"] = int(n_bins)
         payload["nt"] = int(n_temporal)
-        # Latency: compact nested payloads; omit venue key entirely if column absent.
+        # Latency: trigger-scoped, equal-weight. Omit entirely if trigger
+        # is missing (cannot attribute) or both venue columns are absent.
         lat: dict[str, Any] = {}
         ts_m = ts_all[mask]
-        if okx_all is not None and int(latency_bins) > 0:
-            lat["okx"] = _bar_hist_and_temporal(
-                okx_all[mask],
-                ts_m,
-                bar_start=int(bs),
-                bar_ms=int(bar_ms),
-                n_bins=int(latency_bins),
-                n_temporal=int(latency_temporal_bins),
-            )
-            lat["okx"]["col"] = LATENCY_OKX_COL
-        if bybit_all is not None and int(latency_bins) > 0:
-            lat["bybit"] = _bar_hist_and_temporal(
-                bybit_all[mask],
-                ts_m,
-                bar_start=int(bs),
-                bar_ms=int(bar_ms),
-                n_bins=int(latency_bins),
-                n_temporal=int(latency_temporal_bins),
-            )
-            lat["bybit"]["col"] = LATENCY_BYBIT_COL
+        can_scope = trigger_all is not None and int(latency_bins) > 0
+        if can_scope:
+            trig_m = trigger_all[mask]
+            if okx_all is not None:
+                venue = trig_m == TRIGGER_OKX
+                lat["okx"] = _bar_count_hist_and_temporal(
+                    okx_all[mask][venue],
+                    ts_m[venue],
+                    bar_start=int(bs),
+                    bar_ms=int(bar_ms),
+                    n_bins=int(latency_bins),
+                    n_temporal=int(latency_temporal_bins),
+                )
+                lat["okx"]["col"] = LATENCY_OKX_COL
+            if bybit_all is not None:
+                venue = trig_m == TRIGGER_BYBIT
+                lat["bybit"] = _bar_count_hist_and_temporal(
+                    bybit_all[mask][venue],
+                    ts_m[venue],
+                    bar_start=int(bs),
+                    bar_ms=int(bar_ms),
+                    n_bins=int(latency_bins),
+                    n_temporal=int(latency_temporal_bins),
+                )
+                lat["bybit"]["col"] = LATENCY_BYBIT_COL
         if lat:
             payload["lat"] = lat
             payload["nlb"] = int(latency_bins)

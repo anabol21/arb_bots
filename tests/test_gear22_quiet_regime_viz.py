@@ -120,6 +120,8 @@ class TestLoadAndCandles(unittest.TestCase):
         self.assertIn(SPREAD_LONG_COL, df.columns)
         self.assertIn(SPREAD_SHORT_COL, df.columns)
         self.assertIn("edge_pct", df.columns)
+        self.assertIn("trigger", df.columns)
+        self.assertTrue(set(df["trigger"].dropna().unique()) <= {"okx", "bybit"})
         self.assertTrue((df["event_local_ts_ms"] >= parse_since_ms(SINCE)).all())
 
     def test_policy_spread_formulas(self) -> None:
@@ -150,6 +152,8 @@ class TestLoadAndCandles(unittest.TestCase):
         derived = derive_research_series(raw)
         self.assertGreater(len(derived), 0)
         self.assertTrue(np.isfinite(derived[SPREAD_LONG_COL]).all())
+        self.assertIn("trigger", derived.columns)
+        self.assertTrue(set(derived["trigger"].dropna().unique()) <= {"okx", "bybit"})
 
     def test_5m_buckets_and_intentional_gap(self) -> None:
         df = load_ticks(
@@ -228,12 +232,11 @@ class TestBarInspectPayloads(unittest.TestCase):
         self.assertEqual(len(sample["lat"]["okx"]["c"]), 24)  # DEFAULT_LATENCY_BINS
         self.assertGreater(sample["lat"]["okx"]["n"], 0)
         self.assertLessEqual(sample["lat"]["okx"]["n"], sample["n"])
-        self.assertEqual(sample["lat"]["okx"]["c_w"], "tw_ms")
-        self.assertAlmostEqual(
-            sum(sample["lat"]["okx"]["c"]),
-            sample["lat"]["okx"]["w_ms"],
-            places=2,
-        )
+        self.assertEqual(sample["lat"]["okx"]["c_w"], "count")
+        self.assertEqual(sample["lat"]["bybit"]["c_w"], "count")
+        # Latency hist mass is tick counts, not TW ms.
+        self.assertEqual(sum(sample["lat"]["okx"]["c"]), sample["lat"]["okx"]["n"])
+        self.assertEqual(sum(sample["lat"]["bybit"]["c"]), sample["lat"]["bybit"]["n"])
         self.assertIn("p50", sample["lat"]["okx"]["tw"])
 
     def test_robust_range_vs_spike_max(self) -> None:
@@ -257,6 +260,7 @@ class TestBarInspectPayloads(unittest.TestCase):
             {
                 "event_local_ts_ms": ts,
                 SPREAD_LONG_COL: y,
+                "trigger": ["okx"] * int(ts.size),
                 "okx_latency_ms": lat,
                 "bybit_latency_ms": lat * 0.8,
             }
@@ -279,9 +283,79 @@ class TestBarInspectPayloads(unittest.TestCase):
         self.assertLess(float(sample["tw"]["p50"]), 1.0)
         self.assertEqual(sample["c_w"], "tw_ms")
         self.assertAlmostEqual(sum(sample["c"]), sample["w_ms"], places=2)
-        # Latency hist also robust (1ms spike at 200 must not own the axis).
+        # Latency is equal-weight: a 1-of-10 spike at 200ms *does* affect p99
+        # (unlike spread TW). Hist mass is tick counts, not hold-ms.
         okx = sample["lat"]["okx"]
+        self.assertEqual(okx["c_w"], "count")
+        self.assertEqual(sum(okx["c"]), okx["n"])
+        self.assertEqual(okx["n"], int(ts.size))
+        self.assertNotIn("w_ms", okx)
+
+    def test_latency_trigger_scoped_unequal_n_and_count_mass(self) -> None:
+        """Mixed-trigger bar: venue n differs; hist mass is tick counts; no leak."""
+        bar_start = 1_788_423_600_000
+        ts = bar_start + np.asarray(
+            [0, 10_000, 20_000, 30_000, 40_000],
+            dtype="int64",
+        )
+        df = pd.DataFrame(
+            {
+                "event_local_ts_ms": ts,
+                SPREAD_LONG_COL: [0.30, 0.31, 0.32, 0.33, 0.34],
+                # 3 okx / 2 bybit — n_okx must != n_bybit.
+                "trigger": ["okx", "okx", "bybit", "okx", "bybit"],
+                # Non-trigger venue latencies are decoys (must not enter that hist).
+                "okx_latency_ms": [10.0, 12.0, 999.0, 14.0, 888.0],
+                "bybit_latency_ms": [777.0, 666.0, 20.0, 555.0, 22.0],
+            }
+        )
+        payloads = build_bar_inspect_payloads(
+            df,
+            value_col=SPREAD_LONG_COL,
+            n_bins=16,
+            n_temporal=8,
+            latency_bins=12,
+            side="long",
+        )
+        self.assertEqual(len(payloads), 1)
+        sample = payloads[bar_start]
+        self.assertEqual(sample["c_w"], "tw_ms")
+        self.assertAlmostEqual(sum(sample["c"]), sample["w_ms"], places=2)
+        okx = sample["lat"]["okx"]
+        bybit = sample["lat"]["bybit"]
+        self.assertEqual(okx["n"], 3)
+        self.assertEqual(bybit["n"], 2)
+        self.assertNotEqual(okx["n"], bybit["n"])
+        self.assertEqual(okx["c_w"], "count")
+        self.assertEqual(bybit["c_w"], "count")
+        self.assertEqual(sum(okx["c"]), okx["n"])
+        self.assertEqual(sum(bybit["c"]), bybit["n"])
+        # Mass is counts, not latency-ms (10+12+14=36 would fail this).
+        self.assertEqual(sum(okx["c"]), 3)
+        self.assertAlmostEqual(float(okx["tw"]["mean"]), 12.0)
+        self.assertAlmostEqual(float(bybit["tw"]["mean"]), 21.0)
         self.assertLess(float(okx["hi"]), 50.0)
+        self.assertLess(float(bybit["hi"]), 50.0)
+        self.assertLess(float(okx["tw"]["p99"]), 50.0)
+        self.assertLess(float(bybit["tw"]["p99"]), 50.0)
+
+    def test_trigger_missing_omits_lat(self) -> None:
+        """Legacy dumps without trigger must not emit unscoped latency hists."""
+        df = load_ticks(
+            FIXTURE_TICKS,
+            coins=["SOL"],
+            since_ms=parse_since_ms(SINCE),
+            until_ms=parse_since_ms(UNTIL),
+        )
+        slim = df.drop(columns=["trigger"])
+        self.assertNotIn("trigger", slim.columns)
+        self.assertIn("okx_latency_ms", slim.columns)
+        payloads = build_bar_inspect_payloads(
+            slim, value_col=SPREAD_LONG_COL, n_bins=16, side="long"
+        )
+        sample = next(iter(payloads.values()))
+        self.assertNotIn("lat", sample)
+        self.assertEqual(sample["c_w"], "tw_ms")
 
     def test_latency_nan_skipped(self) -> None:
         df = load_ticks(
@@ -394,6 +468,8 @@ class TestSmokeHtml(unittest.TestCase):
                 self.assertIn("plotly_click", text)
                 self.assertIn("equal-time mean", text)
                 self.assertIn("TW mass", text)
+                self.assertIn("triggering venue", text)
+                self.assertIn("c_w=count", text)
                 self.assertIn("okx_latency_ms", text)
                 self.assertIn("bybit_latency_ms", text)
                 self.assertIn('"lat":', text)
@@ -423,6 +499,8 @@ class TestSmokeHtml(unittest.TestCase):
         self.assertIn("twVlines", script)
         self.assertIn("TW p50", script)
         self.assertIn("TW mass", script)
+        self.assertIn("c_w=count", script)
+        self.assertIn("trigger venue only", script)
         # Regression: old binder rejected MA / sparse-tick steals outright.
         self.assertNotIn(
             'if (!tr || tr.type !== "candlestick") return',

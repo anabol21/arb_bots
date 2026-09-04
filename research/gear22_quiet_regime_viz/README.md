@@ -44,7 +44,7 @@ PYTHONPATH=. python -m research.gear22_quiet_regime_viz.build_fixture
 | `--max-tick-points` | Even downsample cap for sparse tick overlay (default `4000`) |
 | `--candle-bins` | In-bar **TW-mass** hist bins for click-to-inspect (default `32`; `0` disables) |
 | `--candle-temporal-bins` | Equal-time mean slots per 5m bar (default `16`) |
-| `--latency-bins` | In-bar venue latency **TW-mass** hist bins (default `24`; `0` disables) |
+| `--latency-bins` | In-bar **trigger-venue** latency hist bins, **equal-weight tick counts** (default `24`; `0` disables) |
 | `--latency-temporal-bins` | Equal-time mean slots for latency temporal view (default `12`) |
 | `--inline-plotly` | Embed plotly.js inside each HTML (large single-file). Default = sibling `plotly.min.js` |
 
@@ -104,8 +104,10 @@ context but is not the dual-stack primary.
    TW p01–p99; rare spikes no longer stretch the axis to empty space),
    (b) **TW p50 / p95 / p99** (and mean) in the subtitle + vlines on the hist,
    (c) equal-time bin means (temporal; not TW — see below), and
-   (d) **venue latency** TW-mass hist + equal-time means for `okx_latency_ms` /
-   `bybit_latency_ms` when those columns are available.
+   (d) **venue latency of the triggering venue only** — equal-weight tick-count
+   hist + equal-time means. A tick with `trigger=="okx"` contributes only
+   `okx_latency_ms`; `trigger=="bybit"` contributes only `bybit_latency_ms`.
+   The other book’s latency is never put into that venue’s inspect hist.
    Compact payloads are computed at **build time** from full ticks and attached as
    candlestick `customdata` (tens of bins, not raw ticks). Clicks on overlays resolve
    the bar by time against that `customdata` (overlays sit above the candle trace).
@@ -116,14 +118,33 @@ context but is not the dual-stack primary.
 
 | Field | Weighting | Notes |
 |-------|-----------|-------|
-| `c` (hist bins) | **TW mass (ms)** | Hold-until-next-tick; last → bar end. Key `c_w=tw_ms`. |
-| `tw.mean` / `tw.p50` / `tw.p95` / `tw.p99` | **TW** | Same hold rule as `quantiles.py`. |
-| `lo` / `hi` | TW p01–p99 (+ pad) | Robust axis; outliers clipped into edge bins. |
+| spread `c` (hist bins) | **TW mass (ms)** | Hold-until-next-tick; last → bar end. Key `c_w=tw_ms`. |
+| spread `tw.mean` / `tw.p50` / `tw.p95` / `tw.p99` | **TW** | Same hold rule as `quantiles.py`. |
+| spread `lo` / `hi` | TW p01–p99 (+ pad) | Robust axis; outliers clipped into edge bins. |
 | `tv` (temporal) | Equal-time slot means | Documented `tv_w=equal_time`; not TW. |
-| latency nested `lat.okx` / `lat.bybit` | Same as above | Per-venue finite samples only. |
+| latency `lat.okx` / `lat.bybit` `c` | **Equal-weight tick counts** | Key `c_w=count`. `sum(c) == n` (finite trigger-scoped ticks), not ms. |
+| latency `tw.*` (same compact keys) | **Equal-weight** | Mean / p01 / p50 / p95 / p99 over trigger-scoped ticks only. |
+| latency `lo` / `hi` | Equal-weight p01–p99 (+ pad) | Trigger-scoped samples only. |
 
-Equal-weight tick counts + `hi = max` (rare spike) caused crushed-left / empty-right
-hists; TW mass + robust range is the fix.
+Spread: equal-weight tick counts + `hi = max` (rare spike) caused crushed-left /
+empty-right hists; TW mass + robust range is the fix. Latency is **not**
+time-weighted: a long-held stale other-book latency must not dominate.
+
+### Latency trigger scope
+
+`n_okx` and `n_bybit` in a bar are **trigger counts** (finite samples), not the
+spread tick count. They must be able to differ when one venue fires more often.
+
+| Tick `trigger` | Used in inspect | Ignored for that tick |
+|----------------|-----------------|------------------------|
+| `okx` | `okx_latency_ms` only | `bybit_latency_ms` |
+| `bybit` | `bybit_latency_ms` only | `okx_latency_ms` |
+
+`trigger` is loaded via `load.py` (`_READ_COLS`) and kept on the working frame.
+If `trigger` is missing (legacy dump), latency payloads are **omitted** (`lat`
+absent) — unscoped every-tick latency would mix “freshness of the other book”
+with the venue that fired the row. Non-finite values are still skipped (`n`
+counts only finite trigger-scoped samples).
 
 ### Latency columns
 
@@ -136,8 +157,8 @@ Derived in `load.derive_research_series` (same convention as `research/lean_tick
 
 If precomputed latency columns already exist in the dump, they are kept (numeric
 coerce). If source timestamps are missing for a venue, that venue’s latency key is
-omitted from the inspect payload. Non-finite latency values are **skipped** in the
-per-bar TW hist / temporal means (`n` counts only finite samples).
+omitted from the inspect payload. Non-finite latency values are **skipped**.
+Inspect uses a venue’s latency **only on ticks that venue triggered**.
 
 ## Time-weighted quantile convention
 
@@ -199,7 +220,7 @@ Return `MetricTrace` with `panel` in
 
 | Module | Role |
 |--------|------|
-| `load.py` | Discover / read parquet\|CSV, derive mid + spreads |
+| `load.py` | Discover / read parquet\|CSV, derive mid + spreads, keep `trigger` |
 | `candles.py` | 5m OHLC + intra-stats + causal SMA + TW quantile columns + click-inspect payloads |
 | `quantiles.py` | Hold weights + TW quantile / mean / hist helpers |
 | `gaps.py` | Inter-tick gap intervals |

@@ -133,8 +133,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
         type=int,
         default=DEFAULT_LATENCY_BINS,
         help=(
-            "In-bar venue latency TW-mass histogram bins for click-to-inspect "
-            f"(default {DEFAULT_LATENCY_BINS}; 0 disables latency payloads)."
+            "In-bar trigger-venue latency histogram bins (equal-weight tick "
+            f"counts, not TW; default {DEFAULT_LATENCY_BINS}; 0 disables)."
         ),
     )
     p.add_argument(
@@ -242,7 +242,11 @@ def run_viz(
             "candle_temporal_bins": candle_temporal_bins,
             "latency_bins": latency_bins,
             "latency_temporal_bins": latency_temporal_bins,
-            "latency_def": "okx/bybit_latency_ms = local_recv − exchange_ts",
+            "latency_def": (
+                "trigger-venue only: okx/bybit_latency_ms = local_recv − "
+                "exchange_ts; latency hist = equal-weight ticks (c_w=count); "
+                "spread hist stays TW"
+            ),
             "spread_long": "(bybit_bid-okx_ask)/bybit_bid*100 → open_long",
             "spread_short": "(okx_bid-bybit_ask)/okx_bid*100 → open_short",
             "tw_weights": "hold until next tick; last tick → 5m bar end",

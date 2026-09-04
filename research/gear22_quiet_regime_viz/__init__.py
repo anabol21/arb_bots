@@ -3,7 +3,8 @@
 Builds one Plotly HTML page per coin from gappy L1 ticks: dual long/short
 5m candles, intra-bucket stats, time-weighted quantiles, window histograms,
 causal MAs, sparse ticks, red gap regions, and click-to-inspect in-bar
-panels (TW-mass hist + TW p50/p95/p99 + equal-time temporal means).
+panels (spread TW-mass hist + TW p50/p95/p99 + equal-time temporal
+means; latency of the triggering venue only, equal-weight ticks).
 
 This module does **not** invent quiet-regime floors or change live bot params.
 Extension hooks for future integral metrics live in ``metrics_ext``.

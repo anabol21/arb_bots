@@ -33,7 +33,16 @@ _LATENCY_SRC_COLS = (
     "bybit_ts_ms",
     *_LATENCY_COLS,
 )
-_READ_COLS = ("event_local_ts_ms", "base_coin", *_PRICE_COLS, *_LATENCY_SRC_COLS)
+# ``trigger`` = which venue's update produced the row ("okx" | "bybit").
+# Required for inspect latency (venue-scoped). Legacy dumps may omit it.
+_TRIGGER_COL = "trigger"
+_READ_COLS = (
+    "event_local_ts_ms",
+    "base_coin",
+    _TRIGGER_COL,
+    *_PRICE_COLS,
+    *_LATENCY_SRC_COLS,
+)
 
 
 def parse_since_ms(value: str) -> int:
@@ -231,6 +240,25 @@ def _derive_venue_latency(out: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
+def _normalize_trigger(out: pd.DataFrame) -> pd.DataFrame:
+    """Keep ``trigger`` as lowercase ``okx`` / ``bybit`` (or NA) when present.
+
+    Legacy dumps without the column are left unchanged. Inspect latency then
+    omits venue hists (see ``candles.build_bar_inspect_payloads``).
+    """
+    if _TRIGGER_COL not in out.columns:
+        return out
+    raw = out[_TRIGGER_COL]
+    norm = pd.Series(pd.NA, index=out.index, dtype="object")
+    valid = raw.notna()
+    if bool(valid.any()):
+        cleaned = raw.loc[valid].astype(str).str.strip().str.lower()
+        cleaned = cleaned.replace({"nan": pd.NA, "none": pd.NA, "": pd.NA, "<na>": pd.NA})
+        norm.loc[valid] = cleaned.to_numpy()
+    out[_TRIGGER_COL] = norm
+    return out
+
+
 def derive_research_series(df: pd.DataFrame) -> pd.DataFrame:
     """Add mid, mid-edge, policy spreads, and venue delivery latency.
 
@@ -246,6 +274,9 @@ def derive_research_series(df: pd.DataFrame) -> pd.DataFrame:
     Latency (when source timestamps present)::
 
         okx_latency_ms / bybit_latency_ms  — see ``_derive_venue_latency``
+
+    ``trigger`` is preserved and normalized (``okx`` / ``bybit``) when present.
+    Inspect latency uses only the triggering venue's latency column.
     """
     out = df.copy()
     missing = [c for c in _PRICE_COLS if c not in out.columns]
@@ -280,6 +311,7 @@ def derive_research_series(df: pd.DataFrame) -> pd.DataFrame:
         (out["okx_bid_price"] - out["bybit_ask_price"]) / out["okx_bid_price"] * 100.0
     )
     out = _derive_venue_latency(out)
+    out = _normalize_trigger(out)
     out["event_dt"] = pd.to_datetime(out["event_local_ts_ms"], unit="ms", utc=True)
     out = out.sort_values(["base_coin", "event_local_ts_ms"], kind="mergesort")
     return out.reset_index(drop=True)
