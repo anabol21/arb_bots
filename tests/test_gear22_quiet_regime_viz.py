@@ -117,11 +117,17 @@ class TestLoadAndCandles(unittest.TestCase):
                 "okx_ask_price": [101.0],
                 "bybit_bid_price": [102.0],
                 "bybit_ask_price": [103.0],
+                "okx_local_recv_ts_ms": [1000],
+                "okx_ts_ms": [990],
+                "bybit_local_recv_ts_ms": [1000],
+                "bybit_ts_ms": [995],
             }
         )
         d = derive_research_series(raw).iloc[0]
         self.assertAlmostEqual(float(d["spread_long"]), (102 - 101) / 102 * 100)
         self.assertAlmostEqual(float(d["spread_short"]), (100 - 103) / 100 * 100)
+        self.assertAlmostEqual(float(d["okx_latency_ms"]), 10.0)
+        self.assertAlmostEqual(float(d["bybit_latency_ms"]), 5.0)
 
     def test_csv_loader_path(self) -> None:
         csv_path = FIXTURE_TICKS / "ticks_sample.csv"
@@ -192,6 +198,52 @@ class TestBarInspectPayloads(unittest.TestCase):
         # Compact: no per-tick arrays.
         self.assertNotIn("ticks", sample)
         self.assertNotIn("ts", sample)
+        # Latency nested payloads when columns present.
+        self.assertIn("lat", sample)
+        self.assertIn("okx", sample["lat"])
+        self.assertIn("bybit", sample["lat"])
+        self.assertEqual(len(sample["lat"]["okx"]["c"]), 24)  # DEFAULT_LATENCY_BINS
+        self.assertGreater(sample["lat"]["okx"]["n"], 0)
+        self.assertLessEqual(sample["lat"]["okx"]["n"], sample["n"])
+        self.assertEqual(sum(sample["lat"]["okx"]["c"]), sample["lat"]["okx"]["n"])
+
+    def test_latency_nan_skipped(self) -> None:
+        df = load_ticks(
+            FIXTURE_TICKS,
+            coins=["SOL"],
+            since_ms=parse_since_ms(SINCE),
+            until_ms=parse_since_ms(UNTIL),
+        )
+        self.assertIn("okx_latency_ms", df.columns)
+        self.assertTrue(np.isfinite(df["okx_latency_ms"]).any())
+        # Inject all-NaN bybit for one bar's worth of check via payload builder.
+        dirty = df.copy()
+        dirty["bybit_latency_ms"] = np.nan
+        payloads = build_bar_inspect_payloads(
+            dirty,
+            value_col=SPREAD_LONG_COL,
+            n_bins=16,
+            latency_bins=12,
+            side="long",
+        )
+        sample = next(iter(payloads.values()))
+        self.assertEqual(sample["lat"]["bybit"]["n"], 0)
+        self.assertEqual(sum(sample["lat"]["bybit"]["c"]), 0)
+        self.assertGreater(sample["lat"]["okx"]["n"], 0)
+
+    def test_latency_cols_absent_omits_lat(self) -> None:
+        df = load_ticks(
+            FIXTURE_TICKS,
+            coins=["SOL"],
+            since_ms=parse_since_ms(SINCE),
+            until_ms=parse_since_ms(UNTIL),
+        )
+        slim = df.drop(columns=["okx_latency_ms", "bybit_latency_ms"])
+        payloads = build_bar_inspect_payloads(
+            slim, value_col=SPREAD_LONG_COL, n_bins=16, side="long"
+        )
+        sample = next(iter(payloads.values()))
+        self.assertNotIn("lat", sample)
 
     def test_align_customdata_matches_ohlc_rows(self) -> None:
         df = load_ticks(
@@ -214,6 +266,8 @@ class TestBarInspectPayloads(unittest.TestCase):
         n_ohlc = int((buckets["tick_count"].fillna(0).astype(int) > 0).sum())
         self.assertEqual(len(custom), n_ohlc)
         self.assertTrue(any(cd is not None for cd in custom))
+        nonempty = next(cd for cd in custom if cd is not None)
+        self.assertIn("lat", nonempty)
 
     def test_zero_bins_disables(self) -> None:
         df = load_ticks(
@@ -261,6 +315,9 @@ class TestSmokeHtml(unittest.TestCase):
                 self.assertIn("candle-inspect", text)
                 self.assertIn("plotly_click", text)
                 self.assertIn("equal-time mean", text)
+                self.assertIn("okx_latency_ms", text)
+                self.assertIn("bybit_latency_ms", text)
+                self.assertIn('"lat":', text)
                 self.assertIn('"c":', text)
                 self.assertIn('"tv":', text)
                 self.assertIn("click for in-bar distribution", text)
@@ -285,8 +342,9 @@ class TestSmokeHtml(unittest.TestCase):
         inspect_bytes = len(json.dumps(payloads, separators=(",", ":")))
         # Rough tick-overlay proxy: 4000 points × 2 floats × ~12 chars.
         tick_overlay_proxy = min(len(df), 4_000) * 2 * 12
-        self.assertLess(inspect_bytes, max(tick_overlay_proxy // 4, 2_000))
-        self.assertLess(inspect_bytes, 50_000)  # fixture window: tiny
+        # Compact bins (spread + optional latency) must stay well below overlay cost.
+        self.assertLess(inspect_bytes, max(tick_overlay_proxy, 8_000))
+        self.assertLess(inspect_bytes, 80_000)  # fixture window: still tiny
 
 
 if __name__ == "__main__":

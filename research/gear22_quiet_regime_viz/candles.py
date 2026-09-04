@@ -22,6 +22,10 @@ DEFAULT_MA_BARS: tuple[int, ...] = (3, 12)  # 15m and 60m lookbacks
 # Compact click-to-inspect payloads (build-time; not full ticks in HTML).
 DEFAULT_CANDLE_BINS = 32
 DEFAULT_CANDLE_TEMPORAL_BINS = 16
+DEFAULT_LATENCY_BINS = 24
+DEFAULT_LATENCY_TEMPORAL_BINS = 12
+LATENCY_OKX_COL = "okx_latency_ms"
+LATENCY_BYBIT_COL = "bybit_latency_ms"
 
 # Policy-aligned primary series (see app.policy.features).
 SPREAD_LONG_COL = "spread_long"
@@ -277,9 +281,16 @@ def build_bar_inspect_payloads(
     bar_ms: int = BAR_MS,
     n_bins: int = DEFAULT_CANDLE_BINS,
     n_temporal: int = DEFAULT_CANDLE_TEMPORAL_BINS,
+    latency_bins: int = DEFAULT_LATENCY_BINS,
+    latency_temporal_bins: int = DEFAULT_LATENCY_TEMPORAL_BINS,
     side: str = "long",
 ) -> dict[int, dict[str, Any]]:
     """Build compact per-bar hist + temporal payloads keyed by ``bar_start_ms``.
+
+    Includes optional venue latency hists (``okx_latency_ms`` /
+    ``bybit_latency_ms``) when those columns exist. Non-finite latency values
+    are skipped per venue; if a venue has zero finite samples in the bar, its
+    sub-payload has ``n=0`` and empty counts.
 
     Intended for click-to-inspect HTML: tens of bins / coarse equal-time means,
     not full tick embedding. Empty bars are omitted.
@@ -294,6 +305,18 @@ def build_bar_inspect_payloads(
     )
     y_all = work[value_col].to_numpy(dtype="float64")
     ts_all = work["event_local_ts_ms"].to_numpy(dtype="int64")
+    has_okx = LATENCY_OKX_COL in work.columns
+    has_bybit = LATENCY_BYBIT_COL in work.columns
+    okx_all = (
+        work[LATENCY_OKX_COL].to_numpy(dtype="float64")
+        if has_okx
+        else None
+    )
+    bybit_all = (
+        work[LATENCY_BYBIT_COL].to_numpy(dtype="float64")
+        if has_bybit
+        else None
+    )
     out: dict[int, dict[str, Any]] = {}
     for bs in np.unique(bar_starts):
         mask = bar_starts == int(bs)
@@ -313,6 +336,33 @@ def build_bar_inspect_payloads(
         payload["bar_ms"] = int(bar_ms)
         payload["nb"] = int(n_bins)
         payload["nt"] = int(n_temporal)
+        # Latency: compact nested payloads; omit venue key entirely if column absent.
+        lat: dict[str, Any] = {}
+        ts_m = ts_all[mask]
+        if okx_all is not None and int(latency_bins) > 0:
+            lat["okx"] = _bar_hist_and_temporal(
+                okx_all[mask],
+                ts_m,
+                bar_start=int(bs),
+                bar_ms=int(bar_ms),
+                n_bins=int(latency_bins),
+                n_temporal=int(latency_temporal_bins),
+            )
+            lat["okx"]["col"] = LATENCY_OKX_COL
+        if bybit_all is not None and int(latency_bins) > 0:
+            lat["bybit"] = _bar_hist_and_temporal(
+                bybit_all[mask],
+                ts_m,
+                bar_start=int(bs),
+                bar_ms=int(bar_ms),
+                n_bins=int(latency_bins),
+                n_temporal=int(latency_temporal_bins),
+            )
+            lat["bybit"]["col"] = LATENCY_BYBIT_COL
+        if lat:
+            payload["lat"] = lat
+            payload["nlb"] = int(latency_bins)
+            payload["nlt"] = int(latency_temporal_bins)
         out[int(bs)] = payload
     return out
 

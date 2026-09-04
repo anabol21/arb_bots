@@ -11,6 +11,8 @@ from research.gear22_quiet_regime_viz.candles import (
     DEFAULT_MA_BARS,
     DEFAULT_CANDLE_BINS,
     DEFAULT_CANDLE_TEMPORAL_BINS,
+    DEFAULT_LATENCY_BINS,
+    DEFAULT_LATENCY_TEMPORAL_BINS,
     BAR_MS,
     SPREAD_LONG_COL,
     SPREAD_SHORT_COL,
@@ -127,6 +129,24 @@ def build_arg_parser() -> argparse.ArgumentParser:
         ),
     )
     p.add_argument(
+        "--latency-bins",
+        type=int,
+        default=DEFAULT_LATENCY_BINS,
+        help=(
+            "In-bar venue latency histogram bins for click-to-inspect "
+            f"(default {DEFAULT_LATENCY_BINS}; 0 disables latency payloads)."
+        ),
+    )
+    p.add_argument(
+        "--latency-temporal-bins",
+        type=int,
+        default=DEFAULT_LATENCY_TEMPORAL_BINS,
+        help=(
+            "Equal-time mean slots for in-bar latency temporal view "
+            f"(default {DEFAULT_LATENCY_TEMPORAL_BINS})."
+        ),
+    )
+    p.add_argument(
         "--inline-plotly",
         action="store_true",
         help=(
@@ -150,6 +170,8 @@ def run_viz(
     inline_plotly: bool = False,
     candle_bins: int = DEFAULT_CANDLE_BINS,
     candle_temporal_bins: int = DEFAULT_CANDLE_TEMPORAL_BINS,
+    latency_bins: int = DEFAULT_LATENCY_BINS,
+    latency_temporal_bins: int = DEFAULT_LATENCY_TEMPORAL_BINS,
 ) -> list[Path]:
     since_ms = parse_since_ms(since)
     until_ms = parse_since_ms(until) if until else int(
@@ -218,6 +240,9 @@ def run_viz(
             "ma_bars": ",".join(str(x) for x in ma_bars),
             "candle_bins": candle_bins,
             "candle_temporal_bins": candle_temporal_bins,
+            "latency_bins": latency_bins,
+            "latency_temporal_bins": latency_temporal_bins,
+            "latency_def": "okx/bybit_latency_ms = local_recv − exchange_ts",
             "spread_long": "(bybit_bid-okx_ask)/bybit_bid*100 → open_long",
             "spread_short": "(okx_bid-bybit_ask)/okx_bid*100 → open_short",
             "tw_weights": "hold until next tick; last tick → 5m bar end",
@@ -239,6 +264,8 @@ def run_viz(
             inline_plotly=inline_plotly,
             candle_bins=candle_bins,
             candle_temporal_bins=candle_temporal_bins,
+            latency_bins=latency_bins,
+            latency_temporal_bins=latency_temporal_bins,
         )
         print(f"wrote {path} (ticks={len(sub)} gaps={len(gaps)})")
         written.append(path)
@@ -259,6 +286,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         inline_plotly=args.inline_plotly,
         candle_bins=args.candle_bins,
         candle_temporal_bins=args.candle_temporal_bins,
+        latency_bins=args.latency_bins,
+        latency_temporal_bins=args.latency_temporal_bins,
     )
     return 0
 

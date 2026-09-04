@@ -44,6 +44,8 @@ PYTHONPATH=. python -m research.gear22_quiet_regime_viz.build_fixture
 | `--max-tick-points` | Even downsample cap for sparse tick overlay (default `4000`) |
 | `--candle-bins` | In-bar hist bins for click-to-inspect (default `32`; `0` disables) |
 | `--candle-temporal-bins` | Equal-time mean slots per 5m bar (default `16`) |
+| `--latency-bins` | In-bar venue latency hist bins (default `24`; `0` disables) |
+| `--latency-temporal-bins` | Equal-time mean slots for latency temporal view (default `12`) |
 | `--inline-plotly` | Embed plotly.js inside each HTML (large single-file). Default = sibling `plotly.min.js` |
 
 ### `--since` = last restart
@@ -97,10 +99,26 @@ context but is not the dual-stack primary.
    - **Time-weighted p25 / p50 / p95 / p99** as chart series
    - **Window histogram** of all ticks in `--since`/`--until` (equal weight)
 4. **Click-to-inspect (in-bar)** — click a 5m candlestick → fixed bottom panel with
-   (a) equal-weight histogram of that bar’s spread series and (b) equal-time bin
-   means across the 5m window. Compact payloads are computed at **build time**
-   from full ticks and attached as candlestick `customdata` (tens of bins, not
-   raw ticks). Prefer click over hover. Disable with `--candle-bins 0`.
+   (a) equal-weight histogram of that bar’s spread series, (b) equal-time bin means,
+   and (c) **venue latency** hist + equal-time means for `okx_latency_ms` /
+   `bybit_latency_ms` when those columns are available.
+   Compact payloads are computed at **build time** from full ticks and attached as
+   candlestick `customdata` (tens of bins, not raw ticks). Prefer click over hover.
+   Disable spread inspect with `--candle-bins 0`; latency with `--latency-bins 0`.
+
+### Latency columns
+
+Derived in `load.derive_research_series` (same convention as `research/lean_ticks_io`):
+
+| Column | Definition |
+|--------|------------|
+| `okx_latency_ms` | `okx_local_recv_ts_ms − okx_ts_ms` |
+| `bybit_latency_ms` | `bybit_local_recv_ts_ms − bybit_ts_ms` |
+
+If precomputed latency columns already exist in the dump, they are kept (numeric
+coerce). If source timestamps are missing for a venue, that venue’s latency key is
+omitted from the inspect payload. Non-finite latency values are **skipped** in the
+per-bar hist / temporal means (`n` counts only finite samples).
 
 ## Time-weighted quantile convention
 

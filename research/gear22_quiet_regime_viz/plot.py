@@ -16,6 +16,8 @@ from plotly.subplots import make_subplots
 from research.gear22_quiet_regime_viz.candles import (
     DEFAULT_CANDLE_BINS,
     DEFAULT_CANDLE_TEMPORAL_BINS,
+    DEFAULT_LATENCY_BINS,
+    DEFAULT_LATENCY_TEMPORAL_BINS,
     DEFAULT_MA_BARS,
     SPREAD_LONG_COL,
     SPREAD_SHORT_COL,
@@ -157,6 +159,8 @@ def build_spread_block_figure(
     extension_traces: Optional[Sequence[MetricTrace]] = None,
     candle_bins: int = DEFAULT_CANDLE_BINS,
     candle_temporal_bins: int = DEFAULT_CANDLE_TEMPORAL_BINS,
+    latency_bins: int = DEFAULT_LATENCY_BINS,
+    latency_temporal_bins: int = DEFAULT_LATENCY_TEMPORAL_BINS,
 ) -> go.Figure:
     """One long or short stack: candles → stats → TW quantiles."""
     title_prefix = f"{coin} · {side.upper()}"
@@ -185,6 +189,8 @@ def build_spread_block_figure(
             value_col=value_col,
             n_bins=int(candle_bins),
             n_temporal=int(candle_temporal_bins),
+            latency_bins=int(latency_bins),
+            latency_temporal_bins=int(latency_temporal_bins),
             side=side,
         )
         customdata = align_inspect_customdata(buckets, inspect_map)
@@ -533,7 +539,8 @@ def _candle_inspect_panel_html() -> str:
     <div>
       <strong id="candle-inspect-title">Click a 5m candle</strong>
       <p id="candle-inspect-sub" class="candle-inspect-sub">
-        In-bar equal-weight histogram + equal-time means (build-time compact bins; not full ticks).
+        In-bar spread hist + equal-time means, plus venue latency
+        (okx_latency_ms / bybit_latency_ms). Compact build-time bins; not full ticks.
       </p>
     </div>
     <button type="button" id="candle-inspect-close" aria-label="Close inspect panel">×</button>
@@ -544,7 +551,7 @@ def _candle_inspect_panel_html() -> str:
 
 
 def _candle_inspect_script() -> str:
-    """Post-plot click handler: read candlestick customdata → small dual panel."""
+    """Post-plot click handler: read candlestick customdata → spread + latency panel."""
     return """
 <script>
 (function() {
@@ -597,10 +604,19 @@ def _candle_inspect_script() -> str:
     const col = cd.col || "spread";
     const n = cd.n || 0;
     const when = xLabel || (cd.bs != null ? new Date(cd.bs).toISOString() : "");
+    const lat = cd.lat || {};
+    const okx = lat.okx || null;
+    const bybit = lat.bybit || null;
+    const okxN = okx ? (okx.n || 0) : 0;
+    const bybitN = bybit ? (bybit.n || 0) : 0;
+    let latNote = "latency cols absent";
+    if (okx || bybit) {
+      latNote = "latency finite n okx=" + okxN + " bybit=" + bybitN +
+        " (NaN/missing skipped)";
+    }
     showPanel(
       side + " · " + when + " · n=" + n,
-      col + " — equal-weight hist (" + (cd.nb || (cd.c || []).length) +
-        " bins) + equal-time means (" + (cd.nt || (cd.tv || []).length) + " slots)"
+      col + " hist/temporal + " + latNote
     );
     const hist = histCenters(cd.lo, cd.hi, cd.nb, cd.c || []);
     const temp = temporalSeries(cd.bs, cd.bar_ms || 300000, cd.tv || []);
@@ -609,7 +625,7 @@ def _candle_inspect_script() -> str:
         type: "bar",
         x: hist.x,
         y: hist.y,
-        name: "in-bar hist",
+        name: "spread hist",
         marker: {color: "#4c78a8"},
         xaxis: "x",
         yaxis: "y"
@@ -619,7 +635,7 @@ def _candle_inspect_script() -> str:
         mode: "lines+markers",
         x: temp.x,
         y: temp.y,
-        name: "equal-time mean",
+        name: "spread equal-time mean",
         line: {width: 1.6, color: "#f58518"},
         marker: {size: 5},
         connectgaps: false,
@@ -627,19 +643,78 @@ def _candle_inspect_script() -> str:
         yaxis: "y2"
       }
     ];
+    if (okx && okxN > 0) {
+      const h = histCenters(okx.lo, okx.hi, okx.nb || cd.nlb, okx.c || []);
+      traces.push({
+        type: "bar",
+        x: h.x,
+        y: h.y,
+        name: "okx_latency_ms",
+        marker: {color: "rgba(31,119,180,0.55)"},
+        xaxis: "x3",
+        yaxis: "y3"
+      });
+      const t = temporalSeries(cd.bs, cd.bar_ms || 300000, okx.tv || []);
+      traces.push({
+        type: "scatter",
+        mode: "lines+markers",
+        x: t.x,
+        y: t.y,
+        name: "okx lat mean",
+        line: {width: 1.4, color: "#1f77b4"},
+        marker: {size: 4},
+        connectgaps: false,
+        xaxis: "x4",
+        yaxis: "y4"
+      });
+    }
+    if (bybit && bybitN > 0) {
+      const h = histCenters(bybit.lo, bybit.hi, bybit.nb || cd.nlb, bybit.c || []);
+      traces.push({
+        type: "bar",
+        x: h.x,
+        y: h.y,
+        name: "bybit_latency_ms",
+        marker: {color: "rgba(44,160,44,0.55)"},
+        xaxis: "x3",
+        yaxis: "y3"
+      });
+      const t = temporalSeries(cd.bs, cd.bar_ms || 300000, bybit.tv || []);
+      traces.push({
+        type: "scatter",
+        mode: "lines+markers",
+        x: t.x,
+        y: t.y,
+        name: "bybit lat mean",
+        line: {width: 1.4, color: "#2ca02c"},
+        marker: {size: 4},
+        connectgaps: false,
+        xaxis: "x4",
+        yaxis: "y4"
+      });
+    }
+    const hasLat = (okx && okxN > 0) || (bybit && bybitN > 0);
     const layout = {
-      grid: {rows: 1, columns: 2, pattern: "independent"},
-      margin: {l: 48, r: 20, t: 28, b: 40},
-      height: 260,
+      grid: {rows: hasLat ? 2 : 1, columns: 2, pattern: "independent"},
+      margin: {l: 52, r: 20, t: 36, b: 42},
+      height: hasLat ? 460 : 260,
       paper_bgcolor: "#fff",
       plot_bgcolor: "#fff",
-      showlegend: false,
-      title: {text: "In-bar distribution (compact)", font: {size: 12}},
+      barmode: "overlay",
+      showlegend: true,
+      legend: {orientation: "h", y: 1.12, x: 0, font: {size: 10}},
+      title: {text: "In-bar spread + latency (compact)", font: {size: 12}},
       xaxis: {title: col + " (%)", domain: [0, 0.46]},
-      yaxis: {title: "count"},
-      xaxis2: {title: "UTC (within 5m)", domain: [0.54, 1]},
-      yaxis2: {title: col + " (%)", anchor: "x2"}
+      yaxis: {title: "count", domain: hasLat ? [0.55, 1] : [0, 1]},
+      xaxis2: {title: "UTC (within 5m)", domain: [0.54, 1], anchor: "y2"},
+      yaxis2: {title: col + " (%)", anchor: "x2", domain: hasLat ? [0.55, 1] : [0, 1]}
     };
+    if (hasLat) {
+      layout.xaxis3 = {title: "latency (ms)", domain: [0, 0.46], anchor: "y3"};
+      layout.yaxis3 = {title: "count", domain: [0, 0.42]};
+      layout.xaxis4 = {title: "UTC (within 5m)", domain: [0.54, 1], anchor: "y4"};
+      layout.yaxis4 = {title: "latency (ms)", anchor: "x4", domain: [0, 0.42]};
+    }
     Plotly.react("candle-inspect-plot", traces, layout, {
       responsive: true,
       displaylogo: false,
@@ -672,7 +747,6 @@ def _candle_inspect_script() -> str:
   } else {
     bindAll();
   }
-  // Late Plotly hydration (some browsers defer inline newPlot).
   setTimeout(bindAll, 0);
   setTimeout(bindAll, 250);
 })();
@@ -704,6 +778,8 @@ def write_coin_html(
     inline_plotly: bool = False,
     candle_bins: int = DEFAULT_CANDLE_BINS,
     candle_temporal_bins: int = DEFAULT_CANDLE_TEMPORAL_BINS,
+    latency_bins: int = DEFAULT_LATENCY_BINS,
+    latency_temporal_bins: int = DEFAULT_LATENCY_TEMPORAL_BINS,
 ) -> Path:
     """Write one coin page: mid context + long stack + hist + short stack + hist."""
     out_path = Path(out_path)
@@ -739,6 +815,8 @@ def write_coin_html(
         extension_traces=ext,
         candle_bins=candle_bins,
         candle_temporal_bins=candle_temporal_bins,
+        latency_bins=latency_bins,
+        latency_temporal_bins=latency_temporal_bins,
     )
     short_fig = build_spread_block_figure(
         coin=coin,
@@ -753,6 +831,8 @@ def write_coin_html(
         extension_traces=ext,
         candle_bins=candle_bins,
         candle_temporal_bins=candle_temporal_bins,
+        latency_bins=latency_bins,
+        latency_temporal_bins=latency_temporal_bins,
     )
     hist_long = build_window_hist_figure(
         coin=coin,
@@ -784,7 +864,7 @@ def write_coin_html(
 <meta name="viewport" content="width=device-width, initial-scale=1"/>
 <title>Gear 2.2 quiet-regime — {html.escape(coin)}</title>
 {script_tag}<style>
-  body {{ font-family: "IBM Plex Sans", "Segoe UI", sans-serif; margin: 1.25rem; color: #1b1b1b; background: #f7f5f2; padding-bottom: 18rem; }}
+  body {{ font-family: "IBM Plex Sans", "Segoe UI", sans-serif; margin: 1.25rem; color: #1b1b1b; background: #f7f5f2; padding-bottom: 28rem; }}
   h1 {{ font-size: 1.35rem; margin: 0 0 0.35rem; }}
   h2.block {{ font-size: 1.15rem; margin: 1.4rem 0 0.4rem; padding: 0.35rem 0.55rem; background: #ece8e1; border-left: 4px solid #4c78a8; }}
   h2.block.short {{ border-left-color: #f58518; }}
@@ -803,12 +883,12 @@ def write_coin_html(
     position: fixed; left: 0; right: 0; bottom: 0; z-index: 40;
     background: #fff; border-top: 3px solid #4c78a8;
     box-shadow: 0 -6px 18px rgba(0,0,0,0.12);
-    padding: 0.55rem 1rem 0.75rem; max-height: 46vh; overflow: auto;
+    padding: 0.55rem 1rem 0.75rem; max-height: 62vh; overflow: auto;
   }}
   .candle-inspect[hidden] {{ display: none !important; }}
   .candle-inspect-head {{ display: flex; justify-content: space-between; align-items: flex-start; gap: 1rem; }}
   .candle-inspect-sub {{ margin: 0.15rem 0 0; color: #555; font-size: 0.85rem; }}
-  .candle-inspect-plot {{ min-height: 260px; }}
+  .candle-inspect-plot {{ min-height: 280px; }}
   #candle-inspect-close {{
     border: 1px solid #bbb; background: #f7f5f2; font-size: 1.25rem;
     line-height: 1; width: 2rem; height: 2rem; cursor: pointer;
@@ -823,9 +903,10 @@ Research visualizer for noisy/gappy cross-exchange L1. Stacked blocks match live
 spreads from <code>app.policy.features</code>: <strong>long</strong> then <strong>short</strong>.
 Red bands mark inter-tick gaps. Time-weighted quantile panels use hold-until-next-tick
 weights (last tick → bar end). Window histograms are equal-weight over all loaded ticks.
-<strong>Click a 5m candle</strong> to open the in-bar distribution panel (compact bins +
-equal-time means; not full ticks). Not a live trading terminal; no threshold candidates
-are invented on this page.
+<strong>Click a 5m candle</strong> to open the in-bar panel: spread distribution plus
+venue latency (<code>okx_latency_ms</code> / <code>bybit_latency_ms</code> = local_recv −
+exchange_ts; NaN/missing skipped). Compact bins only — not full ticks. Not a live
+trading terminal; no threshold candidates are invented on this page.
 </p>
 <table class="meta"><tbody>{meta_rows}</tbody></table>
 

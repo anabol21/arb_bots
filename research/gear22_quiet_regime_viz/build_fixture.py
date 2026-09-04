@@ -36,15 +36,25 @@ def _coin_ticks(coin: str, px0: float, edge0_bps: float, seed: int) -> pd.DataFr
     bybit_mid = px0 * (1.0 + 0.0004 * np.sin(t_rel / 5.0) + rng.normal(0, 0.00005, n))
     okx_mid = bybit_mid * (1.0 + edge_pct / 100.0)
     half_spread = px0 * 0.00005
+    # Varied venue delivery latency (local_recv − exchange_ts); occasional NaN.
+    okx_lat = np.clip(rng.normal(4.0, 1.5, n), 0.5, 25.0)
+    bybit_lat = np.clip(rng.normal(3.0, 1.2, n), 0.5, 20.0)
+    okx_lat[rng.random(n) < 0.05] = np.nan
+    bybit_lat[rng.random(n) < 0.05] = np.nan
+    okx_recv = ts - 1
+    bybit_recv = ts - 1
+    # When latency is NaN, leave exchange_ts as NaN so derived latency stays missing.
+    okx_ts = np.where(np.isfinite(okx_lat), okx_recv - okx_lat, np.nan)
+    bybit_ts = np.where(np.isfinite(bybit_lat), bybit_recv - bybit_lat, np.nan)
     rows = {
         "event_local_ts_ms": ts,
         "base_coin": np.full(n, coin),
         "trigger": np.where(rng.random(n) > 0.5, "okx", "bybit"),
         "calc_local_ts_ms": ts + 2,
-        "okx_local_recv_ts_ms": ts - 1,
-        "okx_ts_ms": ts - 5,
-        "bybit_local_recv_ts_ms": ts - 1,
-        "bybit_ts_ms": ts - 4,
+        "okx_local_recv_ts_ms": okx_recv,
+        "okx_ts_ms": okx_ts,
+        "bybit_local_recv_ts_ms": bybit_recv,
+        "bybit_ts_ms": bybit_ts,
         "okx_bid_price": okx_mid - half_spread,
         "okx_bid_size": np.full(n, 1.0),
         "okx_ask_price": okx_mid + half_spread,

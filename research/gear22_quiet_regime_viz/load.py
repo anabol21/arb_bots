@@ -24,7 +24,16 @@ _PRICE_COLS = (
     "bybit_bid_price",
     "bybit_ask_price",
 )
-_READ_COLS = ("event_local_ts_ms", "base_coin", *_PRICE_COLS)
+# Venue delivery latency = local_recv − exchange_ts (same as research/lean_ticks_io).
+_LATENCY_COLS = ("okx_latency_ms", "bybit_latency_ms")
+_LATENCY_SRC_COLS = (
+    "okx_local_recv_ts_ms",
+    "okx_ts_ms",
+    "bybit_local_recv_ts_ms",
+    "bybit_ts_ms",
+    *_LATENCY_COLS,
+)
+_READ_COLS = ("event_local_ts_ms", "base_coin", *_PRICE_COLS, *_LATENCY_SRC_COLS)
 
 
 def parse_since_ms(value: str) -> int:
@@ -189,8 +198,41 @@ def _read_csv_filtered(
     return None if df.empty else df
 
 
+def _derive_venue_latency(out: pd.DataFrame) -> pd.DataFrame:
+    """Attach ``okx_latency_ms`` / ``bybit_latency_ms`` when source cols exist.
+
+    Convention (matches ``research/lean_ticks_io``)::
+
+        okx_latency_ms   = okx_local_recv_ts_ms − okx_ts_ms
+        bybit_latency_ms = bybit_local_recv_ts_ms − bybit_ts_ms
+
+    Precomputed latency columns are kept (coerced numeric). Missing sources or
+    non-finite diffs become NaN and are skipped by in-bar hist builders.
+    """
+    if "okx_latency_ms" not in out.columns and {
+        "okx_local_recv_ts_ms",
+        "okx_ts_ms",
+    } <= set(out.columns):
+        out["okx_latency_ms"] = (
+            pd.to_numeric(out["okx_local_recv_ts_ms"], errors="coerce")
+            - pd.to_numeric(out["okx_ts_ms"], errors="coerce")
+        )
+    if "bybit_latency_ms" not in out.columns and {
+        "bybit_local_recv_ts_ms",
+        "bybit_ts_ms",
+    } <= set(out.columns):
+        out["bybit_latency_ms"] = (
+            pd.to_numeric(out["bybit_local_recv_ts_ms"], errors="coerce")
+            - pd.to_numeric(out["bybit_ts_ms"], errors="coerce")
+        )
+    for c in _LATENCY_COLS:
+        if c in out.columns:
+            out[c] = pd.to_numeric(out[c], errors="coerce")
+    return out
+
+
 def derive_research_series(df: pd.DataFrame) -> pd.DataFrame:
-    """Add mid, mid-edge, and policy-aligned long/short spreads.
+    """Add mid, mid-edge, policy spreads, and venue delivery latency.
 
     Primary research series (match ``app.policy.features`` / gear2)::
 
@@ -200,6 +242,10 @@ def derive_research_series(df: pd.DataFrame) -> pd.DataFrame:
     Also derived for context (not the dual-stack primary)::
 
         edge_pct = (okx_mid - bybit_mid) / bybit_mid * 100
+
+    Latency (when source timestamps present)::
+
+        okx_latency_ms / bybit_latency_ms  — see ``_derive_venue_latency``
     """
     out = df.copy()
     missing = [c for c in _PRICE_COLS if c not in out.columns]
@@ -233,6 +279,7 @@ def derive_research_series(df: pd.DataFrame) -> pd.DataFrame:
     out["spread_short"] = (
         (out["okx_bid_price"] - out["bybit_ask_price"]) / out["okx_bid_price"] * 100.0
     )
+    out = _derive_venue_latency(out)
     out["event_dt"] = pd.to_datetime(out["event_local_ts_ms"], unit="ms", utc=True)
     out = out.sort_values(["base_coin", "event_local_ts_ms"], kind="mergesort")
     return out.reset_index(drop=True)
