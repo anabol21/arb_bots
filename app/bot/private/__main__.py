@@ -4,6 +4,7 @@ R3 order transport is unreachable. Default path has no WS. LIVE_ORDERS=1 alone
 must not open a WS socket. ``--ws-readonly`` requires VENUE=live and LIVE_ORDERS=0.
 ``--ws-warm-session`` starts process-lifetime private WS (no send) when live
 send gates pass; dual-leg CLIs reuse that warm session.
+``--ab-send-path`` is the W6-vs-primitive send-path experiment (dry default).
 """
 
 from __future__ import annotations

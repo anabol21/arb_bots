@@ -592,6 +592,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
         return main_ws_w7_parallel_dual_leg(argv)
 
+    if "--ab-send-path" in argv:
+        from app.bot.private.ws_ab_send_path import main_ab_send_path
+
+        return main_ab_send_path(argv)
+
     report = run_readonly_harness()
     print(json.dumps(scrub_public_record(report), ensure_ascii=False, indent=2, sort_keys=True))
     if report.get("status") == "ok":

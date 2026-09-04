@@ -19,6 +19,7 @@ import logging
 import os
 import statistics
 import threading
+import time
 from dataclasses import dataclass, field
 from decimal import Decimal
 from pathlib import Path
@@ -1069,6 +1070,7 @@ def run_w6_dual_leg(
     parallel_open: bool = False,
     send_gate: Optional[Any] = None,
     warm_session: Optional[Any] = None,
+    hold_after_open_sec: float = 0.0,
 ) -> W6Report:
     """Execute n dual-leg market rounds (Bybit buy / OKX sell).
 
@@ -1833,6 +1835,9 @@ def run_w6_dual_leg(
                         venue_code=o_res.venue_code,
                         latency_ms=_latency(),
                     )
+
+            if hold_after_open_sec > 0:
+                time.sleep(float(hold_after_open_sec))
 
             flat_b, n_b = _flatten_venue(
                 sender=bybit_sender,

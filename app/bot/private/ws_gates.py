@@ -213,6 +213,41 @@ def assert_ws_w7_send_gates(env: Optional[Mapping[str, str]] = None) -> str:
     return venue
 
 
+def _ab_send_opt_in(env: Mapping[str, str]) -> bool:
+    raw = (env.get("BBOT_PRIVATE_AB_SEND") or env.get("AB_SEND_PATH") or "").strip().lower()
+    return raw in {"1", "true", "yes", "on"}
+
+
+def assert_ws_ab_send_path_gates(env: Optional[Mapping[str, str]] = None) -> str:
+    """A/B send-path live gate: VENUE=live, LIVE_ORDERS=1, live profile, opt-in.
+
+    Separate from W3–W7. Never opens a socket by itself. Does not imply W6.
+    """
+    if env is None:
+        raise WsProfileGateError("AB send-path requires an explicit env mapping")
+    try:
+        venue = resolve_venue(env)
+    except ValueError as exc:
+        raise WsProfileGateError(str(exc)) from exc
+    if venue != "live":
+        raise WsProfileGateError(f"AB send-path refuses VENUE={venue!r}; require live")
+    if not live_orders_enabled(env):
+        raise WsProfileGateError("AB send-path requires LIVE_ORDERS=1")
+    if not _ab_send_opt_in(env):
+        raise WsProfileGateError(
+            "AB send-path requires explicit opt-in BBOT_PRIVATE_AB_SEND=1 "
+            "(plus CLI --ab-send-path --ab-approve-one-shot)"
+        )
+    profile = resolve_private_profile(env)
+    if profile.name != "live":
+        raise WsProfileGateError(
+            f"AB send-path refuses credential profile {profile.name!r}; require live"
+        )
+    if not profile.live_orders_flag:
+        raise WsProfileGateError("AB send-path requires live profile LIVE_ORDERS flag")
+    return venue
+
+
 def assert_ws_warm_private_gates(env: Optional[Mapping[str, str]] = None) -> str:
     """Warm private WS at private-live startup: VENUE=live + LIVE_ORDERS=1.
 
@@ -242,11 +277,12 @@ def assert_ws_warm_private_gates(env: Optional[Mapping[str, str]] = None) -> str
 
 
 def is_live_send_ws_profile_gate(gate: object) -> bool:
-    """True for W4/W5/W6/W7/warm send gates (call with env only; no environment= kwarg)."""
+    """True for W4/W5/W6/W7/warm/AB-send gates (call with env only; no environment= kwarg)."""
     return (
         gate is assert_ws_w4_send_gates
         or gate is assert_ws_w5_send_gates
         or gate is assert_ws_w6_send_gates
         or gate is assert_ws_w7_send_gates
         or gate is assert_ws_warm_private_gates
+        or gate is assert_ws_ab_send_path_gates
     )
