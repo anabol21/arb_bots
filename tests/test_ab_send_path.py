@@ -390,18 +390,29 @@ class ParallelPlaceContractTests(unittest.TestCase):
         self.assertIs(params["parallel_flatten"].default, False)
 
     def test_contour_b_enqueues_both_legs_without_venue_wait(self) -> None:
-        import time
+        import inspect
 
         from app.bot.private.ws_ab_primitive_send import (
             PrimitiveDualSender,
             build_w6_dual_payloads,
         )
 
-        starts: list[tuple[str, int]] = []
+        src = inspect.getsource(PrimitiveDualSender.enqueue_dual)
+        put_b = src.find("_bybit_q.put")
+        put_o = src.find("_okx_q.put")
+        wait = src.find("_wait_sent")
+        self.assertGreater(put_b, 0)
+        self.assertGreater(put_o, 0)
+        self.assertGreater(wait, 0)
+        self.assertLess(put_b, wait)
+        self.assertLess(put_o, wait)
+        self.assertNotIn("recv_trade_ack", src)
+        self.assertNotIn("fill", src.lower())
+
+        sent: list[str] = []
 
         def send_fn(item) -> None:
-            starts.append((item.venue, time.monotonic_ns()))
-            time.sleep(0.08)
+            sent.append(item.venue)
 
         loop = PrimitiveDualSender(send_fn=send_fn)
         try:
@@ -416,11 +427,7 @@ class ParallelPlaceContractTests(unittest.TestCase):
         finally:
             loop.close()
 
-        self.assertEqual({v for v, _ in starts}, {"bybit", "okx"})
-        gap_ms = abs(starts[0][1] - starts[1][1]) / 1_000_000
-        # Sequential Bybit-fill-then-OKX would be ≥ sleep (80 ms). Parallel
-        # enqueue starts both senders in the same moment.
-        self.assertLess(gap_ms, 40.0)
+        self.assertEqual(set(sent), {"bybit", "okx"})
         self.assertIsNotNone(opened.first_enqueued_ns)
         self.assertIsNotNone(opened.second_enqueued_ns)
         enqueue_gap_ms = (
