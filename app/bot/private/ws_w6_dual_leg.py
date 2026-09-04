@@ -13,6 +13,7 @@ and ``--w6-approve-one-shot``. Default / W3 / W4 / W5 CLI never binds this.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 import os
@@ -620,13 +621,17 @@ def _place_pair_parallel(
     *,
     bybit_kw: Mapping[str, Any],
     okx_kw: Mapping[str, Any],
+    warm_session: Any = None,
 ) -> tuple[PlaceWaitResult, PlaceWaitResult]:
     barrier = threading.Barrier(2)
     out: dict[str, PlaceWaitResult] = {}
 
     def worker(key: str, kwargs: Mapping[str, Any]) -> None:
         try:
-            out[key] = _place_and_wait_fill(dispatch_barrier=barrier, **kwargs)
+            # Outer place_io_section already paused keepalive for both legs.
+            kw = dict(kwargs)
+            kw.pop("warm_session", None)
+            out[key] = _place_and_wait_fill(dispatch_barrier=barrier, **kw)
         except Exception:  # noqa: BLE001
             try:
                 barrier.abort()
@@ -638,12 +643,22 @@ def _place_pair_parallel(
                 error_code="internal_error",
             )
 
-    t_b = threading.Thread(target=worker, args=("bybit", dict(bybit_kw)), daemon=False)
-    t_o = threading.Thread(target=worker, args=("okx", dict(okx_kw)), daemon=False)
-    t_b.start()
-    t_o.start()
-    t_b.join()
-    t_o.join()
+    guard = (
+        warm_session.place_io_section()
+        if warm_session is not None
+        else contextlib.nullcontext()
+    )
+    with guard:
+        t_b = threading.Thread(
+            target=worker, args=("bybit", dict(bybit_kw)), daemon=False
+        )
+        t_o = threading.Thread(
+            target=worker, args=("okx", dict(okx_kw)), daemon=False
+        )
+        t_b.start()
+        t_o.start()
+        t_b.join()
+        t_o.join()
     return (
         out.get(
             "bybit",
@@ -680,81 +695,88 @@ def _place_and_wait_fill(
     fill_inject_fn: Optional[Any],
     inject_kind: str,
     dispatch_barrier: Optional[threading.Barrier] = None,
+    warm_session: Any = None,
 ) -> PlaceWaitResult:
     """status ok|ack_fail|no_fill|journal_failed."""
-    runtime.register_plan_fingerprint(plan)
-    place_transport._plan = plan  # noqa: SLF001
-    sender._transport = place_transport  # noqa: SLF001
-    res = sender.send_approved(
-        plan,
-        token,
-        credentials,
-        env,
-        journal_transport="ws_trade",
-        reconnect_generation=runtime.reconnect_generation,
-        dispatch_barrier=dispatch_barrier,
+    guard = (
+        warm_session.place_io_section()
+        if warm_session is not None
+        else contextlib.nullcontext()
     )
-    invoked = bool(res.transport_invoked)
-    dispatch_ns = res.dispatch_monotonic_ns
-    if res.status != "ack":
-        if dispatch_barrier is not None and not invoked:
+    with guard:
+        runtime.register_plan_fingerprint(plan)
+        place_transport._plan = plan  # noqa: SLF001
+        sender._transport = place_transport  # noqa: SLF001
+        res = sender.send_approved(
+            plan,
+            token,
+            credentials,
+            env,
+            journal_transport="ws_trade",
+            reconnect_generation=runtime.reconnect_generation,
+            dispatch_barrier=dispatch_barrier,
+        )
+        invoked = bool(res.transport_invoked)
+        dispatch_ns = res.dispatch_monotonic_ns
+        if res.status != "ack":
+            if dispatch_barrier is not None and not invoked:
+                try:
+                    dispatch_barrier.abort()
+                except Exception:  # noqa: BLE001
+                    pass
+            return PlaceWaitResult(
+                status="ack_fail",
+                transport_invoked=invoked,
+                error_code=res.error_code,
+                venue_code=res.venue_code,
+                dispatch_monotonic_ns=dispatch_ns,
+            )
+        if fill_inject_fn is not None:
             try:
-                dispatch_barrier.abort()
+                fill_inject_fn(inject_kind, plan)
             except Exception:  # noqa: BLE001
                 pass
-        return PlaceWaitResult(
-            status="ack_fail",
-            transport_invoked=invoked,
-            error_code=res.error_code,
-            venue_code=res.venue_code,
-            dispatch_monotonic_ns=dispatch_ns,
+        snap = _wait_private_terminal(
+            runtime, provider, plan, timeout_sec=float(terminal_wait_sec)
         )
-    if fill_inject_fn is not None:
+        term = observed_terminal_state(snap)
+        if term != "filled":
+            # Caller may still flatten leftover exposure; do not block sends yet.
+            return PlaceWaitResult(
+                status="no_fill",
+                transport_invoked=invoked,
+                error_code="unknown",
+                dispatch_monotonic_ns=dispatch_ns,
+            )
         try:
-            fill_inject_fn(inject_kind, plan)
-        except Exception:  # noqa: BLE001
-            pass
-    snap = _wait_private_terminal(
-        runtime, provider, plan, timeout_sec=float(terminal_wait_sec)
-    )
-    term = observed_terminal_state(snap)
-    if term != "filled":
-        # Caller may still flatten leftover exposure; do not block sends yet.
+            assert sender.lease is not None
+            _commit_stream_terminal(
+                runtime=runtime,
+                journal=journal,
+                lease=sender.lease,
+                plan=plan,
+                term="filled",
+            )
+        except (
+            OSError,
+            RuntimeError,
+            ValueError,
+            TypeError,
+            JournalValidationError,
+        ):
+            # Do not mark process-blocked here: caller may still flatten leftover
+            # exposure on the same venue. Caller fail-closes after that attempt.
+            return PlaceWaitResult(
+                status="journal_failed",
+                transport_invoked=invoked,
+                error_code="internal_error",
+                dispatch_monotonic_ns=dispatch_ns,
+            )
         return PlaceWaitResult(
-            status="no_fill",
+            status="ok",
             transport_invoked=invoked,
-            error_code="unknown",
             dispatch_monotonic_ns=dispatch_ns,
         )
-    try:
-        assert sender.lease is not None
-        _commit_stream_terminal(
-            runtime=runtime,
-            journal=journal,
-            lease=sender.lease,
-            plan=plan,
-            term="filled",
-        )
-    except (
-        OSError,
-        RuntimeError,
-        ValueError,
-        TypeError,
-        JournalValidationError,
-    ):
-        # Do not mark process-blocked here: caller may still flatten leftover
-        # exposure on the same venue. Caller fail-closes after that attempt.
-        return PlaceWaitResult(
-            status="journal_failed",
-            transport_invoked=invoked,
-            error_code="internal_error",
-            dispatch_monotonic_ns=dispatch_ns,
-        )
-    return PlaceWaitResult(
-        status="ok",
-        transport_invoked=invoked,
-        dispatch_monotonic_ns=dispatch_ns,
-    )
 
 
 def _flatten_venue(
@@ -774,6 +796,7 @@ def _flatten_venue(
     terminal_wait_sec: float,
     fill_inject_fn: Optional[Any],
     inject_kind: str,
+    warm_session: Any = None,
 ) -> tuple[str, int]:
     """Flatten one venue. Returns (ok|flatten_incomplete|flatten_plan_rejected, orders_delta)."""
     try:
@@ -806,6 +829,7 @@ def _flatten_venue(
         terminal_wait_sec=terminal_wait_sec,
         fill_inject_fn=fill_inject_fn,
         inject_kind=inject_kind,
+        warm_session=warm_session,
     )
     orders = 1 if placed.transport_invoked else 0
     if placed.status != "ok":
@@ -839,6 +863,7 @@ def _recover_inflight_w6(
     vault: ApprovalVault,
     env: Mapping[str, str],
     issue_approval: bool,
+    warm_session: Any = None,
 ) -> Optional[str]:
     unresolved = [
         lease
@@ -972,6 +997,7 @@ def _recover_inflight_w6(
             terminal_wait_sec=float(terminal_wait_sec),
             fill_inject_fn=None,
             inject_kind="recovery_flatten",
+            warm_session=warm_session,
         )
         if st != "ok":
             return "recovery_blocked"
@@ -1348,6 +1374,7 @@ def run_w6_dual_leg(
             vault=vault,
             env=e,
             issue_approval=issue_approval,
+            warm_session=session,
         )
         if recovery_err is not None:
             return _report(
@@ -1480,6 +1507,7 @@ def run_w6_dual_leg(
                 "terminal_wait_sec": float(terminal_wait_sec),
                 "fill_inject_fn": fill_inject_fn,
                 "inject_kind": "bybit_open",
+                "warm_session": session,
             }
             okx_place_kw_base = {
                 "sender": okx_sender,
@@ -1493,13 +1521,16 @@ def run_w6_dual_leg(
                 "terminal_wait_sec": float(terminal_wait_sec),
                 "fill_inject_fn": fill_inject_fn,
                 "inject_kind": "okx_open",
+                "warm_session": session,
             }
 
             if parallel_open:
                 okx_token = vault.issue(okx_open)
                 okx_place_kw_base["token"] = okx_token
                 b_res, o_res = _place_pair_parallel(
-                    bybit_kw=bybit_place_kw, okx_kw=okx_place_kw_base
+                    bybit_kw=bybit_place_kw,
+                    okx_kw=okx_place_kw_base,
+                    warm_session=session,
                 )
                 dispatch_pairs.append(
                     (b_res.dispatch_monotonic_ns, o_res.dispatch_monotonic_ns)
@@ -1550,6 +1581,7 @@ def run_w6_dual_leg(
                                 terminal_wait_sec=float(terminal_wait_sec),
                                 fill_inject_fn=fill_inject_fn,
                                 inject_kind="bybit_flatten",
+                                warm_session=session,
                             )
                             orders_sent += flat_n
                             bybit_flat_ok = flat_st == "ok"
@@ -1577,6 +1609,7 @@ def run_w6_dual_leg(
                                 terminal_wait_sec=float(terminal_wait_sec),
                                 fill_inject_fn=fill_inject_fn,
                                 inject_kind="okx_flatten",
+                                warm_session=session,
                             )
                             orders_sent += o_n
                             okx_flat_ok = o_st == "ok"
@@ -1663,6 +1696,7 @@ def run_w6_dual_leg(
                                 terminal_wait_sec=float(terminal_wait_sec),
                                 fill_inject_fn=fill_inject_fn,
                                 inject_kind="bybit_flatten",
+                                warm_session=session,
                             )
                             orders_sent += flat_n
                             flat_after = flat_st == "ok"
@@ -1732,6 +1766,7 @@ def run_w6_dual_leg(
                         terminal_wait_sec=float(terminal_wait_sec),
                         fill_inject_fn=fill_inject_fn,
                         inject_kind="bybit_flatten",
+                        warm_session=session,
                     )
                     orders_sent += flat_n
                     okx_flat_ok = True
@@ -1756,6 +1791,7 @@ def run_w6_dual_leg(
                                 terminal_wait_sec=float(terminal_wait_sec),
                                 fill_inject_fn=fill_inject_fn,
                                 inject_kind="okx_flatten",
+                                warm_session=session,
                             )
                             orders_sent += o_n
                             okx_flat_ok = o_st == "ok"
@@ -1814,6 +1850,7 @@ def run_w6_dual_leg(
                 terminal_wait_sec=float(terminal_wait_sec),
                 fill_inject_fn=fill_inject_fn,
                 inject_kind="bybit_flatten",
+                warm_session=session,
             )
             orders_sent += n_b
             if flat_b != "ok":
@@ -1833,6 +1870,7 @@ def run_w6_dual_leg(
                     terminal_wait_sec=float(terminal_wait_sec),
                     fill_inject_fn=fill_inject_fn,
                     inject_kind="okx_flatten",
+                    warm_session=session,
                 )
                 orders_sent += o_n
                 bybit_sender.lease_supervisor.mark_process_sends_blocked()
@@ -1866,6 +1904,7 @@ def run_w6_dual_leg(
                 terminal_wait_sec=float(terminal_wait_sec),
                 fill_inject_fn=fill_inject_fn,
                 inject_kind="okx_flatten",
+                warm_session=session,
             )
             orders_sent += n_o
             if flat_o != "ok":

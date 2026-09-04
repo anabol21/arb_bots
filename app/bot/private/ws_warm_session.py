@@ -28,9 +28,10 @@ import logging
 import os
 import threading
 import time
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Mapping, Optional, Sequence
+from typing import Any, Callable, Iterator, Mapping, Optional, Sequence
 
 from app.bot.private.journal_v1 import (
     PrivateJournalWriter,
@@ -123,6 +124,9 @@ class PrivateWarmSession:
     _keepalive_thread: Optional[threading.Thread] = None
     _external_stop: Any = None
     _last_hb_mono: float = 0.0
+    # >0 while W6/W7 place+ack (or flatten) holds trade I/O; keepalive must not
+    # recv/close sockets or steal trade ACK frames during that window.
+    _place_inflight: int = 0
 
     @property
     def run_id(self) -> str:
@@ -132,6 +136,29 @@ class PrivateWarmSession:
     def keepalive_running(self) -> bool:
         t = self._keepalive_thread
         return t is not None and t.is_alive()
+
+    @property
+    def place_inflight(self) -> bool:
+        return self._place_inflight > 0
+
+    @contextmanager
+    def place_io_section(self) -> Iterator[None]:
+        """Serialize warm keepalive against in-flight trade place/ack/recv.
+
+        Acquires the session lock only to bump the counter (so a mid-tick
+        keepalive finishes first), then releases so parallel W6 workers can
+        place on both venues concurrently. Keepalive skips all socket I/O and
+        reconnect while ``place_inflight``.
+        """
+        with self._lock:
+            if self._stopped:
+                raise RuntimeError("warm session already stopped")
+            self._place_inflight += 1
+        try:
+            yield
+        finally:
+            with self._lock:
+                self._place_inflight = max(0, int(self._place_inflight) - 1)
 
     def is_ready(self) -> bool:
         if self._stopped or not self._started:
@@ -174,6 +201,15 @@ class PrivateWarmSession:
     def note_disconnect(self, *, exchange: Optional[str] = None) -> None:
         """Mark reconnect required after socket drop (public-policy analogue)."""
         with self._lock:
+            if self._place_inflight > 0:
+                # Never tear down sockets under an in-flight place/ack; the
+                # place path fail-closes ambiguously if transport errors.
+                LOG.warning(
+                    "warm_disconnect_deferred_place_inflight exchange=%s run_id=%s",
+                    exchange or "both",
+                    self.run_id,
+                )
+                return
             targets: Sequence[PrivateStreamRuntime]
             if exchange is None:
                 targets = (self.bybit_runtime, self.okx_runtime)
@@ -292,6 +328,12 @@ class PrivateWarmSession:
     def _keepalive_loop(self) -> None:
         while not self._stop_requested():
             try:
+                # Skip all I/O / reconnect while place+ack holds trade sockets.
+                with self._lock:
+                    placing = self._place_inflight > 0
+                if placing:
+                    self._keepalive_stop.wait(timeout=float(self.poll_sec))
+                    continue
                 if not self.is_ready():
                     self._recover_with_backoff()
                 else:
@@ -312,6 +354,9 @@ class PrivateWarmSession:
     def _recover_with_backoff(self) -> None:
         if self._stop_requested():
             return
+        with self._lock:
+            if self._place_inflight > 0:
+                return
         delay = reconnect_sleep_sec(
             self._fail_attempt,
             base=float(self.reconnect_base_sec),
@@ -333,6 +378,8 @@ class PrivateWarmSession:
         try:
             with self._lock:
                 if self._stopped:
+                    return
+                if self._place_inflight > 0:
                     return
                 if self.is_ready():
                     self._fail_attempt = 0
@@ -369,13 +416,14 @@ class PrivateWarmSession:
 
     def _keepalive_tick(self) -> None:
         with self._lock:
-            if self._stopped or not self.is_ready():
+            if self._stopped or self._place_inflight > 0 or not self.is_ready():
                 return
             now = time.monotonic()
             if (now - self._last_hb_mono) >= float(self.heartbeat_every_sec):
                 for rt in (self.bybit_runtime, self.okx_runtime):
                     try:
                         rt.send_heartbeat()
+                        rt.send_trade_heartbeat()
                     except Exception:  # noqa: BLE001
                         self.note_disconnect()
                         return
@@ -395,15 +443,42 @@ class PrivateWarmSession:
                         rt.handle_silence_timeout()
                         self.note_disconnect()
                         return
+                    # Fall through to trade drain / silence below.
+                except Exception:  # noqa: BLE001
+                    self.note_disconnect()
+                    return
+                else:
+                    try:
+                        rt.handle_inbound_text(raw)
+                    except Exception:  # noqa: BLE001
+                        self.note_disconnect()
+                        return
+            # Drain trade inboxes for pong/noise only; stash anything else so
+            # place/ack cannot lose frames to keepalive.
+            from app.bot.private.ws_private import is_ws_noise_frame
+
+            for rt in (self.bybit_runtime, self.okx_runtime):
+                sock = rt.trade_socket
+                if sock is None:
+                    self.note_disconnect()
+                    return
+                try:
+                    raw = sock.recv_text(timeout_sec=_DEFAULT_RECV_TIMEOUT_SEC)
+                except TimeoutError:
+                    if rt.trade_silence_exceeded(
+                        silence_timeout_sec=float(self.silence_timeout_sec)
+                    ):
+                        rt.handle_silence_timeout()
+                        self.note_disconnect()
+                        return
                     continue
                 except Exception:  # noqa: BLE001
                     self.note_disconnect()
                     return
-                try:
-                    rt.handle_inbound_text(raw)
-                except Exception:  # noqa: BLE001
-                    self.note_disconnect()
-                    return
+                rt.note_trade_activity()
+                if is_ws_noise_frame(rt.exchange, raw):
+                    continue
+                rt.stash_trade_inbound(raw)
             if self._any_socket_dead():
                 self.note_disconnect()
 

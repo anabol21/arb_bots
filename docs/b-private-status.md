@@ -66,6 +66,19 @@ heartbeat/ping, auto-reconnect с bounded backoff в фоне (в т.ч. на id
 сигнал на здоровой сессии. CLI: `--ws-warm-session` (без send); dual-leg send
 подхватывает process warm session автоматически.
 
+**Warm + parallel place thread safety (2026-09-04).** Production symptom:
+reduce-only close `request_sent` → immediate `post_dispatch_ambiguity` /
+`error_code=unknown` (not the 5s ack timeout) when warm gen≥2 + W6/W7
+parallel place reused sockets. Root cause: `WebsocketsClientSocket` used a
+per-socket asyncio loop with `run_until_complete` from whichever thread called
+send/recv (keepalive vs place workers), and keepalive drained/heartbeated only
+**private** while idle **trade** could look `connected`. Fix: dedicated owner
+loop thread + `run_coroutine_threadsafe` under a per-socket lock; warm
+`place_io_section()` pauses keepalive I/O/reconnect for the place+ack window;
+trade channel gets heartbeat + silence + non-noise stash so ACK frames are not
+stolen. Cold (non-warm) W6 path unchanged. Fail-closed: `TimeoutError` →
+ambiguous timeout; venue rejects stay rejects.
+
 **`l1_at_send` / journal fill stamps ≠ venue fill latency.** Метки public
 journal `l1_at_send` и stub `Trade_Lat_ms=100` не измеряют время матча на
 бирже. Сравнивать place→fill нужно по private journal `request_sent` →
