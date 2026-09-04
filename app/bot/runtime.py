@@ -237,6 +237,17 @@ class BotRuntime:
         self._ma_cache: dict[str, tuple[Optional[float], Optional[float]]] = {
             c: (None, None) for c in self.coins
         }
+        self._private_warm: Any = None
+
+    def start_private_warm_if_live_send(self, **overrides: Any) -> Any:
+        """Warm private WS before the signal loop when live private send is armed.
+
+        ON BY DEFAULT for ``VENUE=live`` + ``LIVE_ORDERS=1`` (no opt-in flag).
+        Stub / would_send units leave LIVE_ORDERS off and get ``None``.
+        """
+        from app.bot.private.ws_warm_session import start_warm_private_for_bot_process
+
+        return start_warm_private_for_bot_process(**overrides)
 
     def _meta(self, coin: str) -> InstrumentMeta:
         if coin not in self.universe:
@@ -780,6 +791,28 @@ class BotRuntime:
                 "policy_missing | continuing WS-only; will not open intents"
             )
 
+        # Private WS: process-lifetime like public L1 when live private send is on.
+        try:
+            self._private_warm = self.start_private_warm_if_live_send(
+                stop_event=self.stop_event
+            )
+        except Exception as exc:
+            self.log.error(
+                "private_warm_failed | err=%s | refusing cold signal loop",
+                type(exc).__name__,
+            )
+            raise
+        if self._private_warm is not None:
+            self.log.info(
+                "private_warm_started | run_id=%s | ready=%s | handshake_count=%s | keepalive=%s",
+                self._private_warm.run_id,
+                self._private_warm.is_ready(),
+                self._private_warm._handshake_count,  # noqa: SLF001
+                self._private_warm.keepalive_running,
+            )
+        else:
+            self.log.info("private_warm_skipped | live_private_send=false")
+
         tasks: list[asyncio.Task] = [asyncio.create_task(self._heartbeat())]
         for coin in self.coins:
             meta = self._meta(coin)
@@ -818,6 +851,11 @@ class BotRuntime:
         except asyncio.CancelledError:
             self.stop_event.set()
             raise
+        finally:
+            from app.bot.private.ws_warm_session import clear_process_warm_session
+
+            clear_process_warm_session(stop=True)
+            self._private_warm = None
 
 
 def main() -> int:

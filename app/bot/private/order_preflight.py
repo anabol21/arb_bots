@@ -6,6 +6,7 @@ StaticMetadataProvider with explicit mark/contract units.
 
 from __future__ import annotations
 
+import threading
 import time
 from dataclasses import dataclass
 from typing import Any, Callable, Mapping, Protocol
@@ -339,3 +340,70 @@ def assert_preflight_ready(
     if not mode.verified:
         raise PreflightError("position mode snapshot not verified")
     return meta
+
+
+@dataclass
+class TtlCachingMetadataProvider:
+    """Reuse live instrument/mark fetches across dual-leg prepare within TTL.
+
+    Mark freshness is still enforced by ``assert_mark_fresh`` / ``mark_max_age_ns``.
+    """
+
+    inner: MetadataProvider
+    ttl_ns: int = 2_000_000_000  # 2s — below typical mark_max_age (5s)
+
+    def __post_init__(self) -> None:
+        self._lock = threading.Lock()
+        self._cache: dict[tuple[str, str], tuple[InstrumentMetadata, int]] = {}
+        self.fetch_count = 0
+
+    def get(self, venue: str, symbol: str) -> InstrumentMetadata:
+        key = (str(venue), str(symbol))
+        now = time.monotonic_ns()
+        with self._lock:
+            hit = self._cache.get(key)
+            if hit is not None:
+                meta, fetched_at = hit
+                if now - fetched_at <= self.ttl_ns:
+                    try:
+                        meta.assert_mark_fresh(now_mono_ns=now)
+                        return meta
+                    except MetadataError:
+                        pass
+            meta = self.inner.get(venue, symbol)
+            self.fetch_count += 1
+            self._cache[key] = (meta, now)
+            return meta
+
+    def prefetch(self, venue: str, symbol: str) -> InstrumentMetadata:
+        return self.get(venue, symbol)
+
+
+@dataclass
+class TtlCachingPositionModeProvider:
+    """Reuse verified position-mode snapshots (rarely change) across legs."""
+
+    inner: PositionModeProvider
+    ttl_ns: int = 60_000_000_000  # 60s
+
+    def __post_init__(self) -> None:
+        self._lock = threading.Lock()
+        self._cache: dict[str, tuple[PositionModeSnapshot, int]] = {}
+        self.fetch_count = 0
+
+    def get(self, venue: str) -> PositionModeSnapshot:
+        key = str(venue)
+        now = time.monotonic_ns()
+        with self._lock:
+            hit = self._cache.get(key)
+            if hit is not None:
+                snap, fetched_at = hit
+                if now - fetched_at <= self.ttl_ns and snap.verified:
+                    return snap
+            snap = self.inner.get(venue)
+            self.fetch_count += 1
+            self._cache[key] = (snap, now)
+            return snap
+
+    def prefetch(self, venue: str) -> PositionModeSnapshot:
+        return self.get(venue)

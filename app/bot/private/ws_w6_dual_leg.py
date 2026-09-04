@@ -13,6 +13,7 @@ and ``--w6-approve-one-shot``. Default / W3 / W4 / W5 CLI never binds this.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 import os
@@ -622,39 +623,207 @@ def _place_pair_parallel(
     *,
     bybit_kw: Mapping[str, Any],
     okx_kw: Mapping[str, Any],
+    warm_session: Any = None,
+    hot_ready: bool = False,
 ) -> tuple[PlaceWaitResult, PlaceWaitResult]:
-    barrier = threading.Barrier(2)
-    out: dict[str, PlaceWaitResult] = {}
+    """Prepare both legs on the caller thread, then near-parallel WS send.
 
-    def worker(key: str, kwargs: Mapping[str, Any]) -> None:
-        try:
-            out[key] = _place_and_wait_fill(dispatch_barrier=barrier, **kwargs)
-        except Exception:  # noqa: BLE001
-            try:
-                barrier.abort()
-            except Exception:  # noqa: BLE001
-                pass
-            out[key] = PlaceWaitResult(
+    Matches old ``bybit_ws.py``: build/prepare first, then dual ``queue.put``
+    style dispatch. Journal/approval stay ahead of venue send; workers only
+    run ``dispatch_prepared`` (+ fill wait).
+    """
+    from app.bot.private.order_sender import PreparedDispatch
+    from app.bot.private.ws_dual_hot import enqueue_dual_dispatch
+
+    def _prep_one(kw: Mapping[str, Any]) -> Any:
+        sender = kw["sender"]
+        runtime = kw["runtime"]
+        place_transport = kw["place_transport"]
+        plan = kw["plan"]
+        runtime.register_plan_fingerprint(plan)
+        place_transport._plan = plan  # noqa: SLF001
+        sender._transport = place_transport  # noqa: SLF001
+        return sender.prepare_approved(
+            plan,
+            kw["token"],
+            kw["credentials"],
+            kw["env"],
+            journal_transport="ws_trade",
+            reconnect_generation=runtime.reconnect_generation,
+            hot_ready=hot_ready,
+        )
+
+    prep_b = _prep_one(bybit_kw)
+    prep_o = _prep_one(okx_kw)
+    if not isinstance(prep_b, PreparedDispatch):
+        return (
+            PlaceWaitResult(
                 status="ack_fail",
                 transport_invoked=False,
-                error_code="internal_error",
+                error_code=getattr(prep_b, "error_code", "internal_error"),
+            ),
+            PlaceWaitResult(
+                status="ack_fail",
+                transport_invoked=False,
+                error_code="dual_leg_aborted",
+            ),
+        )
+    if not isinstance(prep_o, PreparedDispatch):
+        # Peer prepare failed after first leg request_sent — never transport either.
+        try:
+            bybit_kw["sender"]._journal_reject(  # noqa: SLF001
+                prep_b.plan, stage="send", error_code="dual_leg_aborted"
             )
+            prep_b.lease.mark_terminal()
+        except (
+            OSError,
+            RuntimeError,
+            ValueError,
+            TypeError,
+            JournalValidationError,
+        ):
+            pass
+        return (
+            PlaceWaitResult(
+                status="ack_fail",
+                transport_invoked=False,
+                error_code="dual_leg_aborted",
+            ),
+            PlaceWaitResult(
+                status="ack_fail",
+                transport_invoked=False,
+                error_code=getattr(prep_o, "error_code", "internal_error"),
+            ),
+        )
 
-    t_b = threading.Thread(target=worker, args=("bybit", dict(bybit_kw)), daemon=False)
-    t_o = threading.Thread(target=worker, args=("okx", dict(okx_kw)), daemon=False)
+    b_send, o_send = enqueue_dual_dispatch(
+        bybit_sender=bybit_kw["sender"],
+        okx_sender=okx_kw["sender"],
+        bybit_prepared=prep_b,
+        okx_prepared=prep_o,
+        bybit_transport=bybit_kw["place_transport"],
+        okx_transport=okx_kw["place_transport"],
+        warm_session=warm_session,
+    )
+
+    def _after_ack(kw: Mapping[str, Any], res: Any) -> PlaceWaitResult:
+        invoked = bool(res.transport_invoked)
+        dispatch_ns = res.dispatch_monotonic_ns
+        if res.status != "ack":
+            return PlaceWaitResult(
+                status="ack_fail",
+                transport_invoked=invoked,
+                error_code=res.error_code,
+                venue_code=res.venue_code,
+                dispatch_monotonic_ns=dispatch_ns,
+            )
+        fill_inject_fn = kw.get("fill_inject_fn")
+        if fill_inject_fn is not None:
+            try:
+                fill_inject_fn(kw["inject_kind"], kw["plan"])
+            except Exception:  # noqa: BLE001
+                pass
+        snap = _wait_private_terminal(
+            kw["runtime"],
+            kw["provider"],
+            kw["plan"],
+            timeout_sec=float(kw["terminal_wait_sec"]),
+        )
+        term = observed_terminal_state(snap)
+        if term != "filled":
+            return PlaceWaitResult(
+                status="no_fill",
+                transport_invoked=invoked,
+                error_code="unknown",
+                dispatch_monotonic_ns=dispatch_ns,
+            )
+        try:
+            sender = kw["sender"]
+            assert sender.lease is not None
+            _commit_stream_terminal(
+                runtime=kw["runtime"],
+                journal=kw["journal"],
+                lease=sender.lease,
+                plan=kw["plan"],
+                term="filled",
+            )
+        except (
+            OSError,
+            RuntimeError,
+            ValueError,
+            TypeError,
+            JournalValidationError,
+        ):
+            return PlaceWaitResult(
+                status="journal_failed",
+                transport_invoked=invoked,
+                error_code="internal_error",
+                dispatch_monotonic_ns=dispatch_ns,
+            )
+        return PlaceWaitResult(
+            status="ok",
+            transport_invoked=invoked,
+            dispatch_monotonic_ns=dispatch_ns,
+        )
+
+    # Fill wait can run in parallel after both acks (venue-bound residual).
+    out: dict[str, PlaceWaitResult] = {}
+
+    def fill_worker(key: str, kw: Mapping[str, Any], res: Any) -> None:
+        out[key] = _after_ack(kw, res)
+
+    t_b = threading.Thread(
+        target=fill_worker, args=("bybit", dict(bybit_kw), b_send), daemon=False
+    )
+    t_o = threading.Thread(
+        target=fill_worker, args=("okx", dict(okx_kw), o_send), daemon=False
+    )
     t_b.start()
     t_o.start()
     t_b.join()
     t_o.join()
     return (
-        out.get(
-            "bybit",
-            PlaceWaitResult("ack_fail", False, "internal_error"),
-        ),
-        out.get(
-            "okx",
-            PlaceWaitResult("ack_fail", False, "internal_error"),
-        ),
+        out.get("bybit", PlaceWaitResult("ack_fail", False, "internal_error")),
+        out.get("okx", PlaceWaitResult("ack_fail", False, "internal_error")),
+    )
+
+
+def _flatten_pair_parallel(
+    *,
+    bybit_kw: Mapping[str, Any],
+    okx_kw: Mapping[str, Any],
+    warm_session: Any = None,
+) -> tuple[tuple[str, int], tuple[str, int]]:
+    """Parallel reduce-only flatten on warm trade sockets (same place_io guard)."""
+    out: dict[str, tuple[str, int]] = {}
+
+    def worker(key: str, kwargs: Mapping[str, Any]) -> None:
+        try:
+            kw = dict(kwargs)
+            kw.pop("warm_session", None)
+            out[key] = _flatten_venue(**kw, warm_session=None)
+        except Exception:  # noqa: BLE001
+            out[key] = ("flatten_incomplete", 0)
+
+    guard = (
+        warm_session.place_io_section()
+        if warm_session is not None
+        else contextlib.nullcontext()
+    )
+    with guard:
+        t_b = threading.Thread(
+            target=worker, args=("bybit", dict(bybit_kw)), daemon=False
+        )
+        t_o = threading.Thread(
+            target=worker, args=("okx", dict(okx_kw)), daemon=False
+        )
+        t_b.start()
+        t_o.start()
+        t_b.join()
+        t_o.join()
+    return (
+        out.get("bybit", ("flatten_incomplete", 0)),
+        out.get("okx", ("flatten_incomplete", 0)),
     )
 
 
@@ -682,81 +851,88 @@ def _place_and_wait_fill(
     fill_inject_fn: Optional[Any],
     inject_kind: str,
     dispatch_barrier: Optional[threading.Barrier] = None,
+    warm_session: Any = None,
 ) -> PlaceWaitResult:
     """status ok|ack_fail|no_fill|journal_failed."""
-    runtime.register_plan_fingerprint(plan)
-    place_transport._plan = plan  # noqa: SLF001
-    sender._transport = place_transport  # noqa: SLF001
-    res = sender.send_approved(
-        plan,
-        token,
-        credentials,
-        env,
-        journal_transport="ws_trade",
-        reconnect_generation=runtime.reconnect_generation,
-        dispatch_barrier=dispatch_barrier,
+    guard = (
+        warm_session.place_io_section()
+        if warm_session is not None
+        else contextlib.nullcontext()
     )
-    invoked = bool(res.transport_invoked)
-    dispatch_ns = res.dispatch_monotonic_ns
-    if res.status != "ack":
-        if dispatch_barrier is not None and not invoked:
+    with guard:
+        runtime.register_plan_fingerprint(plan)
+        place_transport._plan = plan  # noqa: SLF001
+        sender._transport = place_transport  # noqa: SLF001
+        res = sender.send_approved(
+            plan,
+            token,
+            credentials,
+            env,
+            journal_transport="ws_trade",
+            reconnect_generation=runtime.reconnect_generation,
+            dispatch_barrier=dispatch_barrier,
+        )
+        invoked = bool(res.transport_invoked)
+        dispatch_ns = res.dispatch_monotonic_ns
+        if res.status != "ack":
+            if dispatch_barrier is not None and not invoked:
+                try:
+                    dispatch_barrier.abort()
+                except Exception:  # noqa: BLE001
+                    pass
+            return PlaceWaitResult(
+                status="ack_fail",
+                transport_invoked=invoked,
+                error_code=res.error_code,
+                venue_code=res.venue_code,
+                dispatch_monotonic_ns=dispatch_ns,
+            )
+        if fill_inject_fn is not None:
             try:
-                dispatch_barrier.abort()
+                fill_inject_fn(inject_kind, plan)
             except Exception:  # noqa: BLE001
                 pass
-        return PlaceWaitResult(
-            status="ack_fail",
-            transport_invoked=invoked,
-            error_code=res.error_code,
-            venue_code=res.venue_code,
-            dispatch_monotonic_ns=dispatch_ns,
+        snap = _wait_private_terminal(
+            runtime, provider, plan, timeout_sec=float(terminal_wait_sec)
         )
-    if fill_inject_fn is not None:
+        term = observed_terminal_state(snap)
+        if term != "filled":
+            # Caller may still flatten leftover exposure; do not block sends yet.
+            return PlaceWaitResult(
+                status="no_fill",
+                transport_invoked=invoked,
+                error_code="unknown",
+                dispatch_monotonic_ns=dispatch_ns,
+            )
         try:
-            fill_inject_fn(inject_kind, plan)
-        except Exception:  # noqa: BLE001
-            pass
-    snap = _wait_private_terminal(
-        runtime, provider, plan, timeout_sec=float(terminal_wait_sec)
-    )
-    term = observed_terminal_state(snap)
-    if term != "filled":
-        # Caller may still flatten leftover exposure; do not block sends yet.
+            assert sender.lease is not None
+            _commit_stream_terminal(
+                runtime=runtime,
+                journal=journal,
+                lease=sender.lease,
+                plan=plan,
+                term="filled",
+            )
+        except (
+            OSError,
+            RuntimeError,
+            ValueError,
+            TypeError,
+            JournalValidationError,
+        ):
+            # Do not mark process-blocked here: caller may still flatten leftover
+            # exposure on the same venue. Caller fail-closes after that attempt.
+            return PlaceWaitResult(
+                status="journal_failed",
+                transport_invoked=invoked,
+                error_code="internal_error",
+                dispatch_monotonic_ns=dispatch_ns,
+            )
         return PlaceWaitResult(
-            status="no_fill",
+            status="ok",
             transport_invoked=invoked,
-            error_code="unknown",
             dispatch_monotonic_ns=dispatch_ns,
         )
-    try:
-        assert sender.lease is not None
-        _commit_stream_terminal(
-            runtime=runtime,
-            journal=journal,
-            lease=sender.lease,
-            plan=plan,
-            term="filled",
-        )
-    except (
-        OSError,
-        RuntimeError,
-        ValueError,
-        TypeError,
-        JournalValidationError,
-    ):
-        # Do not mark process-blocked here: caller may still flatten leftover
-        # exposure on the same venue. Caller fail-closes after that attempt.
-        return PlaceWaitResult(
-            status="journal_failed",
-            transport_invoked=invoked,
-            error_code="internal_error",
-            dispatch_monotonic_ns=dispatch_ns,
-        )
-    return PlaceWaitResult(
-        status="ok",
-        transport_invoked=invoked,
-        dispatch_monotonic_ns=dispatch_ns,
-    )
 
 
 def _flatten_venue(
@@ -776,6 +952,7 @@ def _flatten_venue(
     terminal_wait_sec: float,
     fill_inject_fn: Optional[Any],
     inject_kind: str,
+    warm_session: Any = None,
 ) -> tuple[str, int]:
     """Flatten one venue. Returns (ok|flatten_incomplete|flatten_plan_rejected, orders_delta)."""
     try:
@@ -808,6 +985,7 @@ def _flatten_venue(
         terminal_wait_sec=terminal_wait_sec,
         fill_inject_fn=fill_inject_fn,
         inject_kind=inject_kind,
+        warm_session=warm_session,
     )
     orders = 1 if placed.transport_invoked else 0
     if placed.status != "ok":
@@ -841,6 +1019,7 @@ def _recover_inflight_w6(
     vault: ApprovalVault,
     env: Mapping[str, str],
     issue_approval: bool,
+    warm_session: Any = None,
 ) -> Optional[str]:
     unresolved = [
         lease
@@ -974,6 +1153,7 @@ def _recover_inflight_w6(
             terminal_wait_sec=float(terminal_wait_sec),
             fill_inject_fn=None,
             inject_kind="recovery_flatten",
+            warm_session=warm_session,
         )
         if st != "ok":
             return "recovery_blocked"
@@ -1044,16 +1224,34 @@ def run_w6_dual_leg(
     fill_inject_fn: Optional[Any] = None,
     parallel_open: bool = False,
     send_gate: Optional[Any] = None,
+    warm_session: Optional[Any] = None,
 ) -> W6Report:
     """Execute n dual-leg market rounds (Bybit buy / OKX sell).
 
     Default is sequential: Bybit must fill before OKX is sent.
     ``parallel_open=True`` (W7) dispatches both WS places after a barrier.
+
+    When a process-lifetime ``warm_session`` is attached (or passed), the send
+    path reuses that private WS session: same ``run_id``, no per-signal
+    auth/subscribe/REST reseed handshake. Sockets are not closed on exit.
     """
+    from app.bot.private.ws_warm_session import (
+        PrivateWarmSession,
+        get_process_warm_session,
+    )
+
     e = dict(env if env is not None else os.environ)
     gate = send_gate if send_gate is not None else assert_ws_w6_send_gates
     open_mode = "parallel" if parallel_open else "sequential"
     dispatch_pairs: list[tuple[Optional[int], Optional[int]]] = []
+    session: Optional[PrivateWarmSession] = None
+    if warm_session is not None:
+        if not isinstance(warm_session, PrivateWarmSession):
+            raise TypeError("warm_session must be PrivateWarmSession")
+        session = warm_session
+    else:
+        session = get_process_warm_session()
+    retain_sockets = False
 
     def _latency() -> dict[str, Any]:
         payload = _collect_open_latency(j)
@@ -1081,29 +1279,31 @@ def run_w6_dual_leg(
 
     dual_base = _as_dual_baseline(baseline)
     root = data_root if data_root is not None else resolve_data_root(e)
-    j = journal if journal is not None else PrivateJournalWriter(
-        root, run_id=new_opaque_id("run")
-    )
 
-    if bybit_credentials is None or okx_credentials is None:
-        if not load_secrets:
-            return _report(
-                status="secrets_unavailable",
-                n_requested=n_req,
-                error_code="auth_unavailable",
-            )
+    if session is not None and not session._stopped:  # noqa: SLF001
         try:
-            secrets = load_live_secrets(e, require_complete=True)
-            if bybit_credentials is None:
-                bybit_credentials = _creds_from_live(secrets, "bybit")
-            if okx_credentials is None:
-                okx_credentials = _creds_from_live(secrets, "okx")
-        except (OSError, RuntimeError, ValueError, KeyError, TypeError):
+            session.ensure_ready()
+        except RuntimeError:
             return _report(
-                status="secrets_unavailable",
+                status="handshake_failed",
                 n_requested=n_req,
-                error_code="auth_unavailable",
+                error_code="auth_failed",
             )
+        if (
+            session.bybit_symbol != bybit_p["symbol"]
+            or session.okx_symbol != okx_p["symbol"]
+        ):
+            return _report(
+                status="plan_rejected",
+                n_requested=n_req,
+                error_code="invalid_request",
+            )
+        j = session.journal
+        bybit_credentials = session.bybit_credentials
+        okx_credentials = session.okx_credentials
+        bybit_runtime = session.bybit_runtime
+        okx_runtime = session.okx_runtime
+        retain_sockets = True
         if rest_order_recon is None:
             from app.bot.private.ws_w4_baseline import build_signed_rest_order_recon
 
@@ -1113,6 +1313,71 @@ def run_w6_dual_leg(
                 endpoints=endpoints_for_venue("live"),
                 require_position_flat=True,
             )
+    else:
+        session = None
+        j = journal if journal is not None else PrivateJournalWriter(
+            root, run_id=new_opaque_id("run")
+        )
+
+        if bybit_credentials is None or okx_credentials is None:
+            if not load_secrets:
+                return _report(
+                    status="secrets_unavailable",
+                    n_requested=n_req,
+                    error_code="auth_unavailable",
+                )
+            try:
+                secrets = load_live_secrets(e, require_complete=True)
+                if bybit_credentials is None:
+                    bybit_credentials = _creds_from_live(secrets, "bybit")
+                if okx_credentials is None:
+                    okx_credentials = _creds_from_live(secrets, "okx")
+            except (OSError, RuntimeError, ValueError, KeyError, TypeError):
+                return _report(
+                    status="secrets_unavailable",
+                    n_requested=n_req,
+                    error_code="auth_unavailable",
+                )
+            if rest_order_recon is None:
+                from app.bot.private.ws_w4_baseline import build_signed_rest_order_recon
+
+                rest_order_recon = build_signed_rest_order_recon(
+                    bybit_credentials=bybit_credentials,
+                    okx_credentials=okx_credentials,
+                    endpoints=endpoints_for_venue("live"),
+                    require_position_flat=True,
+                )
+
+        bybit_reseed = build_signed_rest_reseed(
+            exchange="bybit",
+            credentials=bybit_credentials,
+            endpoints=endpoints_for_venue("live"),
+            probe_fn=rest_probe_fn,
+        )
+        okx_reseed = build_signed_rest_reseed(
+            exchange="okx",
+            credentials=okx_credentials,
+            endpoints=endpoints_for_venue("live"),
+            probe_fn=rest_probe_fn,
+        )
+        bybit_runtime = PrivateStreamRuntime.create_gated(
+            exchange="bybit",
+            symbol_alias=bybit_p["symbol"],
+            journal=j,
+            credentials=bybit_credentials,
+            env=e,
+            rest_reseed=bybit_reseed,
+            profile_gate=gate,
+        )
+        okx_runtime = PrivateStreamRuntime.create_gated(
+            exchange="okx",
+            symbol_alias=okx_p["symbol"],
+            journal=j,
+            credentials=okx_credentials,
+            env=e,
+            rest_reseed=okx_reseed,
+            profile_gate=gate,
+        )
 
     try:
         assert_flat(
@@ -1139,37 +1404,6 @@ def run_w6_dual_leg(
             n_requested=n_req,
             error_code="invalid_request",
         )
-
-    bybit_reseed = build_signed_rest_reseed(
-        exchange="bybit",
-        credentials=bybit_credentials,
-        endpoints=endpoints_for_venue("live"),
-        probe_fn=rest_probe_fn,
-    )
-    okx_reseed = build_signed_rest_reseed(
-        exchange="okx",
-        credentials=okx_credentials,
-        endpoints=endpoints_for_venue("live"),
-        probe_fn=rest_probe_fn,
-    )
-    bybit_runtime = PrivateStreamRuntime.create_gated(
-        exchange="bybit",
-        symbol_alias=bybit_p["symbol"],
-        journal=j,
-        credentials=bybit_credentials,
-        env=e,
-        rest_reseed=bybit_reseed,
-        profile_gate=gate,
-    )
-    okx_runtime = PrivateStreamRuntime.create_gated(
-        exchange="okx",
-        symbol_alias=okx_p["symbol"],
-        journal=j,
-        credentials=okx_credentials,
-        env=e,
-        rest_reseed=okx_reseed,
-        profile_gate=gate,
-    )
 
     bybit_transport = bybit_place_override or _WsTradePlaceTransport(
         runtime=bybit_runtime, ack_timeout_sec=ack_timeout_sec
@@ -1214,48 +1448,54 @@ def run_w6_dual_leg(
     n_completed = 0
     n_aborted = 0
     try:
-        if (
-            bybit_private_socket is None
-            or bybit_trade_socket is None
-            or okx_private_socket is None
-            or okx_trade_socket is None
-        ):
-            return _report(
-                status="sockets_required",
-                n_requested=n_req,
-                error_code="transport_error",
-            )
-
-        bybit_runtime.bind_sockets(
-            private=bybit_private_socket, trade=bybit_trade_socket, env=e
-        )
-        okx_runtime.bind_sockets(
-            private=okx_private_socket, trade=okx_trade_socket, env=e
-        )
-        trade_bound = (
-            bybit_runtime.trade_socket is not None
-            and okx_runtime.trade_socket is not None
-        )
-
-        for runtime, exchange in ((bybit_runtime, "bybit"), (okx_runtime, "okx")):
-            hs_err = _handshake_private_and_trade(
-                runtime, exchange=exchange, ack_timeout_sec=ack_timeout_sec
-            )
-            if hs_err is not None:
-                status_map = {
-                    "auth_failed": "auth_failed",
-                    "venue_rejected": "subscribe_failed",
-                    "reseed_required": "reseed_required",
-                }
+        if session is None:
+            if (
+                bybit_private_socket is None
+                or bybit_trade_socket is None
+                or okx_private_socket is None
+                or okx_trade_socket is None
+            ):
                 return _report(
-                    status=status_map.get(hs_err, "handshake_failed"),
+                    status="sockets_required",
                     n_requested=n_req,
-                    trade_ws_bound=trade_bound,
-                    subscription_ready=hs_err not in {"auth_failed"},
-                    reseed_matched=False,
-                    sends_blocked=True,
-                    error_code="auth_failed" if "auth" in hs_err else "unknown",
+                    error_code="transport_error",
                 )
+
+            bybit_runtime.bind_sockets(
+                private=bybit_private_socket, trade=bybit_trade_socket, env=e
+            )
+            okx_runtime.bind_sockets(
+                private=okx_private_socket, trade=okx_trade_socket, env=e
+            )
+            trade_bound = (
+                bybit_runtime.trade_socket is not None
+                and okx_runtime.trade_socket is not None
+            )
+
+            for runtime, exchange in ((bybit_runtime, "bybit"), (okx_runtime, "okx")):
+                hs_err = _handshake_private_and_trade(
+                    runtime, exchange=exchange, ack_timeout_sec=ack_timeout_sec
+                )
+                if hs_err is not None:
+                    status_map = {
+                        "auth_failed": "auth_failed",
+                        "venue_rejected": "subscribe_failed",
+                        "reseed_required": "reseed_required",
+                    }
+                    return _report(
+                        status=status_map.get(hs_err, "handshake_failed"),
+                        n_requested=n_req,
+                        trade_ws_bound=trade_bound,
+                        subscription_ready=hs_err not in {"auth_failed"},
+                        reseed_matched=False,
+                        sends_blocked=True,
+                        error_code="auth_failed" if "auth" in hs_err else "unknown",
+                    )
+        else:
+            trade_bound = (
+                bybit_runtime.trade_socket is not None
+                and okx_runtime.trade_socket is not None
+            )
 
         inst_err = _bind_okx_inst_id(
             runtime=okx_runtime,
@@ -1290,6 +1530,7 @@ def run_w6_dual_leg(
             vault=vault,
             env=e,
             issue_approval=issue_approval,
+            warm_session=session,
         )
         if recovery_err is not None:
             recovery_error_code = (
@@ -1427,6 +1668,7 @@ def run_w6_dual_leg(
                 "terminal_wait_sec": float(terminal_wait_sec),
                 "fill_inject_fn": fill_inject_fn,
                 "inject_kind": "bybit_open",
+                "warm_session": session,
             }
             okx_place_kw_base = {
                 "sender": okx_sender,
@@ -1440,13 +1682,35 @@ def run_w6_dual_leg(
                 "terminal_wait_sec": float(terminal_wait_sec),
                 "fill_inject_fn": fill_inject_fn,
                 "inject_kind": "okx_open",
+                "warm_session": session,
             }
 
             if parallel_open:
+                from app.bot.private.ws_dual_hot import prefetch_dual_leg_hot_context
+
+                hot = prefetch_dual_leg_hot_context(
+                    env=e,
+                    vault=vault,
+                    lease_supervisor=bybit_sender.lease_supervisor,
+                    metadata_provider=metadata_provider,
+                    position_mode_provider=position_mode_provider,
+                    plans=(bybit_open, okx_open),
+                )
+                # Prefer TTL-cached providers for prepare inside send_approved.
+                bybit_sender._meta = hot.metadata_provider  # noqa: SLF001
+                bybit_sender._position = hot.position_mode_provider  # noqa: SLF001
+                okx_sender._meta = hot.metadata_provider  # noqa: SLF001
+                okx_sender._position = hot.position_mode_provider  # noqa: SLF001
+                metadata_provider = hot.metadata_provider
+                position_mode_provider = hot.position_mode_provider
+
                 okx_token = vault.issue(okx_open)
                 okx_place_kw_base["token"] = okx_token
                 b_res, o_res = _place_pair_parallel(
-                    bybit_kw=bybit_place_kw, okx_kw=okx_place_kw_base
+                    bybit_kw=bybit_place_kw,
+                    okx_kw=okx_place_kw_base,
+                    warm_session=session,
+                    hot_ready=True,
                 )
                 dispatch_pairs.append(
                     (b_res.dispatch_monotonic_ns, o_res.dispatch_monotonic_ns)
@@ -1497,6 +1761,7 @@ def run_w6_dual_leg(
                                 terminal_wait_sec=float(terminal_wait_sec),
                                 fill_inject_fn=fill_inject_fn,
                                 inject_kind="bybit_flatten",
+                                warm_session=session,
                             )
                             orders_sent += flat_n
                             bybit_flat_ok = flat_st == "ok"
@@ -1524,6 +1789,7 @@ def run_w6_dual_leg(
                                 terminal_wait_sec=float(terminal_wait_sec),
                                 fill_inject_fn=fill_inject_fn,
                                 inject_kind="okx_flatten",
+                                warm_session=session,
                             )
                             orders_sent += o_n
                             okx_flat_ok = o_st == "ok"
@@ -1610,6 +1876,7 @@ def run_w6_dual_leg(
                                 terminal_wait_sec=float(terminal_wait_sec),
                                 fill_inject_fn=fill_inject_fn,
                                 inject_kind="bybit_flatten",
+                                warm_session=session,
                             )
                             orders_sent += flat_n
                             flat_after = flat_st == "ok"
@@ -1679,6 +1946,7 @@ def run_w6_dual_leg(
                         terminal_wait_sec=float(terminal_wait_sec),
                         fill_inject_fn=fill_inject_fn,
                         inject_kind="bybit_flatten",
+                        warm_session=session,
                     )
                     orders_sent += flat_n
                     okx_flat_ok = True
@@ -1703,6 +1971,7 @@ def run_w6_dual_leg(
                                 terminal_wait_sec=float(terminal_wait_sec),
                                 fill_inject_fn=fill_inject_fn,
                                 inject_kind="okx_flatten",
+                                warm_session=session,
                             )
                             orders_sent += o_n
                             okx_flat_ok = o_st == "ok"
@@ -1745,41 +2014,74 @@ def run_w6_dual_leg(
                         latency_ms=_latency(),
                     )
 
+            flat_b_kw = {
+                "sender": bybit_sender,
+                "runtime": bybit_runtime,
+                "provider": bybit_provider,
+                "place_transport": bybit_transport,
+                "vault": vault,
+                "credentials": bybit_credentials,
+                "env": e,
+                "metadata_provider": metadata_provider,
+                "profile": bybit_p,
+                "dual_leg_id": dual_id,
+                "journal": j,
+                "baseline": dual_base,
+                "terminal_wait_sec": float(terminal_wait_sec),
+                "fill_inject_fn": fill_inject_fn,
+                "inject_kind": "bybit_flatten",
+            }
+            flat_o_kw = {
+                "sender": okx_sender,
+                "runtime": okx_runtime,
+                "provider": okx_provider,
+                "place_transport": okx_transport,
+                "vault": vault,
+                "credentials": okx_credentials,
+                "env": e,
+                "metadata_provider": metadata_provider,
+                "profile": okx_p,
+                "dual_leg_id": dual_id,
+                "journal": j,
+                "baseline": dual_base,
+                "terminal_wait_sec": float(terminal_wait_sec),
+                "fill_inject_fn": fill_inject_fn,
+                "inject_kind": "okx_flatten",
+            }
+            if parallel_open:
+                (flat_b, n_b), (flat_o, n_o) = _flatten_pair_parallel(
+                    bybit_kw=flat_b_kw,
+                    okx_kw=flat_o_kw,
+                    warm_session=session,
+                )
+                orders_sent += n_b + n_o
+                if flat_b != "ok" or flat_o != "ok":
+                    bybit_sender.lease_supervisor.mark_process_sends_blocked()
+                    return _report(
+                        status="flatten_incomplete",
+                        n_requested=n_req,
+                        n_completed=n_completed,
+                        n_aborted=n_aborted,
+                        trade_ws_bound=True,
+                        subscription_ready=True,
+                        reseed_matched=True,
+                        sends_blocked=True,
+                        orders_sent=orders_sent,
+                        error_code="unknown",
+                        latency_ms=_latency(),
+                    )
+                n_completed += 1
+                continue
+
             flat_b, n_b = _flatten_venue(
-                sender=bybit_sender,
-                runtime=bybit_runtime,
-                provider=bybit_provider,
-                place_transport=bybit_transport,
-                vault=vault,
-                credentials=bybit_credentials,
-                env=e,
-                metadata_provider=metadata_provider,
-                profile=bybit_p,
-                dual_leg_id=dual_id,
-                journal=j,
-                baseline=dual_base,
-                terminal_wait_sec=float(terminal_wait_sec),
-                fill_inject_fn=fill_inject_fn,
-                inject_kind="bybit_flatten",
+                warm_session=session,
+                **flat_b_kw,
             )
             orders_sent += n_b
             if flat_b != "ok":
                 o_st, o_n = _flatten_venue(
-                    sender=okx_sender,
-                    runtime=okx_runtime,
-                    provider=okx_provider,
-                    place_transport=okx_transport,
-                    vault=vault,
-                    credentials=okx_credentials,
-                    env=e,
-                    metadata_provider=metadata_provider,
-                    profile=okx_p,
-                    dual_leg_id=dual_id,
-                    journal=j,
-                    baseline=dual_base,
-                    terminal_wait_sec=float(terminal_wait_sec),
-                    fill_inject_fn=fill_inject_fn,
-                    inject_kind="okx_flatten",
+                    warm_session=session,
+                    **flat_o_kw,
                 )
                 orders_sent += o_n
                 bybit_sender.lease_supervisor.mark_process_sends_blocked()
@@ -1798,21 +2100,8 @@ def run_w6_dual_leg(
                 )
 
             flat_o, n_o = _flatten_venue(
-                sender=okx_sender,
-                runtime=okx_runtime,
-                provider=okx_provider,
-                place_transport=okx_transport,
-                vault=vault,
-                credentials=okx_credentials,
-                env=e,
-                metadata_provider=metadata_provider,
-                profile=okx_p,
-                dual_leg_id=dual_id,
-                journal=j,
-                baseline=dual_base,
-                terminal_wait_sec=float(terminal_wait_sec),
-                fill_inject_fn=fill_inject_fn,
-                inject_kind="okx_flatten",
+                warm_session=session,
+                **flat_o_kw,
             )
             orders_sent += n_o
             if flat_o != "ok":
@@ -1870,13 +2159,14 @@ def run_w6_dual_leg(
             latency_ms=latency,
         )
     finally:
-        for runtime in (bybit_runtime, okx_runtime):
-            for sock in (runtime.private_socket, runtime.trade_socket):
-                if sock is not None:
-                    try:
-                        sock.close()
-                    except Exception:  # noqa: BLE001
-                        pass
+        if not retain_sockets:
+            for runtime in (bybit_runtime, okx_runtime):
+                for sock in (runtime.private_socket, runtime.trade_socket):
+                    if sock is not None:
+                        try:
+                            sock.close()
+                        except Exception:  # noqa: BLE001
+                            pass
 
 
 def parse_w6_cli_args(argv: Sequence[str]) -> tuple[Optional[int], bool]:
@@ -1922,6 +2212,8 @@ def open_w6_production_bindings(
     from app.bot.private.order_preflight import (
         LiveHttpMetadataProvider,
         LiveSignedPositionModeProvider,
+        TtlCachingMetadataProvider,
+        TtlCachingPositionModeProvider,
     )
     from app.bot.private.ws_private import trade_ws_url_for_exchange
     from app.bot.private.ws_socket import WebsocketsSocketFactory, bind_socket_factory
@@ -1936,7 +2228,9 @@ def open_w6_production_bindings(
     bybit_creds = _creds_from_live(secrets, "bybit")
     okx_creds = _creds_from_live(secrets, "okx")
     ep = endpoints_for_venue("live")
-    meta = LiveHttpMetadataProvider(http_get_json=_public_http_get_json)
+    meta = TtlCachingMetadataProvider(
+        inner=LiveHttpMetadataProvider(http_get_json=_public_http_get_json)
+    )
     bybit_pos = LiveSignedPositionModeProvider(
         exchange="bybit",
         credentials=bybit_creds,
@@ -1951,7 +2245,9 @@ def open_w6_production_bindings(
         okx_base=ep.okx_rest,
         symbol=okx_p["symbol"],
     )
-    pos = DualPositionModeProvider(bybit=bybit_pos, okx=okx_pos)
+    pos = TtlCachingPositionModeProvider(
+        inner=DualPositionModeProvider(bybit=bybit_pos, okx=okx_pos)
+    )
     bybit_base = SignedRestFlatBaseline(
         exchange="bybit",
         credentials=bybit_creds,
@@ -2005,7 +2301,17 @@ def main_ws_w6_dual_leg(
     env: Optional[Mapping[str, str]] = None,
     bindings: Optional[W6RuntimeBindings] = None,
 ) -> int:
-    """CLI entry for ``--ws-w6-dual-leg --w6-n=N --w6-approve-one-shot``."""
+    """CLI entry for ``--ws-w6-dual-leg --w6-n=N --w6-approve-one-shot``.
+
+    Production path warms private WS once at process entry (same policy as
+    public L1 keep-alive), then reuses that session for the send.
+    """
+    from app.bot.private.ws_warm_session import (
+        WarmSocketBundle,
+        clear_process_warm_session,
+        start_warm_private_session,
+    )
+
     argv = list(argv or [])
     e = dict(env if env is not None else os.environ)
     n, approve_one_shot = parse_w6_cli_args(argv)
@@ -2077,21 +2383,69 @@ def main_ws_w6_dual_leg(
                 )
                 return 2
 
+        bybit_p = resolve_w6_leg("bybit")
+        okx_p = resolve_w6_leg("okx")
+        initial = WarmSocketBundle(
+            bybit_private=active.bybit_private_socket,
+            bybit_trade=active.bybit_trade_socket,
+            okx_private=active.okx_private_socket,
+            okx_trade=active.okx_trade_socket,
+        )
+        held: dict[str, Optional[WarmSocketBundle]] = {"bundle": initial}
+
+        def _provider() -> WarmSocketBundle:
+            if held["bundle"] is not None:
+                out = held["bundle"]
+                held["bundle"] = None
+                return out
+            from app.bot.private.ws_private import trade_ws_url_for_exchange
+            from app.bot.private.ws_socket import open_private_socket
+
+            ep = endpoints_for_venue("live")
+            return WarmSocketBundle(
+                bybit_private=open_private_socket(ep.bybit_private_ws),
+                bybit_trade=open_private_socket(
+                    trade_ws_url_for_exchange("bybit", ep)
+                ),
+                okx_private=open_private_socket(ep.okx_private_ws),
+                okx_trade=open_private_socket(
+                    trade_ws_url_for_exchange("okx", ep)
+                ),
+            )
+
+        try:
+            warm = start_warm_private_session(
+                env=e,
+                bybit_credentials=active.bybit_credentials,
+                okx_credentials=active.okx_credentials,
+                socket_provider=_provider,
+                bybit_symbol=bybit_p["symbol"],
+                okx_symbol=okx_p["symbol"],
+                profile_gate=assert_ws_w6_send_gates,
+                attach=True,
+            )
+        except (RuntimeError, WsProfileGateError, OSError, ValueError, TypeError):
+            _print(
+                W6Report(
+                    status="handshake_failed",
+                    n_requested=n,
+                    error_code="auth_failed",
+                )
+            )
+            return 2
+
         report = run_w6_dual_leg(
             n=n,
             env=e,
             metadata_provider=active.metadata_provider,
             position_mode_provider=active.position_mode_provider,
             baseline=active.baseline,
-            bybit_private_socket=active.bybit_private_socket,
-            bybit_trade_socket=active.bybit_trade_socket,
-            okx_private_socket=active.okx_private_socket,
-            okx_trade_socket=active.okx_trade_socket,
             bybit_credentials=active.bybit_credentials,
             okx_credentials=active.okx_credentials,
             load_secrets=False,
             issue_approval=True,
             rest_order_recon=active.rest_order_recon,
+            warm_session=warm,
         )
         _print(report)
         if report.status == "ok":
@@ -2104,6 +2458,138 @@ def main_ws_w6_dual_leg(
             return 1
         return 2
     finally:
+        clear_process_warm_session(stop=True)
+        if owned:
+            unbind_socket_factory()
+            assert_default_entrypoint_cannot_transport()
+
+
+def main_ws_warm_session(
+    argv: Optional[Sequence[str]] = None,
+    *,
+    env: Optional[Mapping[str, str]] = None,
+    bindings: Optional[W6RuntimeBindings] = None,
+) -> int:
+    """CLI: ``--ws-warm-session`` — connect private WS at startup, no send."""
+    from app.bot.private.ws_gates import assert_ws_warm_private_gates
+    from app.bot.private.ws_warm_session import (
+        WarmSocketBundle,
+        clear_process_warm_session,
+        start_warm_private_session,
+    )
+
+    argv = list(argv or [])
+    e = dict(env if env is not None else os.environ)
+    hold_sec = 0.0
+    for arg in argv:
+        if arg.startswith("--warm-hold-sec="):
+            try:
+                hold_sec = float(arg.split("=", 1)[1].strip())
+            except ValueError:
+                hold_sec = -1.0
+
+    def _print(payload: Mapping[str, Any]) -> None:
+        print(json.dumps(dict(payload), ensure_ascii=False, indent=2, sort_keys=True))
+
+    gate = assert_ws_w6_send_gates
+    try:
+        gate(e)
+    except WsProfileGateError:
+        try:
+            assert_ws_warm_private_gates(e)
+            gate = assert_ws_warm_private_gates
+        except WsProfileGateError:
+            _print(
+                {
+                    "status": "rejected_before_socket",
+                    "error_code": "invalid_request",
+                    "orders_sent": 0,
+                }
+            )
+            return 1
+
+    if hold_sec < 0:
+        _print({"status": "rejected_before_socket", "error_code": "invalid_request"})
+        return 1
+
+    assert_default_entrypoint_cannot_transport()
+    owned = bindings is None
+    active: Optional[W6RuntimeBindings] = bindings
+    try:
+        if active is None:
+            try:
+                assert_no_default_ws_socket()
+                active = open_w6_production_bindings(env=e)
+            except Exception:  # noqa: BLE001
+                unbind_socket_factory()
+                _print({"status": "bind_failed", "error_code": "transport_error"})
+                return 2
+
+        bybit_p = resolve_w6_leg("bybit")
+        okx_p = resolve_w6_leg("okx")
+        initial = WarmSocketBundle(
+            bybit_private=active.bybit_private_socket,
+            bybit_trade=active.bybit_trade_socket,
+            okx_private=active.okx_private_socket,
+            okx_trade=active.okx_trade_socket,
+        )
+        held: dict[str, Optional[WarmSocketBundle]] = {"bundle": initial}
+
+        def _provider() -> WarmSocketBundle:
+            if held["bundle"] is not None:
+                out = held["bundle"]
+                held["bundle"] = None
+                return out
+            from app.bot.private.ws_private import trade_ws_url_for_exchange
+            from app.bot.private.ws_socket import open_private_socket
+
+            ep = endpoints_for_venue("live")
+            return WarmSocketBundle(
+                bybit_private=open_private_socket(ep.bybit_private_ws),
+                bybit_trade=open_private_socket(
+                    trade_ws_url_for_exchange("bybit", ep)
+                ),
+                okx_private=open_private_socket(ep.okx_private_ws),
+                okx_trade=open_private_socket(
+                    trade_ws_url_for_exchange("okx", ep)
+                ),
+            )
+
+        try:
+            warm = start_warm_private_session(
+                env=e,
+                bybit_credentials=active.bybit_credentials,
+                okx_credentials=active.okx_credentials,
+                socket_provider=_provider,
+                bybit_symbol=bybit_p["symbol"],
+                okx_symbol=okx_p["symbol"],
+                profile_gate=gate,
+                attach=True,
+            )
+        except Exception:  # noqa: BLE001
+            _print({"status": "handshake_failed", "error_code": "auth_failed"})
+            return 2
+
+        _print(
+            {
+                "status": "ok",
+                "run_id": warm.run_id,
+                "ready": warm.is_ready(),
+                "handshake_count": warm._handshake_count,  # noqa: SLF001
+                "orders_sent": 0,
+                "note": (
+                    "private WS warmed at startup; l1_at_send fill timestamps "
+                    "are still not venue fills"
+                ),
+            }
+        )
+        if hold_sec > 0:
+            import time
+
+            time.sleep(hold_sec)
+        return 0
+    finally:
+        clear_process_warm_session(stop=True)
         if owned:
             unbind_socket_factory()
             assert_default_entrypoint_cannot_transport()
