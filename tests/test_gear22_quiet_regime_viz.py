@@ -31,6 +31,8 @@ from research.gear22_quiet_regime_viz.load import (
 from research.gear22_quiet_regime_viz.metrics_ext import collect_extension_traces
 from research.gear22_quiet_regime_viz.quantiles import (
     tick_hold_weights_ms,
+    time_weighted_histogram,
+    time_weighted_mean,
     time_weighted_quantiles,
 )
 
@@ -73,6 +75,18 @@ class TestTimeWeightedQuantiles(unittest.TestCase):
         self.assertEqual(q["tw_p50"], 2.0)
         self.assertEqual(q["tw_p25"], 2.0)
         self.assertEqual(q["tw_p95"], 2.0)
+        self.assertAlmostEqual(time_weighted_mean(y, w), 1.9)
+
+    def test_tw_histogram_mass_conserved(self) -> None:
+        y = np.asarray([1.0, 2.0, 10.0], dtype="float64")
+        w = np.asarray([80.0, 15.0, 5.0], dtype="float64")
+        # Robust range excluding the spike: mass of spike clips into last bin.
+        mass, lo, hi = time_weighted_histogram(y, w, n_bins=4, lo=1.0, hi=2.0)
+        self.assertAlmostEqual(float(np.sum(mass)), 100.0)
+        self.assertEqual(lo, 1.0)
+        self.assertEqual(hi, 2.0)
+        # Spike at 10 clips into last bin → last bin has 15+5.
+        self.assertAlmostEqual(float(mass[-1]), 20.0)
 
     def test_bucket_includes_tw_columns(self) -> None:
         df = load_ticks(
@@ -191,10 +205,19 @@ class TestBarInspectPayloads(unittest.TestCase):
         self.assertEqual(sample["col"], SPREAD_LONG_COL)
         self.assertEqual(len(sample["c"]), 24)
         self.assertEqual(len(sample["tv"]), 12)
-        self.assertEqual(sum(sample["c"]), sample["n"])
+        self.assertEqual(sample["c_w"], "tw_ms")
+        self.assertEqual(sample["tv_w"], "equal_time")
+        # TW mass sums to total hold weight (not tick count).
+        self.assertAlmostEqual(sum(sample["c"]), sample["w_ms"], places=2)
+        self.assertNotEqual(sum(sample["c"]), sample["n"])  # mass ≠ count
         self.assertGreater(sample["n"], 0)
         self.assertIsNotNone(sample["lo"])
         self.assertIsNotNone(sample["hi"])
+        # TW summary percentiles present.
+        self.assertIn("tw", sample)
+        for k in ("mean", "p50", "p95", "p99"):
+            self.assertIn(k, sample["tw"])
+            self.assertIsNotNone(sample["tw"][k])
         # Compact: no per-tick arrays.
         self.assertNotIn("ticks", sample)
         self.assertNotIn("ts", sample)
@@ -205,7 +228,60 @@ class TestBarInspectPayloads(unittest.TestCase):
         self.assertEqual(len(sample["lat"]["okx"]["c"]), 24)  # DEFAULT_LATENCY_BINS
         self.assertGreater(sample["lat"]["okx"]["n"], 0)
         self.assertLessEqual(sample["lat"]["okx"]["n"], sample["n"])
-        self.assertEqual(sum(sample["lat"]["okx"]["c"]), sample["lat"]["okx"]["n"])
+        self.assertEqual(sample["lat"]["okx"]["c_w"], "tw_ms")
+        self.assertAlmostEqual(
+            sum(sample["lat"]["okx"]["c"]),
+            sample["lat"]["okx"]["w_ms"],
+            places=2,
+        )
+        self.assertIn("p50", sample["lat"]["okx"]["tw"])
+
+    def test_robust_range_vs_spike_max(self) -> None:
+        """Rare max spike must not stretch hist axis (crushed-left failure)."""
+        bar_start = 1_788_423_600_000
+        # Bulk near 0.3–0.5; one rare spike with ~1ms hold (equal-weight + hi=max
+        # would stretch axis to ~250; TW p01–p99 must stay near the bulk).
+        ts = bar_start + np.asarray(
+            [0, 1, 30_000, 60_000, 90_000, 120_000, 150_000, 180_000, 210_000, 240_000],
+            dtype="int64",
+        )
+        y = np.asarray(
+            [250.0, 0.30, 0.32, 0.35, 0.38, 0.40, 0.42, 0.45, 0.48, 0.50],
+            dtype="float64",
+        )
+        lat = np.asarray(
+            [200.0, 8.0, 9.0, 10.0, 11.0, 10.0, 12.0, 11.0, 9.0, 10.0],
+            dtype="float64",
+        )
+        df = pd.DataFrame(
+            {
+                "event_local_ts_ms": ts,
+                SPREAD_LONG_COL: y,
+                "okx_latency_ms": lat,
+                "bybit_latency_ms": lat * 0.8,
+            }
+        )
+        payloads = build_bar_inspect_payloads(
+            df,
+            value_col=SPREAD_LONG_COL,
+            n_bins=16,
+            n_temporal=8,
+            latency_bins=12,
+            side="long",
+        )
+        self.assertEqual(len(payloads), 1)
+        sample = payloads[bar_start]
+        # Axis must be near the bulk, not ~250.
+        self.assertLess(float(sample["hi"]), 5.0)
+        self.assertGreater(float(sample["lo"]), -1.0)
+        self.assertLess(float(sample["hi"]) - float(sample["lo"]), 5.0)
+        # TW p50 near the cluster.
+        self.assertLess(float(sample["tw"]["p50"]), 1.0)
+        self.assertEqual(sample["c_w"], "tw_ms")
+        self.assertAlmostEqual(sum(sample["c"]), sample["w_ms"], places=2)
+        # Latency hist also robust (1ms spike at 200 must not own the axis).
+        okx = sample["lat"]["okx"]
+        self.assertLess(float(okx["hi"]), 50.0)
 
     def test_latency_nan_skipped(self) -> None:
         df = load_ticks(
@@ -268,6 +344,8 @@ class TestBarInspectPayloads(unittest.TestCase):
         self.assertTrue(any(cd is not None for cd in custom))
         nonempty = next(cd for cd in custom if cd is not None)
         self.assertIn("lat", nonempty)
+        self.assertIn("tw", nonempty)
+        self.assertEqual(nonempty["c_w"], "tw_ms")
 
     def test_zero_bins_disables(self) -> None:
         df = load_ticks(
@@ -315,11 +393,14 @@ class TestSmokeHtml(unittest.TestCase):
                 self.assertIn("candle-inspect", text)
                 self.assertIn("plotly_click", text)
                 self.assertIn("equal-time mean", text)
+                self.assertIn("TW mass", text)
                 self.assertIn("okx_latency_ms", text)
                 self.assertIn("bybit_latency_ms", text)
                 self.assertIn('"lat":', text)
                 self.assertIn('"c":', text)
                 self.assertIn('"tv":', text)
+                self.assertIn('"tw":', text)
+                self.assertIn('"c_w":', text)
                 self.assertIn("click for in-bar distribution", text)
                 # Overlay clicks must resolve via candlestick x + customdata.
                 self.assertIn("lookupCandleByTime", text)
@@ -339,6 +420,9 @@ class TestSmokeHtml(unittest.TestCase):
         self.assertIn("lookupCandleByTime", script)
         self.assertIn("customdata", script)
         self.assertIn("bar_ms", script)
+        self.assertIn("twVlines", script)
+        self.assertIn("TW p50", script)
+        self.assertIn("TW mass", script)
         # Regression: old binder rejected MA / sparse-tick steals outright.
         self.assertNotIn(
             'if (!tr || tr.type !== "candlestick") return',

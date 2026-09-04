@@ -539,8 +539,8 @@ def _candle_inspect_panel_html() -> str:
     <div>
       <strong id="candle-inspect-title">Click a 5m candle</strong>
       <p id="candle-inspect-sub" class="candle-inspect-sub">
-        In-bar spread hist + equal-time means, plus venue latency
-        (okx_latency_ms / bybit_latency_ms). Compact build-time bins; not full ticks.
+        In-bar TW-mass hist (hold→next; last→bar end) + TW p50/p95/p99,
+        equal-time means, plus venue latency. Compact build-time bins; not full ticks.
       </p>
     </div>
     <button type="button" id="candle-inspect-close" aria-label="Close inspect panel">×</button>
@@ -570,17 +570,26 @@ def _candle_inspect_script() -> str:
   const closeBtn = el("candle-inspect-close");
   if (closeBtn) closeBtn.addEventListener("click", hidePanel);
 
+  function fmtNum(v, digits) {
+    if (v == null || !isFinite(v)) return "—";
+    const d = (digits == null) ? 4 : digits;
+    return Number(v).toFixed(d);
+  }
+
   function histCenters(lo, hi, nb, counts) {
     const n = (counts && counts.length) ? counts.length : (nb || 0);
-    if (!n || lo == null || hi == null) return {x: [], y: []};
-    const width = (hi - lo) / n;
+    if (!n || lo == null || hi == null || !isFinite(lo) || !isFinite(hi)) {
+      return {x: [], y: [], width: null};
+    }
+    const span = hi - lo;
+    const width = span / n;
     const x = [];
     const y = [];
     for (let i = 0; i < n; i++) {
       x.push(lo + (i + 0.5) * width);
       y.push(counts[i] || 0);
     }
-    return {x: x, y: y};
+    return {x: x, y: y, width: width * 0.92};
   }
 
   function temporalSeries(bs, barMs, tv) {
@@ -598,12 +607,64 @@ def _candle_inspect_script() -> str:
     return {x: x, y: y};
   }
 
+  function twVlines(tw, xref) {
+    if (!tw) return [];
+    const yref = (xref === "x3") ? "y3 domain" : "y domain";
+    const spec = [
+      {k: "p50", color: "#4c78a8", dash: "solid", w: 2},
+      {k: "p95", color: "#f58518", dash: "dash", w: 1.5},
+      {k: "p99", color: "#e45756", dash: "dot", w: 1.5}
+    ];
+    const out = [];
+    spec.forEach(function(s) {
+      const v = tw[s.k];
+      if (v == null || !isFinite(v)) return;
+      out.push({
+        type: "line",
+        xref: xref,
+        yref: yref,
+        x0: v, x1: v, y0: 0, y1: 1,
+        line: {color: s.color, width: s.w, dash: s.dash}
+      });
+    });
+    return out;
+  }
+
+  function twAnnotations(tw, xref, yref) {
+    if (!tw) return [];
+    const spec = [
+      {k: "p50", color: "#4c78a8"},
+      {k: "p95", color: "#f58518"},
+      {k: "p99", color: "#e45756"}
+    ];
+    const out = [];
+    let yi = 0.98;
+    spec.forEach(function(s) {
+      const v = tw[s.k];
+      if (v == null || !isFinite(v)) return;
+      out.push({
+        xref: xref,
+        yref: yref + " domain",
+        x: v,
+        y: yi,
+        text: s.k + "=" + fmtNum(v, 4),
+        showarrow: false,
+        xanchor: "left",
+        font: {size: 10, color: s.color},
+        bgcolor: "rgba(255,255,255,0.7)"
+      });
+      yi -= 0.12;
+    });
+    return out;
+  }
+
   function renderInspect(cd, xLabel) {
     if (!cd || typeof Plotly === "undefined") return;
     const side = (cd.side || "?").toUpperCase();
     const col = cd.col || "spread";
     const n = cd.n || 0;
     const when = xLabel || (cd.bs != null ? new Date(cd.bs).toISOString() : "");
+    const tw = cd.tw || {};
     const lat = cd.lat || {};
     const okx = lat.okx || null;
     const bybit = lat.bybit || null;
@@ -611,24 +672,32 @@ def _candle_inspect_script() -> str:
     const bybitN = bybit ? (bybit.n || 0) : 0;
     let latNote = "latency cols absent";
     if (okx || bybit) {
-      latNote = "latency finite n okx=" + okxN + " bybit=" + bybitN +
+      latNote = "latency TW n okx=" + okxN + " bybit=" + bybitN +
         " (NaN/missing skipped)";
     }
-    showPanel(
-      side + " · " + when + " · n=" + n,
-      col + " hist/temporal + " + latNote
-    );
+    const sub =
+      col + " TW hist (c_w=tw_ms, range≈p01–p99) · " +
+      "TW p50=" + fmtNum(tw.p50) +
+      " p95=" + fmtNum(tw.p95) +
+      " p99=" + fmtNum(tw.p99) +
+      " mean=" + fmtNum(tw.mean) +
+      " · temporal=equal-time · " + latNote;
+    showPanel(side + " · " + when + " · n=" + n, sub);
+
     const hist = histCenters(cd.lo, cd.hi, cd.nb, cd.c || []);
     const temp = temporalSeries(cd.bs, cd.bar_ms || 300000, cd.tv || []);
+    const barW = hist.width;
     const traces = [
       {
         type: "bar",
         x: hist.x,
         y: hist.y,
-        name: "spread hist",
-        marker: {color: "#4c78a8"},
+        width: barW,
+        name: "spread TW mass",
+        marker: {color: "rgba(76,120,168,0.75)"},
         xaxis: "x",
-        yaxis: "y"
+        yaxis: "y",
+        hovertemplate: "%{x:.5f}<br>TW mass=%{y:.1f} ms<extra>spread</extra>"
       },
       {
         type: "scatter",
@@ -643,16 +712,35 @@ def _candle_inspect_script() -> str:
         yaxis: "y2"
       }
     ];
+    // Invisible legend proxies for percentile vlines.
+    [["p50", "#4c78a8"], ["p95", "#f58518"], ["p99", "#e45756"]].forEach(function(pair) {
+      const k = pair[0], color = pair[1];
+      if (tw[k] == null || !isFinite(tw[k])) return;
+      traces.push({
+        type: "scatter",
+        mode: "lines",
+        x: [tw[k], tw[k]],
+        y: [0, Math.max.apply(null, hist.y.concat([1]))],
+        name: "TW " + k,
+        line: {color: color, width: k === "p50" ? 2 : 1.4, dash: k === "p50" ? "solid" : (k === "p95" ? "dash" : "dot")},
+        xaxis: "x",
+        yaxis: "y",
+        hoverinfo: "skip",
+        showlegend: true
+      });
+    });
     if (okx && okxN > 0) {
       const h = histCenters(okx.lo, okx.hi, okx.nb || cd.nlb, okx.c || []);
       traces.push({
         type: "bar",
         x: h.x,
         y: h.y,
-        name: "okx_latency_ms",
+        width: h.width,
+        name: "okx_latency_ms TW",
         marker: {color: "rgba(31,119,180,0.55)"},
         xaxis: "x3",
-        yaxis: "y3"
+        yaxis: "y3",
+        hovertemplate: "%{x:.2f} ms<br>TW mass=%{y:.1f}<extra>okx</extra>"
       });
       const t = temporalSeries(cd.bs, cd.bar_ms || 300000, okx.tv || []);
       traces.push({
@@ -660,7 +748,7 @@ def _candle_inspect_script() -> str:
         mode: "lines+markers",
         x: t.x,
         y: t.y,
-        name: "okx lat mean",
+        name: "okx lat equal-time mean",
         line: {width: 1.4, color: "#1f77b4"},
         marker: {size: 4},
         connectgaps: false,
@@ -674,10 +762,12 @@ def _candle_inspect_script() -> str:
         type: "bar",
         x: h.x,
         y: h.y,
-        name: "bybit_latency_ms",
+        width: h.width,
+        name: "bybit_latency_ms TW",
         marker: {color: "rgba(44,160,44,0.55)"},
         xaxis: "x3",
-        yaxis: "y3"
+        yaxis: "y3",
+        hovertemplate: "%{x:.2f} ms<br>TW mass=%{y:.1f}<extra>bybit</extra>"
       });
       const t = temporalSeries(cd.bs, cd.bar_ms || 300000, bybit.tv || []);
       traces.push({
@@ -685,7 +775,7 @@ def _candle_inspect_script() -> str:
         mode: "lines+markers",
         x: t.x,
         y: t.y,
-        name: "bybit lat mean",
+        name: "bybit lat equal-time mean",
         line: {width: 1.4, color: "#2ca02c"},
         marker: {size: 4},
         connectgaps: false,
@@ -694,24 +784,56 @@ def _candle_inspect_script() -> str:
       });
     }
     const hasLat = (okx && okxN > 0) || (bybit && bybitN > 0);
+    const shapes = twVlines(tw, "x");
+    // Optional latency p50/p95/p99 on shared latency hist when readable.
+    if (hasLat && okx && okx.tw) {
+      shapes.push.apply(shapes, twVlines(okx.tw, "x3"));
+    } else if (hasLat && bybit && bybit.tw) {
+      shapes.push.apply(shapes, twVlines(bybit.tw, "x3"));
+    }
+    const annotations = twAnnotations(tw, "x", "y");
+    const xRange = (cd.lo != null && cd.hi != null && isFinite(cd.lo) && isFinite(cd.hi))
+      ? [cd.lo, cd.hi] : undefined;
     const layout = {
       grid: {rows: hasLat ? 2 : 1, columns: 2, pattern: "independent"},
-      margin: {l: 52, r: 20, t: 36, b: 42},
-      height: hasLat ? 460 : 260,
+      margin: {l: 56, r: 20, t: 40, b: 46},
+      height: hasLat ? 500 : 280,
       paper_bgcolor: "#fff",
       plot_bgcolor: "#fff",
       barmode: "overlay",
+      bargap: 0.05,
       showlegend: true,
-      legend: {orientation: "h", y: 1.12, x: 0, font: {size: 10}},
-      title: {text: "In-bar spread + latency (compact)", font: {size: 12}},
-      xaxis: {title: col + " (%)", domain: [0, 0.46]},
-      yaxis: {title: "count", domain: hasLat ? [0.55, 1] : [0, 1]},
+      legend: {orientation: "h", y: 1.14, x: 0, font: {size: 10}},
+      title: {
+        text: "In-bar TW-mass hist + equal-time temporal (compact)",
+        font: {size: 12}
+      },
+      shapes: shapes,
+      annotations: annotations,
+      xaxis: {
+        title: col + " (%)  [TW p01–p99]",
+        domain: [0, 0.46],
+        range: xRange,
+        zeroline: false
+      },
+      yaxis: {
+        title: "TW mass (ms)",
+        domain: hasLat ? [0.55, 1] : [0, 1]
+      },
       xaxis2: {title: "UTC (within 5m)", domain: [0.54, 1], anchor: "y2"},
-      yaxis2: {title: col + " (%)", anchor: "x2", domain: hasLat ? [0.55, 1] : [0, 1]}
+      yaxis2: {
+        title: col + " (%)",
+        anchor: "x2",
+        domain: hasLat ? [0.55, 1] : [0, 1]
+      }
     };
     if (hasLat) {
-      layout.xaxis3 = {title: "latency (ms)", domain: [0, 0.46], anchor: "y3"};
-      layout.yaxis3 = {title: "count", domain: [0, 0.42]};
+      layout.xaxis3 = {
+        title: "latency (ms) [TW p01–p99]",
+        domain: [0, 0.46],
+        anchor: "y3"
+      };
+      layout.yaxis3 = {title: "TW mass (ms)", domain: [0, 0.42]};
       layout.xaxis4 = {title: "UTC (within 5m)", domain: [0.54, 1], anchor: "y4"};
       layout.yaxis4 = {title: "latency (ms)", anchor: "x4", domain: [0, 0.42]};
     }
@@ -965,7 +1087,8 @@ Research visualizer for noisy/gappy cross-exchange L1. Stacked blocks match live
 spreads from <code>app.policy.features</code>: <strong>long</strong> then <strong>short</strong>.
 Red bands mark inter-tick gaps. Time-weighted quantile panels use hold-until-next-tick
 weights (last tick → bar end). Window histograms are equal-weight over all loaded ticks.
-<strong>Click a 5m candle</strong> to open the in-bar panel: spread distribution plus
+<strong>Click a 5m candle</strong> to open the in-bar panel: <strong>TW-mass</strong>
+histograms (robust p01–p99 axis) with TW p50/p95/p99, equal-time temporal means, plus
 venue latency (<code>okx_latency_ms</code> / <code>bybit_latency_ms</code> = local_recv −
 exchange_ts; NaN/missing skipped). Compact bins only — not full ticks. Not a live
 trading terminal; no threshold candidates are invented on this page.
