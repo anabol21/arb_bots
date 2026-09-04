@@ -32,6 +32,9 @@ STAGE_LABELS: tuple[str, ...] = (
     "terminal",
 )
 
+# Bump when top-level JSON keys or summary bucket shape change.
+RESULTS_SCHEMA_VERSION = "warm_lat_results.v1"
+
 # Named intervals derived from consecutive / key stage pairs.
 INTERVAL_SPECS: tuple[tuple[str, str, str], ...] = (
     ("warm_ready_to_intent", "warm_ready", "intent"),
@@ -220,6 +223,7 @@ class WarmLatencyReport:
 
     def as_public_dict(self) -> dict[str, Any]:
         body: dict[str, Any] = {
+            "schema_version": RESULTS_SCHEMA_VERSION,
             "status": self.status,
             "experiment": "Warm-Lat",
             "n_requested": self.n_requested,
@@ -241,6 +245,17 @@ class WarmLatencyReport:
                 "prebuilt_json → asyncio.Queue → long-lived sender ws.send; "
                 "no approval/lease/journal on critical path"
             ),
+            "how_to_read_summary": {
+                "summary_bucket": "path_{A|B}|venue_{bybit|okx}|mode_{serial|parallel|single}",
+                "per_interval_keys": ["n", "mean", "p50", "p95", "min", "max"],
+                "units": "milliseconds",
+                "primary_live_intervals": [
+                    "order_prepared_to_request_sent",
+                    "request_sent_to_ack",
+                    "ack_to_terminal",
+                    "warm_ready_to_terminal",
+                ],
+            },
         }
         if self.error_code:
             body["error_code"] = self.error_code

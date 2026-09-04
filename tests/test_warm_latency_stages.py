@@ -125,8 +125,10 @@ class ResultsWriterTests(unittest.TestCase):
             spath = write_summary_csv(report, root / "warm_lat_summary.csv")
             body = json.loads(jpath.read_text(encoding="utf-8"))
             self.assertEqual(body["experiment"], "Warm-Lat")
+            self.assertEqual(body["schema_version"], "warm_lat_results.v1")
             self.assertEqual(body["n_completed"], 4)
             self.assertIn("summary", body)
+            self.assertIn("how_to_read_summary", body)
             self.assertIn("path_ab_delta_ms", body)
             self.assertFalse(body["else_bybit_ws_on_branch"])
             self.assertTrue(cpath.exists())
@@ -247,6 +249,36 @@ class WarmLatGateTests(unittest.TestCase):
                 }
             )
         self.assertTrue(is_live_send_ws_profile_gate(assert_ws_warm_lat_gates))
+
+    def test_live_n_cap(self) -> None:
+        from app.bot.private.ws_warm_latency import (
+            WarmLatProfileError,
+            parse_warm_lat_cli_args,
+        )
+
+        with self.assertRaises(WarmLatProfileError):
+            parse_warm_lat_cli_args(
+                ["--warm-lat-n=20", "--warm-lat-send=true", "--warm-lat-path=B"]
+            )
+        cli = parse_warm_lat_cli_args(
+            ["--warm-lat-n=5", "--warm-lat-send=true", "--warm-lat-path=B"]
+        )
+        self.assertEqual(cli.n, 5)
+
+    def test_print_vps_recipe(self) -> None:
+        from app.bot.private.ws_warm_latency import main_ws_warm_latency, print_vps_live_recipe
+
+        text = print_vps_live_recipe()
+        self.assertIn("root@38.180.94.108", text)
+        self.assertIn("/root/spread_staging", text)
+        self.assertIn("/data/bbot-gear2/private/warm_lat", text)
+        self.assertIn("BBOT_PRIVATE_WARM_LAT=1", text)
+        self.assertIn("TRUMP", text)
+        self.assertIn("warm_latency_stages.py", text)
+        self.assertIn("NEVER", text)
+        self.assertIn("flatten", text.lower())
+        code = main_ws_warm_latency(["--ws-warm-latency", "--warm-lat-print-vps-recipe"])
+        self.assertEqual(code, 0)
 
     def test_main_live_without_approve_or_opt_in(self) -> None:
         from app.bot.private.ws_warm_latency import main_ws_warm_latency

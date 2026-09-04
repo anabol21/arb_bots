@@ -62,11 +62,103 @@ LOG = logging.getLogger("bbot.private.ws_warm_latency")
 
 WARM_LAT_N_MIN = 1
 WARM_LAT_N_MAX = 50
+# Live send is intentionally tighter than dry (same risk discipline as W6/W7).
+WARM_LAT_LIVE_N_MAX = 10
 TRADE_LAT_MODEL_MS = 100.0
+
+# Immutable matched dual-leg profile reused from W6/W7 (clears Bybit minNotional).
+# Do not substitute SOL/XRP here — W6 harness rejects non-TRUMP plans.
+WARM_LAT_LIVE_PROFILE = {
+    "alias": "TRUMP-USDT-PERP",
+    "bybit_symbol": "TRUMPUSDT",
+    "okx_symbol": "TRUMP-USDT-SWAP",
+    "bybit_qty": "4.0",
+    "okx_qty": "40",
+    "approx_notional_usd_per_leg": "6-8",
+    "risk_cap_usd_per_venue": 100,
+    "why_not_sol_xrp": (
+        "W6/W7 immutable matched TRUMP profile clears Bybit minNotional≈5 USDT "
+        "with aligned OKX ctVal lots; SOL/XRP gear2 sizes are not wired into "
+        "the private dual-leg harness."
+    ),
+}
+
+VPS_HOST = "root@38.180.94.108"
+VPS_STAGING = "/root/spread_staging"
+VPS_RESULTS_DIR = "/data/bbot-gear2/private/warm_lat"
+VPS_DATA_ROOT = "/data/bbot-gear2/private"
+VPS_SECRETS = "/etc/spread/bbot-private-live.env"
+
+# Surgical copy set for Warm-Lat only (never full-repo overlay).
+VPS_SURGICAL_FILES: tuple[str, ...] = (
+    "app/bot/private/warm_latency_stages.py",
+    "app/bot/private/ws_warm_latency.py",
+    "app/bot/private/ws_gates.py",
+    "app/bot/private/harness_readonly.py",
+)
 
 
 class WarmLatProfileError(ValueError):
     """Invalid Warm-Lat CLI / profile."""
+
+
+def print_vps_live_recipe() -> str:
+    """Exact human recipe for VPS live Warm-Lat (no network from this helper)."""
+    files = " ".join(VPS_SURGICAL_FILES)
+    text = f"""# Warm-Lat live VPS recipe (human only; agents must not SSH/run live)
+# Host: {VPS_HOST}   Staging: {VPS_STAGING}
+# Profile: W6/W7 TRUMP dual-leg (~$6–8/leg, ≪ $100/venue). Not SOL/XRP.
+
+# --- 0) Preflight (read-only) ---
+# ssh {VPS_HOST} 'systemctl is-active spread-collector; systemctl show -p MainPID --value spread-collector'
+# Do NOT restart collector. Do NOT touch /data/live /data/bars /data/compacted.
+
+# --- 1) Surgical deploy (copy these files only; preserve VPS flatten/aplace/sample-cap) ---
+# From repo root on a machine with the PR tree (paths relative to repo):
+#   for f in {files}; do
+#     scp "$f" {VPS_HOST}:{VPS_STAGING}/$f
+#   done
+# NEVER: git reset --hard / full-repo rsync over staging
+# (would wipe VPS-only flatten extras, aplace, sample-cap close-skip patches).
+
+# Files:
+#   - app/bot/private/warm_latency_stages.py
+#   - app/bot/private/ws_warm_latency.py
+#   - app/bot/private/ws_gates.py
+#   - app/bot/private/harness_readonly.py
+
+# --- 2) Env + live Path B (start n=1, then n<=5; hard cap n<={WARM_LAT_LIVE_N_MAX}) ---
+# ssh {VPS_HOST}
+set -a
+source {VPS_SECRETS}   # mode 600; not git
+set +a
+export VENUE=live
+export LIVE_ORDERS=1
+export BBOT_PRIVATE_WARM_LAT=1
+export BBOT_PRIVATE_DATA_ROOT={VPS_DATA_ROOT}
+mkdir -p {VPS_RESULTS_DIR}
+
+cd {VPS_STAGING}
+/root/venv/bin/python -m app.bot.private --ws-warm-latency \\
+  --warm-lat-n=1 \\
+  --warm-lat-path=B \\
+  --warm-lat-mode=parallel \\
+  --warm-lat-venue=dual \\
+  --warm-lat-send=true \\
+  --warm-lat-approve-one-shot \\
+  --warm-lat-out={VPS_RESULTS_DIR}
+
+# --- 3) Parse p50/p95 ---
+# python3 -c "import json; d=json.load(open('{VPS_RESULTS_DIR}/warm_lat_results.json'));
+# print(d['schema_version'], d['status'], d['notes'].get('w6_flat_after'));
+# print(json.dumps(d['summary'], indent=2))"
+# Expect notes.w6_status=ok and notes.w6_flat_after=true before trusting latency.
+
+# --- 4) Half-leg / abort ---
+# If status!=ok or flat_after!=true: STOP further N. Confirm both venues flat via
+# W6 baseline / exchange UI. Do not raise n. Do not leave leftover exposure.
+"""
+    return text
 
 
 @dataclass(frozen=True)
@@ -81,9 +173,16 @@ class WarmLatCli:
     attach_warm: bool
 
 
-def assert_warm_lat_n(n: int) -> int:
+def assert_warm_lat_n(n: int, *, send_enabled: bool = False) -> int:
     if not isinstance(n, int) or n < WARM_LAT_N_MIN or n > WARM_LAT_N_MAX:
-        raise WarmLatProfileError(f"Warm-Lat requires --warm-lat-n={WARM_LAT_N_MIN}..{WARM_LAT_N_MAX}")
+        raise WarmLatProfileError(
+            f"Warm-Lat requires --warm-lat-n={WARM_LAT_N_MIN}..{WARM_LAT_N_MAX}"
+        )
+    if send_enabled and n > WARM_LAT_LIVE_N_MAX:
+        raise WarmLatProfileError(
+            f"Warm-Lat live send requires --warm-lat-n={WARM_LAT_N_MIN}..{WARM_LAT_LIVE_N_MAX} "
+            f"(start with 1; recommend ≤5)"
+        )
     return n
 
 
@@ -118,9 +217,12 @@ def parse_warm_lat_cli_args(argv: Sequence[str]) -> WarmLatCli:
             approve = True
         elif arg == "--warm-lat-attach-warm":
             attach_warm = True
+        elif arg in {"--warm-lat-print-vps-recipe", "--warm-lat-help-vps"}:
+            # Handled by main before full parse requires n.
+            continue
     if n is None:
         raise WarmLatProfileError("Warm-Lat requires --warm-lat-n=1..50")
-    assert_warm_lat_n(n)
+    assert_warm_lat_n(n, send_enabled=send_enabled)
     if path not in {"A", "B", "AB"}:
         raise WarmLatProfileError("--warm-lat-path must be A, B, or AB")
     if open_mode not in {"serial", "parallel", "single"}:
@@ -605,6 +707,10 @@ def main_ws_warm_latency(
     def _print(report: WarmLatencyReport) -> None:
         print(json.dumps(report.as_public_dict(), ensure_ascii=False, indent=2, sort_keys=True))
 
+    if "--warm-lat-print-vps-recipe" in argv or "--warm-lat-help-vps" in argv:
+        print(print_vps_live_recipe())
+        return 0
+
     try:
         cli = parse_warm_lat_cli_args(argv)
     except WarmLatProfileError as exc:
@@ -624,6 +730,7 @@ def main_ws_warm_latency(
         report = run_warm_latency_experiment(cli=cli, env=e, data_root=root / "work")
         paths = _write_outputs(report, root)
         report.notes["output_paths"] = paths
+        report.notes["live_profile"] = dict(WARM_LAT_LIVE_PROFILE)
         _print(report)
         return 0 if report.status == "ok" else 2
 
@@ -696,6 +803,26 @@ def main_ws_warm_latency(
         send_enabled=True,
         dry_run=False,
         trade_lat_model_ms=TRADE_LAT_MODEL_MS,
+        notes={
+            "live_profile": dict(WARM_LAT_LIVE_PROFILE),
+            "safety": {
+                "expect_flat_after": True,
+                "live_n_max": WARM_LAT_LIVE_N_MAX,
+                "recommend_first_n": 1,
+                "half_leg": (
+                    "On abort/leftover W6 flattens both venues then stops n; "
+                    "if flat_after!=true STOP and verify flat before any retry"
+                ),
+                "results_dir_recommended": VPS_RESULTS_DIR,
+                "data_root_recommended": VPS_DATA_ROOT,
+                "never_write": [
+                    "/data/live",
+                    "/data/bars",
+                    "/data/compacted",
+                    "/data/spool",
+                ],
+            },
+        },
     )
 
     try:
@@ -802,9 +929,18 @@ def main_ws_warm_latency(
         report.notes["w6_status"] = w6_report.status
         report.notes["w6_orders_sent"] = w6_report.orders_sent
         report.notes["w6_flat_after"] = w6_report.flat_after
-        if w6_report.status != "ok":
+        report.notes["w6_n_completed"] = w6_report.n_completed
+        report.notes["w6_n_aborted"] = w6_report.n_aborted
+        report.notes["safety_ok"] = bool(
+            w6_report.status == "ok" and w6_report.flat_after
+        )
+        if w6_report.status != "ok" or not w6_report.flat_after:
             report.status = "live_path_b_failed"
             report.error_code = w6_report.error_code or "transport_error"
+            report.notes["abort_action"] = (
+                "STOP: do not raise --warm-lat-n. Verify both venues flat "
+                "(exchange UI / W6 baseline). Resolve leftover before any retry."
+            )
         else:
             _derive_path_b_live_traces_from_journal(
                 journal=warm.journal,
@@ -817,8 +953,14 @@ def main_ws_warm_latency(
         clear_process_warm_session(stop=True)
         unbind_socket_factory()
 
-    out = cli.out_dir or resolve_data_root(e) / "warm_lat"
+    if cli.out_dir is not None:
+        out = cli.out_dir
+    else:
+        try:
+            out = resolve_data_root(e) / "warm_lat"
+        except RuntimeError:
+            out = Path(VPS_RESULTS_DIR)
     paths = _write_outputs(report, out)
     report.notes["output_paths"] = paths
     _print(report)
-    return 0 if report.status == "ok" else 2
+    return 0 if report.status == "ok" and report.notes.get("safety_ok", True) else 2
