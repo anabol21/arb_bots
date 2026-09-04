@@ -9,6 +9,9 @@
 |------------|---------|--------|
 | `VENUE` | `testnet` | `testnet` = Bybit testnet + OKX demo. `live` только после явной фразы и гейта. |
 | `LIVE_ORDERS` | `0` | Send разрешён **только** при `VENUE=live` **и** `LIVE_ORDERS=1`. Иначе send запрещён. |
+| `BBOT_BROKER` | `stub` | `stub` / `private_testnet` = would_send. `private_live` = live sender (requires live+LIVE_ORDERS). |
+| `BBOT_PRIVATE_SEND_PATH` | `trivial` | Live-manager default = Contour B queue→ws.send. `w6` = old recover/approve/lease manager (also needs `BBOT_PRIVATE_W6=1`). |
+| `BBOT_PRIVATE_W6` | unset | W6 CLI / opt-in manager only. **Not** required for the default trivial live path. |
 
 Harness этапа 1 (`python -m app.bot.private`) всегда `VENUE=testnet` и отказывается работать, если `LIVE_ORDERS` truthy или `VENUE=live`.
 
