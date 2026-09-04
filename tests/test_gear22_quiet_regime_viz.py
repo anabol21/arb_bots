@@ -321,8 +321,31 @@ class TestSmokeHtml(unittest.TestCase):
                 self.assertIn('"c":', text)
                 self.assertIn('"tv":', text)
                 self.assertIn("click for in-bar distribution", text)
+                # Overlay clicks must resolve via candlestick x + customdata.
+                self.assertIn("lookupCandleByTime", text)
+                self.assertNotIn(
+                    'if (!tr || tr.type !== "candlestick") return',
+                    text,
+                )
                 # Must not embed raw tick dumps for inspect.
                 self.assertNotIn("full_ticks", text)
+
+    def test_candle_inspect_script_resolves_overlay_clicks(self) -> None:
+        """Binder must look up customdata by time, not only candlestick hits."""
+        from research.gear22_quiet_regime_viz.plot import _candle_inspect_script
+
+        script = _candle_inspect_script()
+        self.assertIn("plotly_click", script)
+        self.assertIn("lookupCandleByTime", script)
+        self.assertIn("customdata", script)
+        self.assertIn("bar_ms", script)
+        # Regression: old binder rejected MA / sparse-tick steals outright.
+        self.assertNotIn(
+            'if (!tr || tr.type !== "candlestick") return',
+            script,
+        )
+        # Candle-row only: lower panels must not open inspect via fallback.
+        self.assertIn('axisId(ct, "yaxis", "y") === clickY', script)
 
     def test_inspect_payload_size_vs_tick_overlay(self) -> None:
         """Inspect customdata should stay << sparse tick overlay cost."""
