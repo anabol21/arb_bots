@@ -96,12 +96,28 @@ second broker):
 | Live instrument/mark + position-mode HTTP every leg → TTL cache (`TtlCaching*`) | Fresh mark within `mark_max_age_ns`; first fetch per TTL window |
 | Serial success-path flatten on W7 → `_flatten_pair_parallel` on warm trade sockets | Per-venue place→ack RTT (max of legs after barrier) |
 | Profile / lease / preflight prefetch via `ws_dual_hot.prefetch_dual_leg_hot_context` | Recovery / leftover / flatten_only sample-cap gates unchanged |
+| Per-leg full `send_approved` inside parallel workers → **prepare both, then enqueue dual dispatch** (`prepare_approved` + `dispatch_prepared`) | max(leg venue RTT) after simultaneous send |
+
+**Speed reference — old gear-1 `bybit_ws.py` (git `a1ba2b1`).** That hand-written
+bot had no public-latency issues and placed fast because the critical path was
+only: build two order JSON payloads → `await cmd_queue.put` both → long-lived
+`sender` tasks did `await ws.send(...)`. Auth stayed up for process life; no
+lease/approval/journal on send. New private stack must stay more correct, but
+must not be slower than that pattern on the send step:
+
+| Old `bybit_ws.py` | New mapping |
+|-------------------|-------------|
+| Startup auth once | `PrivateWarmSession` + keepalive (PR #9/#12) |
+| `sender`: `queue.get` → `ws.send` | `TradeSendQueue` / `dispatch_prepared` → owner-loop `send_text` |
+| `trade_manager`: dual `queue.put` | `prepare_dual_legs` then `enqueue_dual_dispatch` |
+| No journal on send | Journal/approval **before** enqueue; indexes/TTL so prepare is thin |
 
 Historical cold dual (~6.2 s, 2026-09-02) was mostly new private run auth+WS+REST
 reseed + operator_approval setup — addressed by warm session (PR #9/#12). Remaining
-post-warm ~5–6 s was local prepare/reuse; this change removes that class of work.
-Residual signal→done should approach **max(leg venue RTT) + thin local fsync**,
-not 2×(prepare+venue). Re-measure on VPS before claiming production latency.
+post-warm ~5–6 s was local prepare/reuse; this change removes that class of work
+and restores the queue→send shape. Residual signal→done should approach
+**max(leg venue RTT) + thin local fsync**, not 2×(prepare+venue). Re-measure on
+VPS before claiming production latency.
 
 **`l1_at_send` / journal fill stamps ≠ venue fill latency.** Метки public
 journal `l1_at_send` и stub `Trade_Lat_ms=100` не измеряют время матча на

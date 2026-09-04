@@ -384,5 +384,108 @@ class ParallelFlattenHelperTests(unittest.TestCase):
             w6._flatten_venue = orig  # type: ignore[assignment]
 
 
+class PrepareThenEnqueueShapeTests(unittest.TestCase):
+    """Critical path must look like old bybit_ws: prepare off-path, then dual send."""
+
+    def test_prepare_then_dispatch_skips_preflight_when_hot_ready(self) -> None:
+        from app.bot.private.journal_v1 import PrivateJournalWriter
+        from app.bot.private.order_approval import ApprovalVault
+        from app.bot.private.order_plan import build_order_plan
+        from app.bot.private.order_sender import (
+            ApprovalBoundSender,
+            PreparedDispatch,
+            TransportAck,
+        )
+        from app.bot.private.order_sign import LiveCredentials
+        from app.bot.private.ws_dual_hot import enqueue_dual_dispatch
+
+        with tempfile.TemporaryDirectory() as td:
+            env = _live_env(td)
+            root = Path(env["BBOT_PRIVATE_DATA_ROOT"])
+            root.mkdir(parents=True, exist_ok=True)
+            j = PrivateJournalWriter(root)
+            meta = _meta()
+            vault = ApprovalVault(journal=j, venue="bybit", environment="live")
+            transport_calls = {"n": 0}
+
+            def counting_transport(_payload):
+                transport_calls["n"] += 1
+                return TransportAck(kind="accepted", ack_state="accepted")
+
+            sender_b = ApprovalBoundSender(
+                journal=j,
+                approval_vault=vault,
+                metadata_provider=meta,
+                position_mode_provider=_position(),
+                transport=counting_transport,
+            )
+            sender_o = ApprovalBoundSender(
+                journal=j,
+                approval_vault=vault,
+                metadata_provider=meta,
+                position_mode_provider=_position(),
+                transport=counting_transport,
+                lease_supervisor=sender_b.lease_supervisor,
+            )
+            bybit = build_order_plan(
+                venue="bybit_live",
+                symbol="BTCUSDT",
+                side="buy",
+                mode="market",
+                metadata_provider=meta,
+                qty="0.001",
+                expires_in_sec=60,
+            )
+            okx = build_order_plan(
+                venue="okx_live",
+                symbol="BTC-USDT-SWAP",
+                side="sell",
+                mode="market",
+                metadata_provider=meta,
+                qty="0.01",
+                expires_in_sec=60,
+            )
+            tb = vault.issue(bybit)
+            to = vault.issue(okx)
+            creds = LiveCredentials(api_key="k", api_secret="s" * 16)
+            # hot_ready: skip gates/preflight (already amortized).
+            prep_b = sender_b.prepare_approved(
+                bybit, tb, creds, env, journal_transport="ws_trade", hot_ready=True
+            )
+            prep_o = sender_o.prepare_approved(
+                okx, to, creds, env, journal_transport="ws_trade", hot_ready=True
+            )
+            self.assertIsInstance(prep_b, PreparedDispatch)
+            self.assertIsInstance(prep_o, PreparedDispatch)
+            self.assertEqual(transport_calls["n"], 0)
+            b_res, o_res = enqueue_dual_dispatch(
+                bybit_sender=sender_b,
+                okx_sender=sender_o,
+                bybit_prepared=prep_b,
+                okx_prepared=prep_o,
+                bybit_transport=counting_transport,
+                okx_transport=counting_transport,
+            )
+            self.assertEqual(b_res.status, "ack")
+            self.assertEqual(o_res.status, "ack")
+            self.assertEqual(transport_calls["n"], 2)
+
+    def test_trade_send_queue_send_only(self) -> None:
+        from app.bot.private.ws_dual_hot import TradeSendQueue
+        from app.bot.private.ws_socket import FakePrivateWsSocket
+
+        sock = FakePrivateWsSocket()
+        sock.connect()
+        q = TradeSendQueue(sock, name="test-bybit")
+        q.start()
+        try:
+            q.put_text('{"op":"order.create"}')
+            q.put_text('{"op":"order.create","n":2}')
+            self.assertEqual(q.send_count, 2)
+            self.assertEqual(len(sock._outbox), 2)  # noqa: SLF001
+        finally:
+            q.stop()
+
+
 if __name__ == "__main__":
     unittest.main()

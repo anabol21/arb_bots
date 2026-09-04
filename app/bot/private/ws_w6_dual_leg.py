@@ -622,52 +622,167 @@ def _place_pair_parallel(
     bybit_kw: Mapping[str, Any],
     okx_kw: Mapping[str, Any],
     warm_session: Any = None,
+    hot_ready: bool = False,
 ) -> tuple[PlaceWaitResult, PlaceWaitResult]:
-    barrier = threading.Barrier(2)
-    out: dict[str, PlaceWaitResult] = {}
+    """Prepare both legs on the caller thread, then near-parallel WS send.
 
-    def worker(key: str, kwargs: Mapping[str, Any]) -> None:
-        try:
-            # Outer place_io_section already paused keepalive for both legs.
-            kw = dict(kwargs)
-            kw.pop("warm_session", None)
-            out[key] = _place_and_wait_fill(dispatch_barrier=barrier, **kw)
-        except Exception:  # noqa: BLE001
-            try:
-                barrier.abort()
-            except Exception:  # noqa: BLE001
-                pass
-            out[key] = PlaceWaitResult(
+    Matches old ``bybit_ws.py``: build/prepare first, then dual ``queue.put``
+    style dispatch. Journal/approval stay ahead of venue send; workers only
+    run ``dispatch_prepared`` (+ fill wait).
+    """
+    from app.bot.private.order_sender import PreparedDispatch
+    from app.bot.private.ws_dual_hot import enqueue_dual_dispatch
+
+    def _prep_one(kw: Mapping[str, Any]) -> Any:
+        sender = kw["sender"]
+        runtime = kw["runtime"]
+        place_transport = kw["place_transport"]
+        plan = kw["plan"]
+        runtime.register_plan_fingerprint(plan)
+        place_transport._plan = plan  # noqa: SLF001
+        sender._transport = place_transport  # noqa: SLF001
+        return sender.prepare_approved(
+            plan,
+            kw["token"],
+            kw["credentials"],
+            kw["env"],
+            journal_transport="ws_trade",
+            reconnect_generation=runtime.reconnect_generation,
+            hot_ready=hot_ready,
+        )
+
+    prep_b = _prep_one(bybit_kw)
+    prep_o = _prep_one(okx_kw)
+    if not isinstance(prep_b, PreparedDispatch):
+        return (
+            PlaceWaitResult(
                 status="ack_fail",
                 transport_invoked=False,
-                error_code="internal_error",
+                error_code=getattr(prep_b, "error_code", "internal_error"),
+            ),
+            PlaceWaitResult(
+                status="ack_fail",
+                transport_invoked=False,
+                error_code="dual_leg_aborted",
+            ),
+        )
+    if not isinstance(prep_o, PreparedDispatch):
+        # Peer prepare failed after first leg request_sent — never transport either.
+        try:
+            bybit_kw["sender"]._journal_reject(  # noqa: SLF001
+                prep_b.plan, stage="send", error_code="dual_leg_aborted"
             )
+            prep_b.lease.mark_terminal()
+        except (
+            OSError,
+            RuntimeError,
+            ValueError,
+            TypeError,
+            JournalValidationError,
+        ):
+            pass
+        return (
+            PlaceWaitResult(
+                status="ack_fail",
+                transport_invoked=False,
+                error_code="dual_leg_aborted",
+            ),
+            PlaceWaitResult(
+                status="ack_fail",
+                transport_invoked=False,
+                error_code=getattr(prep_o, "error_code", "internal_error"),
+            ),
+        )
 
-    guard = (
-        warm_session.place_io_section()
-        if warm_session is not None
-        else contextlib.nullcontext()
+    b_send, o_send = enqueue_dual_dispatch(
+        bybit_sender=bybit_kw["sender"],
+        okx_sender=okx_kw["sender"],
+        bybit_prepared=prep_b,
+        okx_prepared=prep_o,
+        bybit_transport=bybit_kw["place_transport"],
+        okx_transport=okx_kw["place_transport"],
+        warm_session=warm_session,
     )
-    with guard:
-        t_b = threading.Thread(
-            target=worker, args=("bybit", dict(bybit_kw)), daemon=False
+
+    def _after_ack(kw: Mapping[str, Any], res: Any) -> PlaceWaitResult:
+        invoked = bool(res.transport_invoked)
+        dispatch_ns = res.dispatch_monotonic_ns
+        if res.status != "ack":
+            return PlaceWaitResult(
+                status="ack_fail",
+                transport_invoked=invoked,
+                error_code=res.error_code,
+                venue_code=res.venue_code,
+                dispatch_monotonic_ns=dispatch_ns,
+            )
+        fill_inject_fn = kw.get("fill_inject_fn")
+        if fill_inject_fn is not None:
+            try:
+                fill_inject_fn(kw["inject_kind"], kw["plan"])
+            except Exception:  # noqa: BLE001
+                pass
+        snap = _wait_private_terminal(
+            kw["runtime"],
+            kw["provider"],
+            kw["plan"],
+            timeout_sec=float(kw["terminal_wait_sec"]),
         )
-        t_o = threading.Thread(
-            target=worker, args=("okx", dict(okx_kw)), daemon=False
+        term = observed_terminal_state(snap)
+        if term != "filled":
+            return PlaceWaitResult(
+                status="no_fill",
+                transport_invoked=invoked,
+                error_code="unknown",
+                dispatch_monotonic_ns=dispatch_ns,
+            )
+        try:
+            sender = kw["sender"]
+            assert sender.lease is not None
+            _commit_stream_terminal(
+                runtime=kw["runtime"],
+                journal=kw["journal"],
+                lease=sender.lease,
+                plan=kw["plan"],
+                term="filled",
+            )
+        except (
+            OSError,
+            RuntimeError,
+            ValueError,
+            TypeError,
+            JournalValidationError,
+        ):
+            return PlaceWaitResult(
+                status="journal_failed",
+                transport_invoked=invoked,
+                error_code="internal_error",
+                dispatch_monotonic_ns=dispatch_ns,
+            )
+        return PlaceWaitResult(
+            status="ok",
+            transport_invoked=invoked,
+            dispatch_monotonic_ns=dispatch_ns,
         )
-        t_b.start()
-        t_o.start()
-        t_b.join()
-        t_o.join()
+
+    # Fill wait can run in parallel after both acks (venue-bound residual).
+    out: dict[str, PlaceWaitResult] = {}
+
+    def fill_worker(key: str, kw: Mapping[str, Any], res: Any) -> None:
+        out[key] = _after_ack(kw, res)
+
+    t_b = threading.Thread(
+        target=fill_worker, args=("bybit", dict(bybit_kw), b_send), daemon=False
+    )
+    t_o = threading.Thread(
+        target=fill_worker, args=("okx", dict(okx_kw), o_send), daemon=False
+    )
+    t_b.start()
+    t_o.start()
+    t_b.join()
+    t_o.join()
     return (
-        out.get(
-            "bybit",
-            PlaceWaitResult("ack_fail", False, "internal_error"),
-        ),
-        out.get(
-            "okx",
-            PlaceWaitResult("ack_fail", False, "internal_error"),
-        ),
+        out.get("bybit", PlaceWaitResult("ack_fail", False, "internal_error")),
+        out.get("okx", PlaceWaitResult("ack_fail", False, "internal_error")),
     )
 
 
@@ -1588,6 +1703,7 @@ def run_w6_dual_leg(
                     bybit_kw=bybit_place_kw,
                     okx_kw=okx_place_kw_base,
                     warm_session=session,
+                    hot_ready=True,
                 )
                 dispatch_pairs.append(
                     (b_res.dispatch_monotonic_ns, o_res.dispatch_monotonic_ns)
