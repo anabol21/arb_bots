@@ -34,6 +34,7 @@ from app.bot.private.ws_trivial_dual_leg import (
     TrivialSendError,
     TrivialSendResult,
     build_signed_place_text,
+    parse_inst_id_code_env,
     resolve_live_send_path,
     send_signed_dual,
     w6_manager_opt_in,
@@ -126,6 +127,7 @@ class LiveBroker(StubBroker):
         self.send_path = resolve_live_send_path(self.env)
         self._send_fn = send_fn
         self._inst_id_codes = {str(k): int(v) for k, v in dict(inst_id_codes or {}).items()}
+        self._inst_id_codes.update(parse_inst_id_code_env(self.env.get("BBOT_OKX_INST_ID_CODES")))
         self._bybit_credentials = bybit_credentials
         self._okx_credentials = okx_credentials
         self._owned_sender = sender is None
@@ -163,6 +165,48 @@ class LiveBroker(StubBroker):
         if session is not None:
             return getattr(session, "bybit_credentials", None)
         return None
+
+    def _lookup_okx_inst_id_code(self, symbol: str) -> Optional[int]:
+        """Cache / env / matching warm-session code only — no HTTP on place."""
+        cached = self._inst_id_codes.get(symbol)
+        if cached is not None:
+            return int(cached)
+        session = self._warm_session_or_none()
+        if session is None:
+            return None
+        if getattr(session, "okx_symbol", None) != symbol:
+            return None
+        runtime = getattr(session, "okx_runtime", None)
+        code = getattr(runtime, "okx_inst_id_code", None) if runtime is not None else None
+        if isinstance(code, int) and not isinstance(code, bool) and code > 0:
+            self._inst_id_codes[symbol] = code
+            return code
+        return None
+
+    def warmup_inst_id_codes(
+        self,
+        symbols: Mapping[str, Any] | list[str],
+        *,
+        fetch_fn: Optional[Callable[[str], int]] = None,
+    ) -> dict[str, int]:
+        """Prefetch OKX instIdCode **off** the signal path.
+
+        ``fetch_fn`` is injected (tests / operator). Default does not open
+        network. Never call this from ``place``.
+        """
+        names = list(symbols) if not isinstance(symbols, dict) else list(symbols)
+        if fetch_fn is None:
+            return dict(self._inst_id_codes)
+        for symbol in names:
+            if symbol in self._inst_id_codes:
+                continue
+            try:
+                code = int(fetch_fn(str(symbol)))
+            except (TypeError, ValueError, OSError, RuntimeError):
+                continue
+            if code > 0:
+                self._inst_id_codes[str(symbol)] = code
+        return dict(self._inst_id_codes)
 
     def on_valid_tick(self, **kwargs: Any) -> bool:
         """Live fills are venue-observed, not Trade_Lat stub fills.
@@ -292,7 +336,7 @@ class LiveBroker(StubBroker):
     ) -> Optional[str]:
         okx_leg = next(leg for leg in pending.legs if leg.exchange == "okx")
         bybit_leg = next(leg for leg in pending.legs if leg.exchange == "bybit")
-        inst_code = self._inst_id_codes.get(pending.okx_symbol)
+        inst_code = self._lookup_okx_inst_id_code(pending.okx_symbol)
         if inst_code is None:
             return "okx_inst_id_code_missing"
         creds = self._bybit_creds()

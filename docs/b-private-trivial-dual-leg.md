@@ -66,6 +66,15 @@ W6 remains TRUMP-profile + recover/approval/lease. `BBOT_PRIVATE_W6=1` alone
 does **not** switch `default_live_send_pair`. Classic W6/W7 CLI
 (`--ws-w6-dual-leg` / `--ws-w7-parallel-dual-leg`) is unchanged.
 
+OKX `instIdCode` must be cached **before** a signal (place is cache-only):
+
+```text
+BBOT_OKX_INST_ID_CODES=BTC-USDT-SWAP:…,ETH-USDT-SWAP:…,SOL-USDT-SWAP:…,XRP-USDT-SWAP:…
+```
+
+or `LiveBroker.warmup_inst_id_codes(symbols, fetch_fn=...)` at process start.
+A matching warm-session `okx_runtime.okx_inst_id_code` is a last-resort cache.
+
 ## Modules
 
 | Path | Role |

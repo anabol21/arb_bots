@@ -78,6 +78,25 @@ class TrivialSendResult:
     error: Optional[str] = None
 
 
+def parse_inst_id_code_env(raw: Optional[str]) -> dict[str, int]:
+    """Parse ``BBOT_OKX_INST_ID_CODES=SOL-USDT-SWAP:193761,BTC-USDT-SWAP:1``."""
+    out: dict[str, int] = {}
+    if not raw:
+        return out
+    for part in str(raw).split(","):
+        item = part.strip()
+        if not item or ":" not in item:
+            continue
+        symbol, code_raw = item.split(":", 1)
+        try:
+            code = int(str(code_raw).strip())
+        except ValueError:
+            continue
+        if code > 0:
+            out[symbol.strip()] = code
+    return out
+
+
 def resolve_live_send_path(env: Optional[Mapping[str, str]] = None) -> str:
     """Default is trivial. W6 only when ``BBOT_PRIVATE_SEND_PATH=w6``."""
     e = env if env is not None else {}

@@ -21,6 +21,7 @@ from app.bot.private.ws_trivial_dual_leg import (
     TrivialSendError,
     assert_signed_place_frame,
     build_signed_place_text,
+    parse_inst_id_code_env,
     resolve_live_send_path,
     w6_manager_opt_in,
 )
@@ -89,6 +90,13 @@ class ResolveSendPathTests(unittest.TestCase):
     def test_rejects_unknown(self) -> None:
         with self.assertRaises(TrivialSendError):
             resolve_live_send_path({"BBOT_PRIVATE_SEND_PATH": "faster_w6"})
+
+    def test_parse_inst_id_env(self) -> None:
+        self.assertEqual(
+            parse_inst_id_code_env("SOL-USDT-SWAP:193761,BTC-USDT-SWAP:2"),
+            {"SOL-USDT-SWAP": 193761, "BTC-USDT-SWAP": 2},
+        )
+        self.assertEqual(parse_inst_id_code_env(""), {})
 
 
 class SignedFrameTests(unittest.TestCase):
@@ -193,6 +201,7 @@ class LiveBrokerPlaceTests(unittest.TestCase):
             )
 
         kwargs.setdefault("send_fn", _send)
+        kwargs.setdefault("inst_id_codes", {"SOL-USDT-SWAP": 193761})
         env = kwargs.pop("env", None) or {
             "VENUE": "live",
             "LIVE_ORDERS": "1",
@@ -204,7 +213,6 @@ class LiveBrokerPlaceTests(unittest.TestCase):
             notional_usdt=20.0,
             log=lambda _m: None,
             env=env,
-            inst_id_codes={"SOL-USDT-SWAP": 193761},
             bybit_credentials=_creds(),
             **kwargs,
         )
@@ -302,6 +310,37 @@ class LiveBrokerPlaceTests(unittest.TestCase):
             self.assertIsNone(broker.position)
             self.assertEqual(set(first), {"bybit", "okx"})
             self.assertEqual(set(broker._test_sent), {"bybit", "okx"})
+            broker.close()
+
+    def test_inst_id_from_env_and_warmup_is_off_place(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            hits: list[str] = []
+
+            def _fetch(symbol: str) -> int:
+                hits.append(symbol)
+                return 42
+
+            broker = self._broker(
+                td,
+                env={
+                    "VENUE": "live",
+                    "LIVE_ORDERS": "1",
+                    "BBOT_OKX_INST_ID_CODES": "SOL-USDT-SWAP:193761",
+                },
+                inst_id_codes={},
+            )
+            broker.warmup_inst_id_codes(["ETH-USDT-SWAP"], fetch_fn=_fetch)
+            self.assertEqual(hits, ["ETH-USDT-SWAP"])
+            abort = broker.place(
+                spread_side="open_long",
+                base_coin="SOL",
+                signal_ts_ms=1,
+                okx_book=_book(),
+                bybit_book=_book(),
+                meta=_meta("SOL"),
+            )
+            self.assertIsNone(abort)
+            self.assertEqual(hits, ["ETH-USDT-SWAP"])  # place did not fetch
             broker.close()
 
     def test_w6_opt_in_is_trump_only_and_not_default(self) -> None:
