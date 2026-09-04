@@ -2182,17 +2182,29 @@ def validate_journal_tree(data_root: Path) -> list[dict[str, Any]]:
     return events
 
 
+def count_consumed_approvals_for_operation(
+    data_root: Path, operation_id: str
+) -> int:
+    """Count consumed operator_approval rows for one operation_id (approval scan only)."""
+    op = str(operation_id)
+    n = 0
+    for ev in scan_operator_approvals(data_root):
+        if (
+            ev.get("approval_action") == "consumed"
+            and str(ev.get("operation_id")) == op
+        ):
+            n += 1
+    return n
+
+
 def assert_live_order_prepare_ready(data_root: Path, operation_id: str) -> None:
-    """Offline stream validation before any live order_prepared append."""
-    events = validate_journal_tree(data_root)
-    consumed = [
-        e
-        for e in events
-        if e.get("event_type") == "operator_approval"
-        and e.get("approval_action") == "consumed"
-        and str(e.get("operation_id")) == operation_id
-    ]
-    if len(consumed) != 1:
+    """Require exactly one prior consumed approval before live order_prepared.
+
+    Hot-path invariant only — does **not** re-validate the entire journal tree
+    (that belongs to offline ``validate_journal_tree``). Full-tree validation on
+    every prepare was the dominant ``local_prepare`` cost on warm dual-leg sends.
+    """
+    if count_consumed_approvals_for_operation(data_root, operation_id) != 1:
         raise JournalValidationError(
             "live order_prepared requires exactly one prior consumed operator_approval"
         )
@@ -2309,6 +2321,12 @@ class PrivateJournalWriter:
         self._dual_legs: dict[str, set[str]] = {}
         self._held_lock: Optional[GlobalApprovalLock] = None
         self._write_lock = threading.Lock()
+        # Hot-path indexes: load durable journal at most once per writer, then
+        # maintain incrementally so dual-leg prepare does not rescan/revalidate.
+        self._disk_index_loaded = False
+        self._events_by_op: dict[str, list[dict[str, Any]]] = {}
+        self._flat_events: list[dict[str, Any]] = []
+        self._approval_consumed_by_op: dict[str, int] = {}
 
     def _next_mono(self) -> int:
         # time.monotonic_ns is process-monotonic; ensure strict increase.
@@ -2329,6 +2347,64 @@ class PrivateJournalWriter:
         """Validate and append one event. Fills seq/id/timestamps when omitted."""
         with self._write_lock:
             return self._append_unlocked(partial)
+
+    def _note_approval_index(self, event: Mapping[str, Any]) -> None:
+        if event.get("event_type") != "operator_approval":
+            return
+        if event.get("approval_action") != "consumed":
+            return
+        op = str(event.get("operation_id") or "")
+        if not op:
+            return
+        self._approval_consumed_by_op[op] = self._approval_consumed_by_op.get(op, 0) + 1
+
+    def _ensure_disk_index_unlocked(self) -> None:
+        """Load durable events once; subsequent appends update indexes in memory."""
+        if self._disk_index_loaded:
+            return
+        assert_journal_layout(self.data_root)
+        events = scan_all_journal_events(self.data_root)
+        self._flat_events = list(events)
+        self._events_by_op = {}
+        self._approval_consumed_by_op = {}
+        for ev in events:
+            op = str(ev.get("operation_id") or "")
+            if op:
+                self._events_by_op.setdefault(op, []).append(ev)
+            self._note_approval_index(ev)
+        self._disk_index_loaded = True
+
+    def _assert_live_prepare_ready_unlocked(self, operation_id: str) -> None:
+        self._ensure_disk_index_unlocked()
+        if self._approval_consumed_by_op.get(str(operation_id), 0) != 1:
+            raise JournalValidationError(
+                "live order_prepared requires exactly one prior consumed operator_approval"
+            )
+
+    def _hydrate_op_state_unlocked(self, op_id: str) -> None:
+        if op_id in self._op_states:
+            return
+        self._ensure_disk_index_unlocked()
+        self._op_states[op_id] = _OpState()
+        priors = list(self._events_by_op.get(op_id, []))
+        if not priors:
+            return
+        legacy_ops = find_legacy_pre_send_no_dispatch_ops(self._flat_events)
+        for prior in priors:
+            if op_id in legacy_ops and _is_exact_legacy_pre_send_reject(prior):
+                _validate_lifecycle_step(
+                    self._op_states[op_id],
+                    {
+                        "event_type": "pre_send_gate",
+                        "outcome": "observed",
+                        "gate_kind": "price",
+                        "gate_decision": "blocked",
+                    },
+                )
+            elif op_id in legacy_ops and _is_exact_legacy_pre_send_recon(prior):
+                continue
+            else:
+                _validate_lifecycle_step(self._op_states[op_id], prior)
 
     def _append_unlocked(self, partial: Mapping[str, Any]) -> dict[str, Any]:
         assert_journal_layout(self.data_root)
@@ -2370,32 +2446,11 @@ class PrivateJournalWriter:
             event.get("event_type") == "order_prepared"
             and str(event.get("environment")) == "live"
         ):
-            assert_live_order_prepare_ready(self.data_root, str(event["operation_id"]))
+            self._assert_live_prepare_ready_unlocked(str(event["operation_id"]))
 
         validate_event_shape(event)
         op_id = str(event["operation_id"])
-        # Hydrate prior op lifecycle from durable journal for this writer instance.
-        if op_id not in self._op_states:
-            self._op_states[op_id] = _OpState()
-            prior_all = scan_all_journal_events(self.data_root)
-            legacy_ops = find_legacy_pre_send_no_dispatch_ops(prior_all)
-            for prior in prior_all:
-                if str(prior.get("operation_id")) != op_id:
-                    continue
-                if op_id in legacy_ops and _is_exact_legacy_pre_send_reject(prior):
-                    _validate_lifecycle_step(
-                        self._op_states[op_id],
-                        {
-                            "event_type": "pre_send_gate",
-                            "outcome": "observed",
-                            "gate_kind": "price",
-                            "gate_decision": "blocked",
-                        },
-                    )
-                elif op_id in legacy_ops and _is_exact_legacy_pre_send_recon(prior):
-                    continue
-                else:
-                    _validate_lifecycle_step(self._op_states[op_id], prior)
+        self._hydrate_op_state_unlocked(op_id)
         state = self._op_states[op_id]
         _validate_lifecycle_step(state, event)
 
@@ -2424,6 +2479,11 @@ class PrivateJournalWriter:
         self._last_mono = mono
         self._last_ts = ts
         self._seen_event_ids.add(str(event["event_id"]))
+        # Keep hot-path indexes coherent with durable append.
+        self._ensure_disk_index_unlocked()
+        self._events_by_op.setdefault(op_id, []).append(event)
+        self._flat_events.append(event)
+        self._note_approval_index(event)
         return event
 
     def append_under_approval_lock(

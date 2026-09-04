@@ -671,6 +671,45 @@ def _place_pair_parallel(
     )
 
 
+def _flatten_pair_parallel(
+    *,
+    bybit_kw: Mapping[str, Any],
+    okx_kw: Mapping[str, Any],
+    warm_session: Any = None,
+) -> tuple[tuple[str, int], tuple[str, int]]:
+    """Parallel reduce-only flatten on warm trade sockets (same place_io guard)."""
+    out: dict[str, tuple[str, int]] = {}
+
+    def worker(key: str, kwargs: Mapping[str, Any]) -> None:
+        try:
+            kw = dict(kwargs)
+            kw.pop("warm_session", None)
+            out[key] = _flatten_venue(**kw, warm_session=None)
+        except Exception:  # noqa: BLE001
+            out[key] = ("flatten_incomplete", 0)
+
+    guard = (
+        warm_session.place_io_section()
+        if warm_session is not None
+        else contextlib.nullcontext()
+    )
+    with guard:
+        t_b = threading.Thread(
+            target=worker, args=("bybit", dict(bybit_kw)), daemon=False
+        )
+        t_o = threading.Thread(
+            target=worker, args=("okx", dict(okx_kw)), daemon=False
+        )
+        t_b.start()
+        t_o.start()
+        t_b.join()
+        t_o.join()
+    return (
+        out.get("bybit", ("flatten_incomplete", 0)),
+        out.get("okx", ("flatten_incomplete", 0)),
+    )
+
+
 @dataclass
 class PlaceWaitResult:
     status: str
@@ -1525,6 +1564,24 @@ def run_w6_dual_leg(
             }
 
             if parallel_open:
+                from app.bot.private.ws_dual_hot import prefetch_dual_leg_hot_context
+
+                hot = prefetch_dual_leg_hot_context(
+                    env=e,
+                    vault=vault,
+                    lease_supervisor=bybit_sender.lease_supervisor,
+                    metadata_provider=metadata_provider,
+                    position_mode_provider=position_mode_provider,
+                    plans=(bybit_open, okx_open),
+                )
+                # Prefer TTL-cached providers for prepare inside send_approved.
+                bybit_sender._meta = hot.metadata_provider  # noqa: SLF001
+                bybit_sender._position = hot.position_mode_provider  # noqa: SLF001
+                okx_sender._meta = hot.metadata_provider  # noqa: SLF001
+                okx_sender._position = hot.position_mode_provider  # noqa: SLF001
+                metadata_provider = hot.metadata_provider
+                position_mode_provider = hot.position_mode_provider
+
                 okx_token = vault.issue(okx_open)
                 okx_place_kw_base["token"] = okx_token
                 b_res, o_res = _place_pair_parallel(
@@ -1834,43 +1891,74 @@ def run_w6_dual_leg(
                         latency_ms=_latency(),
                     )
 
+            flat_b_kw = {
+                "sender": bybit_sender,
+                "runtime": bybit_runtime,
+                "provider": bybit_provider,
+                "place_transport": bybit_transport,
+                "vault": vault,
+                "credentials": bybit_credentials,
+                "env": e,
+                "metadata_provider": metadata_provider,
+                "profile": bybit_p,
+                "dual_leg_id": dual_id,
+                "journal": j,
+                "baseline": dual_base,
+                "terminal_wait_sec": float(terminal_wait_sec),
+                "fill_inject_fn": fill_inject_fn,
+                "inject_kind": "bybit_flatten",
+            }
+            flat_o_kw = {
+                "sender": okx_sender,
+                "runtime": okx_runtime,
+                "provider": okx_provider,
+                "place_transport": okx_transport,
+                "vault": vault,
+                "credentials": okx_credentials,
+                "env": e,
+                "metadata_provider": metadata_provider,
+                "profile": okx_p,
+                "dual_leg_id": dual_id,
+                "journal": j,
+                "baseline": dual_base,
+                "terminal_wait_sec": float(terminal_wait_sec),
+                "fill_inject_fn": fill_inject_fn,
+                "inject_kind": "okx_flatten",
+            }
+            if parallel_open:
+                (flat_b, n_b), (flat_o, n_o) = _flatten_pair_parallel(
+                    bybit_kw=flat_b_kw,
+                    okx_kw=flat_o_kw,
+                    warm_session=session,
+                )
+                orders_sent += n_b + n_o
+                if flat_b != "ok" or flat_o != "ok":
+                    bybit_sender.lease_supervisor.mark_process_sends_blocked()
+                    return _report(
+                        status="flatten_incomplete",
+                        n_requested=n_req,
+                        n_completed=n_completed,
+                        n_aborted=n_aborted,
+                        trade_ws_bound=True,
+                        subscription_ready=True,
+                        reseed_matched=True,
+                        sends_blocked=True,
+                        orders_sent=orders_sent,
+                        error_code="unknown",
+                        latency_ms=_latency(),
+                    )
+                n_completed += 1
+                continue
+
             flat_b, n_b = _flatten_venue(
-                sender=bybit_sender,
-                runtime=bybit_runtime,
-                provider=bybit_provider,
-                place_transport=bybit_transport,
-                vault=vault,
-                credentials=bybit_credentials,
-                env=e,
-                metadata_provider=metadata_provider,
-                profile=bybit_p,
-                dual_leg_id=dual_id,
-                journal=j,
-                baseline=dual_base,
-                terminal_wait_sec=float(terminal_wait_sec),
-                fill_inject_fn=fill_inject_fn,
-                inject_kind="bybit_flatten",
                 warm_session=session,
+                **flat_b_kw,
             )
             orders_sent += n_b
             if flat_b != "ok":
                 o_st, o_n = _flatten_venue(
-                    sender=okx_sender,
-                    runtime=okx_runtime,
-                    provider=okx_provider,
-                    place_transport=okx_transport,
-                    vault=vault,
-                    credentials=okx_credentials,
-                    env=e,
-                    metadata_provider=metadata_provider,
-                    profile=okx_p,
-                    dual_leg_id=dual_id,
-                    journal=j,
-                    baseline=dual_base,
-                    terminal_wait_sec=float(terminal_wait_sec),
-                    fill_inject_fn=fill_inject_fn,
-                    inject_kind="okx_flatten",
                     warm_session=session,
+                    **flat_o_kw,
                 )
                 orders_sent += o_n
                 bybit_sender.lease_supervisor.mark_process_sends_blocked()
@@ -1889,22 +1977,8 @@ def run_w6_dual_leg(
                 )
 
             flat_o, n_o = _flatten_venue(
-                sender=okx_sender,
-                runtime=okx_runtime,
-                provider=okx_provider,
-                place_transport=okx_transport,
-                vault=vault,
-                credentials=okx_credentials,
-                env=e,
-                metadata_provider=metadata_provider,
-                profile=okx_p,
-                dual_leg_id=dual_id,
-                journal=j,
-                baseline=dual_base,
-                terminal_wait_sec=float(terminal_wait_sec),
-                fill_inject_fn=fill_inject_fn,
-                inject_kind="okx_flatten",
                 warm_session=session,
+                **flat_o_kw,
             )
             orders_sent += n_o
             if flat_o != "ok":
@@ -2015,6 +2089,8 @@ def open_w6_production_bindings(
     from app.bot.private.order_preflight import (
         LiveHttpMetadataProvider,
         LiveSignedPositionModeProvider,
+        TtlCachingMetadataProvider,
+        TtlCachingPositionModeProvider,
     )
     from app.bot.private.ws_private import trade_ws_url_for_exchange
     from app.bot.private.ws_socket import WebsocketsSocketFactory, bind_socket_factory
@@ -2029,7 +2105,9 @@ def open_w6_production_bindings(
     bybit_creds = _creds_from_live(secrets, "bybit")
     okx_creds = _creds_from_live(secrets, "okx")
     ep = endpoints_for_venue("live")
-    meta = LiveHttpMetadataProvider(http_get_json=_public_http_get_json)
+    meta = TtlCachingMetadataProvider(
+        inner=LiveHttpMetadataProvider(http_get_json=_public_http_get_json)
+    )
     bybit_pos = LiveSignedPositionModeProvider(
         exchange="bybit",
         credentials=bybit_creds,
@@ -2044,7 +2122,9 @@ def open_w6_production_bindings(
         okx_base=ep.okx_rest,
         symbol=okx_p["symbol"],
     )
-    pos = DualPositionModeProvider(bybit=bybit_pos, okx=okx_pos)
+    pos = TtlCachingPositionModeProvider(
+        inner=DualPositionModeProvider(bybit=bybit_pos, okx=okx_pos)
+    )
     bybit_base = SignedRestFlatBaseline(
         exchange="bybit",
         credentials=bybit_creds,
