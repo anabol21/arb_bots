@@ -39,6 +39,7 @@ Unlock: [`b-private-unlock.md`](b-private-unlock.md). Контракт журн�
 | W5 | Рыночное открытие + reduce-only закрытие | По одной площадке |
 | W6 | Dual-leg market **по очереди** (Bybit buy → OKX sell), n=20 | `n_completed=20`, `orders_sent=80`, `flat_after=true` |
 | W7 | Dual-leg market **параллельно** (барьер перед WS), n=1 | `status=ok`, `orders_sent=4`, `flat_after=true` |
+| Warm-Lat | Замер стадий на **уже тёплой** private+trade сессии; A/B (queue→send vs W6/W7 prepare); dry `send=false` + gated live; VPS recipe → `/data/bbot-gear2/private/warm_lat/` | Пакет в коде; live — человеком, TRUMP W6 profile, tiny notional |
 
 Профиль dual-leg (W6/W7): `TRUMPUSDT` / `TRUMP-USDT-SWAP`, номинал ≈ 6–8 USD
 на ногу (не BTC min lot — лоты на биржах не совпадают).
@@ -47,6 +48,7 @@ CLI (только явный флаг; транспорт CLI по умолча�
 
 - W6: `--ws-w6-dual-leg --w6-n=N --w6-approve-one-shot` + `BBOT_PRIVATE_W6=1`
 - W7: `--ws-w7-parallel-dual-leg --w7-n=N --w7-approve-one-shot` + `BBOT_PRIVATE_W7=1`
+- Warm-Lat: `--ws-warm-latency --warm-lat-n=N [--warm-lat-path=AB] [--warm-lat-send=false]` (dry); live: `BBOT_PRIVATE_WARM_LAT=1` + `--warm-lat-send=true --warm-lat-approve-one-shot` + `VENUE=live` + `LIVE_ORDERS=1`, results `/data/bbot-gear2/private/warm_lat/` — см. [`b-private-warm-latency-experiments.md`](b-private-warm-latency-experiments.md) (`--warm-lat-print-vps-recipe`)
 - Общее: `VENUE=live`, `LIVE_ORDERS=1`, env `/etc/spread/bbot-private-live.env` (режим 600, не git)
 
 ---
@@ -127,6 +129,7 @@ B-bot чат: [`b-bot-starter-prompt.md`](b-bot-starter-prompt.md).
 | [`b-private-starter-prompt.md`](b-private-starter-prompt.md) | Старт чата B-private |
 | [`b-private-journal-contract.md`](b-private-journal-contract.md) | Контракт журнала v1 |
 | [`b-private-secrets-manifest.md`](b-private-secrets-manifest.md) | Имена ключей/путей без значений |
+| [`b-private-warm-latency-experiments.md`](b-private-warm-latency-experiments.md) | Warm-Lat: стадии, A/B, dry/live CLI |
 | [`gear-2-private-params.md`](gear-2-private-params.md) | Параметры для честности M |
 | [`program-roadmap.md`](program-roadmap.md) | Статус задачи в программной карте |
 
