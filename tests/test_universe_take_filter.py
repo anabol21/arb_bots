@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import csv
-import importlib
 import sys
 import tempfile
 import unittest
@@ -16,6 +15,9 @@ if str(REPO) not in sys.path:
 from app.utils.universe_csv import (  # noqa: E402
     MissingTakeColumnError,
     filter_take_yes_rows,
+    load_take_yes_base_coins,
+    load_take_yes_pairs,
+    read_universe_dicts,
     require_take_column,
 )
 
@@ -79,7 +81,7 @@ class FilterTakeYesHelperTests(unittest.TestCase):
         self.assertIn("take", str(ctx.exception))
         self.assertIn("silently widen", str(ctx.exception))
 
-    def test_empty_file_without_take_fails(self) -> None:
+    def test_empty_header_without_take_fails(self) -> None:
         with self.assertRaises(MissingTakeColumnError):
             require_take_column(["base_coin", "okx_symbol"])
 
@@ -107,44 +109,21 @@ class CollectorLoadPairsTests(unittest.TestCase):
         )
         return path
 
-    def test_prod_loader_filters_then_slices(self) -> None:
-        from app.screaner_b_o import load_pairs_from_csv
-
+    def test_filters_then_slices(self) -> None:
         path = self._mixed_csv()
-        coins = [p["base_coin"] for p in load_pairs_from_csv(path, 0, 10)]
+        coins = [p["base_coin"] for p in load_take_yes_pairs(path, 0, 10)]
         self.assertEqual(coins, ["AAA", "CCC", "DDD"])
-        sliced = [p["base_coin"] for p in load_pairs_from_csv(path, 1, 3)]
+        sliced = [p["base_coin"] for p in load_take_yes_pairs(path, 1, 3)]
         self.assertEqual(sliced, ["CCC", "DDD"])
+        first = load_take_yes_pairs(path, 0, 1)[0]
+        self.assertEqual(first["okx_symbol"], "AAA-USDT-SWAP")
+        self.assertEqual(first["bybit_symbol"], "AAAUSDT")
 
-    def test_lean_loader_filters_then_slices(self) -> None:
-        if "screaner_local_lean" in sys.modules:
-            lean = importlib.reload(sys.modules["screaner_local_lean"])
-        else:
-            lean = importlib.import_module("screaner_local_lean")
-        path = self._mixed_csv()
-        coins = [p["base_coin"] for p in lean.load_pairs_from_csv(path, 0, 10)]
-        self.assertEqual(coins, ["AAA", "CCC", "DDD"])
-
-    def test_prod_loader_missing_take_fails(self) -> None:
-        from app.screaner_b_o import load_pairs_from_csv
-        from app.utils.universe_csv import MissingTakeColumnError
-
+    def test_missing_take_fails(self) -> None:
         path = self.root / "no_take.csv"
         _write_csv(path, [_row("AAA", None)], include_take=False)
         with self.assertRaises(MissingTakeColumnError):
-            load_pairs_from_csv(path, 0, 10)
-
-    def test_lean_loader_missing_take_fails(self) -> None:
-        from app.utils.universe_csv import MissingTakeColumnError
-
-        if "screaner_local_lean" in sys.modules:
-            lean = importlib.reload(sys.modules["screaner_local_lean"])
-        else:
-            lean = importlib.import_module("screaner_local_lean")
-        path = self.root / "no_take.csv"
-        _write_csv(path, [_row("AAA", None)], include_take=False)
-        with self.assertRaises(MissingTakeColumnError):
-            lean.load_pairs_from_csv(path, 0, 10)
+            load_take_yes_pairs(path, 0, 10)
 
 
 class BotUniverseTakeTests(unittest.TestCase):
@@ -155,30 +134,49 @@ class BotUniverseTakeTests(unittest.TestCase):
     def tearDown(self) -> None:
         self.temp.cleanup()
 
-    def test_meta_keeps_take_no_helper_lists_yes(self) -> None:
-        from app.bot.runtime import load_take_yes_coins, load_universe
-
+    def test_meta_rows_keep_take_no_helper_lists_yes(self) -> None:
         path = self.root / "mixed.csv"
         _write_csv(
             path,
             [_row("AAA", "yes"), _row("BBB", "no"), _row("CCC", "yes")],
             include_take=True,
         )
-        universe = load_universe(path)
-        self.assertEqual(set(universe), {"AAA", "BBB", "CCC"})
-        self.assertEqual(universe["BBB"].okx_lot_size, 0.01)
-        self.assertEqual(load_take_yes_coins(path), ["AAA", "CCC"])
+        coins = [row["base_coin"].strip().upper() for row in read_universe_dicts(path)]
+        self.assertEqual(coins, ["AAA", "BBB", "CCC"])
+        self.assertEqual(load_take_yes_base_coins(path), ["AAA", "CCC"])
 
     def test_missing_take_fails_closed(self) -> None:
-        from app.bot.runtime import load_take_yes_coins, load_universe
-        from app.utils.universe_csv import MissingTakeColumnError
-
         path = self.root / "no_take.csv"
         _write_csv(path, [_row("AAA", None)], include_take=False)
         with self.assertRaises(MissingTakeColumnError):
-            load_universe(path)
+            read_universe_dicts(path)
         with self.assertRaises(MissingTakeColumnError):
-            load_take_yes_coins(path)
+            load_take_yes_base_coins(path)
+
+
+class LoaderWiringTests(unittest.TestCase):
+    def test_collectors_and_bot_call_shared_helpers(self) -> None:
+        prod = (REPO / "app" / "screaner_b_o.py").read_text(encoding="utf-8")
+        lean = (REPO / "app" / "screaner_local_lean.py").read_text(encoding="utf-8")
+        bot = (REPO / "app" / "bot" / "runtime.py").read_text(encoding="utf-8")
+        self.assertIn("return load_take_yes_pairs(path, row_start, row_end)", prod)
+        self.assertIn("return load_take_yes_pairs(path, row_start, row_end)", lean)
+        self.assertIn("read_universe_dicts", bot)
+        self.assertIn("return load_take_yes_base_coins(csv_path)", bot)
+
+
+class RepoUniverseCsvTests(unittest.TestCase):
+    def test_repo_csv_take_yes_count_and_majors_remain_in_meta(self) -> None:
+        path = REPO / "bybit_okx_universe.csv"
+        rows = read_universe_dicts(path)
+        yes = load_take_yes_base_coins(path)
+        self.assertEqual(len(yes), 198)
+        self.assertNotIn("BTC", yes)
+        all_coins = {row["base_coin"].strip().upper() for row in rows}
+        self.assertIn("BTC", all_coins)
+        pairs = load_take_yes_pairs(path, 0, 337)
+        self.assertEqual([p["base_coin"] for p in pairs], yes)
+        self.assertTrue(all("okx_symbol" in p and "bybit_symbol" in p for p in pairs))
 
 
 if __name__ == "__main__":

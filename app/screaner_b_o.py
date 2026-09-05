@@ -4,7 +4,6 @@ import json
 import os
 import time
 import logging
-import csv
 import signal
 import sys
 from pathlib import Path
@@ -39,8 +38,8 @@ from utils.tick_validity import (  # noqa: E402
     TickValidityGate,
     book_l1_complete,
 )
+from utils.universe_csv import load_take_yes_pairs  # noqa: E402
 from utils.ws_gap_journal import WsGapJournal  # noqa: E402
-from utils.universe_csv import filter_take_yes_rows  # noqa: E402
 from utils.ws_reconnect import (  # noqa: E402
     BOOK_CONNECT_PRIORITY,
     CANDLE_CONNECT_PRIORITY,
@@ -141,29 +140,7 @@ def _ms_int(value: Any) -> int:
 
 def load_pairs_from_csv(path, row_start=0, row_end=10):
     """Load collector pairs. Live screen is take=yes; ROW_START/ROW_END slice that list."""
-    pairs = []
-    with open(path, "r", encoding="utf-8", newline="") as f:
-        reader = csv.DictReader(f)
-        rows = filter_take_yes_rows(
-            list(reader),
-            fieldnames=reader.fieldnames,
-            path=path,
-        )
-
-    subset = rows[row_start:row_end]
-
-    for row in subset:
-        base_coin = row["base_coin"].strip()
-        okx_symbol = row["okx_symbol"].strip()
-        bybit_symbol = row["bybit_symbol"].strip()
-
-        pairs.append({
-            "base_coin": base_coin,
-            "okx_symbol": okx_symbol,
-            "bybit_symbol": bybit_symbol,
-        })
-
-    return pairs
+    return load_take_yes_pairs(path, row_start, row_end)
 
 
 pairs = load_pairs_from_csv(UNIVERSE_PATH, ROW_START, ROW_END)

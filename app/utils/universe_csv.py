@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
-from typing import Any, Iterable, Mapping, Optional, Sequence
+import csv
+from pathlib import Path
+from typing import Any, Iterable, Mapping, Optional, Sequence, Union
 
 TAKE_COLUMN = "take"
 TAKE_YES = "yes"
+UniversePath = Union[str, Path]
 
 
 class MissingTakeColumnError(ValueError):
@@ -47,3 +50,44 @@ def filter_take_yes_rows(
         names = list(rows[0].keys())
     require_take_column(names, path=path)
     return [row for row in rows if row_is_take_yes(row)]
+
+
+def read_universe_dicts(path: UniversePath) -> list[dict[str, str]]:
+    """Read every universe row. Fail loud if the take column is missing."""
+    csv_path = Path(path)
+    with csv_path.open("r", encoding="utf-8", newline="") as fh:
+        reader = csv.DictReader(fh)
+        require_take_column(reader.fieldnames, path=csv_path)
+        return list(reader)
+
+
+def load_take_yes_pairs(
+    path: UniversePath,
+    row_start: int = 0,
+    row_end: Optional[int] = None,
+) -> list[dict[str, str]]:
+    """Collector pairs: keep take=yes, then slice. Indices are over take=yes coins."""
+    yes_rows = [row for row in read_universe_dicts(path) if row_is_take_yes(row)]
+    subset = yes_rows[row_start:row_end]
+    pairs: list[dict[str, str]] = []
+    for row in subset:
+        pairs.append(
+            {
+                "base_coin": str(row["base_coin"]).strip(),
+                "okx_symbol": str(row["okx_symbol"]).strip(),
+                "bybit_symbol": str(row["bybit_symbol"]).strip(),
+            }
+        )
+    return pairs
+
+
+def load_take_yes_base_coins(path: UniversePath) -> list[str]:
+    """CSV-driven tradeable coins: take=yes only."""
+    coins: list[str] = []
+    for row in read_universe_dicts(path):
+        if not row_is_take_yes(row):
+            continue
+        coin = str(row["base_coin"]).strip().upper()
+        if coin:
+            coins.append(coin)
+    return coins

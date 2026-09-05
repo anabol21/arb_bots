@@ -13,7 +13,6 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-import csv
 import json
 import logging
 import os
@@ -40,7 +39,7 @@ from schema.lean_event import (  # noqa: E402
     LEAN_BAR_5M_BODY_COLS,
     LEAN_TICK_BODY_COLS,
 )
-from utils.universe_csv import filter_take_yes_rows  # noqa: E402
+from utils.universe_csv import load_take_yes_pairs  # noqa: E402
 
 # --- paths / config (local only) ------------------------------------------------
 
@@ -113,24 +112,7 @@ COLLECT_BYBIT_BARS = False  # optional; model canon is ref_exchange=okx
 
 def load_pairs_from_csv(path: Path, row_start: int, row_end: int) -> list[dict[str, str]]:
     """Load lean pairs. Live screen is take=yes; row_start/row_end slice that list."""
-    with path.open("r", encoding="utf-8", newline="") as f:
-        reader = csv.DictReader(f)
-        rows = filter_take_yes_rows(
-            list(reader),
-            fieldnames=reader.fieldnames,
-            path=path,
-        )
-    subset = rows[row_start:row_end]
-    out: list[dict[str, str]] = []
-    for row in subset:
-        out.append(
-            {
-                "base_coin": row["base_coin"].strip(),
-                "okx_symbol": row["okx_symbol"].strip(),
-                "bybit_symbol": row["bybit_symbol"].strip(),
-            }
-        )
-    return out
+    return load_take_yes_pairs(path, row_start, row_end)
 
 
 def _init_quotes(loaded: list[dict[str, str]]) -> dict[str, Any]:
