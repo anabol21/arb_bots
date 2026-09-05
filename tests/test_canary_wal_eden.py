@@ -93,7 +93,7 @@ class CanaryVariationTests(unittest.TestCase):
         self.assertEqual(v["thresh_close_short"], 0.02)
         h = hyper_for_profile("gear2_would_send")
         self.assertFalse(h.get("Check_l1_depth", False))
-        self.assertIs(GEAR2_WOULD_SEND_VARIATION["thresh_open_long"], 0.02)
+        self.assertEqual(GEAR2_WOULD_SEND_VARIATION["thresh_open_long"], 0.02)
         self.assertFalse(GEAR2_WOULD_SEND_HYPER.get("Check_l1_depth", False))
 
     def test_uses_shared_market_manager(self) -> None:
@@ -198,6 +198,15 @@ class CanaryLiveSizeAllowTests(unittest.TestCase):
             resolve_allowed_futures_symbol("bybit_live", "WALUSDT")
 
 
+try:
+    import websockets  # noqa: F401
+
+    _HAS_WEBSOCKETS = True
+except ImportError:
+    _HAS_WEBSOCKETS = False
+
+
+@unittest.skipUnless(_HAS_WEBSOCKETS, "runtime import needs websockets (pre-existing env gap)")
 class CanaryRuntimeProfileTests(unittest.TestCase):
     def test_runtime_defaults(self) -> None:
         tmp = Path(tempfile.mkdtemp())
