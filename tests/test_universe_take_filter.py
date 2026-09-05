@@ -170,10 +170,14 @@ class RepoUniverseCsvTests(unittest.TestCase):
         path = REPO / "bybit_okx_universe.csv"
         rows = read_universe_dicts(path)
         yes = load_take_yes_base_coins(path)
-        self.assertEqual(len(yes), 198)
+        self.assertEqual(len(yes), 189)
         self.assertNotIn("BTC", yes)
         all_coins = {row["base_coin"].strip().upper() for row in rows}
         self.assertIn("BTC", all_coins)
+        capstar_dropped = ["LRC", "ZEN", "ZETA", "ZIL", "ZK", "ZKP", "ZORA", "ZRO", "ZRX"]
+        for coin in capstar_dropped:
+            self.assertIn(coin, all_coins)
+            self.assertNotIn(coin, yes)
         pairs = load_take_yes_pairs(path, 0, 337)
         self.assertEqual([p["base_coin"] for p in pairs], yes)
         self.assertTrue(all("okx_symbol" in p and "bybit_symbol" in p for p in pairs))
