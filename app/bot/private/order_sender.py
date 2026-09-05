@@ -171,6 +171,18 @@ class SendResult:
     dispatch_monotonic_ns: Optional[int] = None
 
 
+@dataclass
+class PreparedDispatch:
+    """Durable prepare complete; only WS send remains (old bybit_ws queue→send shape)."""
+
+    plan: OrderPlan
+    summary: dict[str, Any]
+    dispatch_payload: Any
+    lease: PostOnlyLease
+    journal_transport: Optional[str]
+    reconnect_generation: Optional[int]
+
+
 class ApprovalBoundSender:
     """Preflight → revalidate → consume → journal → transport → terminal journal."""
 
@@ -225,7 +237,7 @@ class ApprovalBoundSender:
             operation_id=plan.order_attempt_id,
         )
 
-    def send_approved(
+    def prepare_approved(
         self,
         plan: OrderPlan,
         token: ApprovalToken,
@@ -236,25 +248,36 @@ class ApprovalBoundSender:
         now: Optional[datetime] = None,
         now_mono_ns: Optional[int] = None,
         now_mono_ns_post_fsync: Optional[int] = None,
-        dispatch_transport: bool = True,
         journal_transport: Optional[str] = None,
         reconnect_generation: Optional[int] = None,
-        dispatch_barrier: Optional[Any] = None,
-    ) -> SendResult:
+        hot_ready: bool = False,
+        require_transport_bound: bool = True,
+        write_request_sent: bool = True,
+    ) -> SendResult | PreparedDispatch:
+        """Durable approval+journal prepare only — no venue send.
+
+        When ``hot_ready=True``, profile gates and preflight were already done by
+        ``prefetch_dual_leg_hot_context`` (amortized like old bybit_ws startup
+        auth). Critical path after this is ``dispatch_prepared`` / queue→send.
+
+        When ``write_request_sent=False``, stops after ``order_prepared`` (compat
+        with ``dispatch_transport=False`` / prepared_not_dispatched).
+        """
         summary = plan.public_summary()
         mono = now_mono_ns if now_mono_ns is not None else time.monotonic_ns()
 
-        # Mandatory preflight + revalidation BEFORE approval consumption / journal.
         try:
-            assert_send_gates(env, plan)
+            if not hot_ready:
+                assert_send_gates(env, plan)
             self._lease_supervisor.assert_can_send(now_mono_ns=mono)
-            assert_preflight_ready(
-                metadata_provider=self._meta,
-                position_mode_provider=self._position,
-                venue=plan.venue,
-                symbol=plan.symbol,
-                now_mono_ns=mono,
-            )
+            if not hot_ready:
+                assert_preflight_ready(
+                    metadata_provider=self._meta,
+                    position_mode_provider=self._position,
+                    venue=plan.venue,
+                    symbol=plan.symbol,
+                    now_mono_ns=mono,
+                )
             revalidate_order_plan(plan, self._meta)
             ref = canonical_plan if canonical_plan is not None else plan
             assert_plan_unmutated(ref, plan)
@@ -283,8 +306,7 @@ class ApprovalBoundSender:
                 error_code=_gate_error_code(exc),
             )
 
-        # Known unbound transport is a pre-send reject — no request_sent.
-        if dispatch_transport and self._transport is None:
+        if require_transport_bound and self._transport is None:
             return SendResult(
                 status="rejected",
                 plan_summary=summary,
@@ -293,8 +315,7 @@ class ApprovalBoundSender:
                 error_code="transport_error",
             )
 
-        # W4: ws_trade journal must never bind REST HTTP order APIs.
-        if dispatch_transport and _refuse_http_order_for_ws_trade(
+        if require_transport_bound and _refuse_http_order_for_ws_trade(
             self._transport, journal_transport
         ):
             return SendResult(
@@ -335,10 +356,8 @@ class ApprovalBoundSender:
                 error_code="internal_error",
             )
 
-        # REST signed place only when not ws_trade (W4 never constructs order HTTP paths).
-        dispatch_payload: Any
         if is_ws_trade_journal(journal_transport):
-            dispatch_payload = WsTradeDispatch(plan=plan, op="place")
+            dispatch_payload: Any = WsTradeDispatch(plan=plan, op="place")
         else:
             try:
                 dispatch_payload = build_signed_place_request(plan, credentials)
@@ -367,17 +386,18 @@ class ApprovalBoundSender:
                 error_code="timeout",
             )
 
-        if not dispatch_transport:
-            self._lease = PostOnlyLease(plan=plan, state=LeaseState.PREPARED)
-            return SendResult(
-                status="prepared_not_dispatched",
-                plan_summary=summary,
-                journal_ok=True,
-                transport_invoked=False,
-                lease_state=LeaseState.PREPARED.value,
+        if not write_request_sent:
+            lease = PostOnlyLease(plan=plan, state=LeaseState.PREPARED)
+            self._lease = lease
+            return PreparedDispatch(
+                plan=plan,
+                summary=summary,
+                dispatch_payload=dispatch_payload,
+                lease=lease,
+                journal_transport=journal_transport,
+                reconnect_generation=reconnect_generation,
             )
 
-        assert self._transport is not None
         send_ns = time.monotonic_ns()
         try:
             self._journal_request_sent(
@@ -395,8 +415,40 @@ class ApprovalBoundSender:
                 error_code="internal_error",
             )
 
-        self._lease = PostOnlyLease(plan=plan)
-        self._lease.mark_working(now_mono_ns=mono2)
+        lease = PostOnlyLease(plan=plan)
+        lease.mark_working(now_mono_ns=mono2)
+        self._lease = lease
+        return PreparedDispatch(
+            plan=plan,
+            summary=summary,
+            dispatch_payload=dispatch_payload,
+            lease=lease,
+            journal_transport=journal_transport,
+            reconnect_generation=reconnect_generation,
+        )
+
+    def dispatch_prepared(
+        self,
+        prepared: PreparedDispatch,
+        *,
+        dispatch_barrier: Optional[Any] = None,
+        transport: Optional[TransportFn] = None,
+    ) -> SendResult:
+        """Venue send only — maps to old ``await cmd_queue`` → ``ws.send`` step."""
+        plan = prepared.plan
+        summary = prepared.summary
+        self._lease = prepared.lease
+        use_transport = transport if transport is not None else self._transport
+        if use_transport is None:
+            self._journal_reject(plan, stage="send", error_code="transport_error")
+            return SendResult(
+                status="rejected",
+                plan_summary=summary,
+                journal_ok=True,
+                transport_invoked=False,
+                error_code="transport_error",
+                lease_state=prepared.lease.state.value,
+            )
 
         dispatch_ns = time.monotonic_ns()
         if dispatch_barrier is not None:
@@ -407,7 +459,7 @@ class ApprovalBoundSender:
                     self._journal_reject(
                         plan, stage="send", error_code="dual_leg_aborted"
                     )
-                    self._lease.mark_terminal()
+                    prepared.lease.mark_terminal()
                 except (JournalValidationError, OSError, RuntimeError, ValueError):
                     return SendResult(
                         status="journal_failed",
@@ -415,7 +467,7 @@ class ApprovalBoundSender:
                         journal_ok=False,
                         transport_invoked=False,
                         error_code="internal_error",
-                        lease_state=self._lease.state.value,
+                        lease_state=prepared.lease.state.value,
                     )
                 return SendResult(
                     status="rejected",
@@ -423,14 +475,13 @@ class ApprovalBoundSender:
                     journal_ok=True,
                     transport_invoked=False,
                     error_code="dual_leg_aborted",
-                    lease_state=self._lease.state.value,
+                    lease_state=prepared.lease.state.value,
                 )
             dispatch_ns = time.monotonic_ns()
 
         try:
-            ack = self._transport(dispatch_payload)
+            ack = use_transport(prepared.dispatch_payload)
         except TransportNotBoundError:
-            # Should not happen after pre-check; treat as pre-dispatch if somehow.
             self._journal_reject(plan, stage="send", error_code="transport_error")
             return SendResult(
                 status="rejected",
@@ -438,19 +489,18 @@ class ApprovalBoundSender:
                 journal_ok=True,
                 transport_invoked=False,
                 error_code="transport_error",
-                lease_state=self._lease.state.value,
+                lease_state=prepared.lease.state.value,
             )
         except TimeoutError:
             return self._finish_post_dispatch_ambiguous(
                 plan, summary, error_code="timeout", transport_invoked=True
             )
         except Exception:  # noqa: BLE001
-            # Unknown exception after request_sent → ambiguous, not reject.
             return self._finish_post_dispatch_ambiguous(
                 plan, summary, error_code="unknown", transport_invoked=True
             )
 
-        _ = dispatch_payload.public_view()
+        _ = prepared.dispatch_payload.public_view()
         recv_ns = time.monotonic_ns()
 
         if ack.ambiguous or ack.kind == "ambiguous":
@@ -467,19 +517,18 @@ class ApprovalBoundSender:
                     plan,
                     ack_state=ack.ack_state,
                     receive_monotonic_ns=recv_ns,
-                    transport=journal_transport,
-                    reconnect_generation=reconnect_generation,
+                    transport=prepared.journal_transport,
+                    reconnect_generation=prepared.reconnect_generation,
                 )
             except (JournalValidationError, OSError, RuntimeError, ValueError):
                 return self._fail_post_transport_journal(
                     plan, summary, ack_state=ack.ack_state
                 )
-            self._lease.mark_acked(now_mono_ns=recv_ns)
+            prepared.lease.mark_acked(now_mono_ns=recv_ns)
             if plan.mode == "post_only_limit":
-                self._lease_supervisor.register(self._lease)
-                st = self._lease.check_ttl(now_mono_ns=recv_ns)
+                self._lease_supervisor.register(prepared.lease)
+                st = prepared.lease.check_ttl(now_mono_ns=recv_ns)
                 if st == LeaseState.TTL_EXPIRED_CANCEL_REQUIRED:
-                    # Evidence that cancel is required — GTC does not auto-bound.
                     try:
                         self._journal_ttl_cancel_required_hint(plan)
                     except (JournalValidationError, OSError, RuntimeError, ValueError):
@@ -492,7 +541,7 @@ class ApprovalBoundSender:
                 journal_ok=True,
                 transport_invoked=True,
                 ack_state=ack.ack_state,
-                lease_state=self._lease.state.value,
+                lease_state=prepared.lease.state.value,
                 dispatch_monotonic_ns=dispatch_ns,
             )
 
@@ -503,8 +552,8 @@ class ApprovalBoundSender:
                 receive_monotonic_ns=recv_ns,
                 ok=False,
                 error_code=ack.error_code or "venue_rejected",
-                transport=journal_transport,
-                reconnect_generation=reconnect_generation,
+                transport=prepared.journal_transport,
+                reconnect_generation=prepared.reconnect_generation,
             )
         except (JournalValidationError, OSError, RuntimeError, ValueError):
             return self._fail_post_transport_journal(
@@ -512,7 +561,7 @@ class ApprovalBoundSender:
                 summary,
                 ack_state=ack.ack_state,
             )
-        self._lease.mark_terminal()
+        prepared.lease.mark_terminal()
         return SendResult(
             status="rejected",
             plan_summary=summary,
@@ -520,9 +569,56 @@ class ApprovalBoundSender:
             transport_invoked=True,
             ack_state=ack.ack_state,
             error_code=ack.error_code or "venue_rejected",
-            lease_state=self._lease.state.value,
+            lease_state=prepared.lease.state.value,
             venue_code=getattr(ack, "venue_code", None),
             dispatch_monotonic_ns=dispatch_ns,
+        )
+
+    def send_approved(
+        self,
+        plan: OrderPlan,
+        token: ApprovalToken,
+        credentials: LiveCredentials,
+        env: Mapping[str, str],
+        *,
+        canonical_plan: Optional[OrderPlan] = None,
+        now: Optional[datetime] = None,
+        now_mono_ns: Optional[int] = None,
+        now_mono_ns_post_fsync: Optional[int] = None,
+        dispatch_transport: bool = True,
+        journal_transport: Optional[str] = None,
+        reconnect_generation: Optional[int] = None,
+        dispatch_barrier: Optional[Any] = None,
+        hot_ready: bool = False,
+    ) -> SendResult:
+        """Prepare then optionally dispatch (compat wrapper around the split path)."""
+        prepared = self.prepare_approved(
+            plan,
+            token,
+            credentials,
+            env,
+            canonical_plan=canonical_plan,
+            now=now,
+            now_mono_ns=now_mono_ns,
+            now_mono_ns_post_fsync=now_mono_ns_post_fsync,
+            journal_transport=journal_transport,
+            reconnect_generation=reconnect_generation,
+            hot_ready=hot_ready,
+            require_transport_bound=dispatch_transport,
+            write_request_sent=dispatch_transport,
+        )
+        if isinstance(prepared, SendResult):
+            return prepared
+        if not dispatch_transport:
+            return SendResult(
+                status="prepared_not_dispatched",
+                plan_summary=prepared.summary,
+                journal_ok=True,
+                transport_invoked=False,
+                lease_state=LeaseState.PREPARED.value,
+            )
+        return self.dispatch_prepared(
+            prepared, dispatch_barrier=dispatch_barrier
         )
 
     def request_cancel_interface(
