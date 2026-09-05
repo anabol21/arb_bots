@@ -312,6 +312,8 @@ class PrivateWarmSession:
     def stop(self) -> None:
         """Close sockets and stop keep-alive. Does not delete journal history."""
         self._stopped = True
+        if self.wire is not None:
+            self.wire._stop.set()  # noqa: SLF001 — halt wire mkdir/write before teardown
         self.stop_keepalive()
         with self._lock:
             for rt in (self.bybit_runtime, self.okx_runtime):

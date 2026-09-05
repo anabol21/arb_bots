@@ -210,6 +210,7 @@ class WarmPlaceIoGuardTests(unittest.TestCase):
                 self.assertEqual(got, ack)
 
             self.assertFalse(session.place_inflight)
+            session.stop()
 
     def test_trade_heartbeat_sent_on_keepalive_tick(self) -> None:
         from app.bot.private.selftest import W2PrivateWsTests
@@ -264,6 +265,7 @@ class WarmPlaceIoGuardTests(unittest.TestCase):
             self.assertTrue(
                 saw_trade_ping, "keepalive must ping trade sockets, not only private"
             )
+            session.stop()
 
     def test_keepalive_stashes_non_noise_trade_frame(self) -> None:
         from app.bot.private.selftest import W2PrivateWsTests
@@ -320,6 +322,7 @@ class WarmPlaceIoGuardTests(unittest.TestCase):
             )
             self.assertTrue(got.accepted)
             self.assertEqual(session.bybit_runtime._trade_inbound_stash, [])  # noqa: SLF001
+            session.stop()
 
 
 if __name__ == "__main__":

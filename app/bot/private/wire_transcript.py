@@ -265,7 +265,7 @@ class WireTranscript:
         *,
         run_id: str,
         env: Optional[Mapping[str, str]] = None,
-        async_write: bool = True,
+        async_write: bool = False,
         logger: Optional[logging.Logger] = None,
     ) -> None:
         root = (
@@ -278,12 +278,15 @@ class WireTranscript:
         (root / "wire").mkdir(parents=True, exist_ok=True)
         self.data_root = root
         self.run_id = str(run_id)
+        # Default sync: append+flush, no fsync. After I/O only; does not gate
+        # the other Contour B leg. Async is optional (tests use TemporaryDirectory).
         self._async = bool(async_write)
         self._log = logger or LOG
         self._seq = 0
         self._write_lock = threading.Lock()
         self._corr: dict[str, dict[str, Any]] = {}
         self._corr_lock = threading.Lock()
+        self._handles: dict[str, Any] = {}
         self._queue: queue.Queue[Optional[dict[str, Any]]] = queue.Queue()
         self._stop = threading.Event()
         self._thread: Optional[threading.Thread] = None
@@ -451,18 +454,34 @@ class WireTranscript:
                 self._queue.task_done()
 
     def _append(self, event: dict[str, Any]) -> None:
+        if self._stop.is_set():
+            return
         with self._write_lock:
+            if self._stop.is_set():
+                return
             self._seq += 1
             event["seq"] = self._seq
             date = event_date_from_wall_ms(int(event["wall_ms"]))
             event["event_date"] = date
-            path = wire_jsonl_path(self.data_root, date)
-            if _is_under_denied(path):
-                raise RuntimeError(f"refusing wire append under denied path: {path}")
             line = json.dumps(event, ensure_ascii=False, separators=(",", ":"))
-            with path.open("a", encoding="utf-8") as fh:
+            try:
+                fh = self._handles.get(date)
+                if fh is None:
+                    if not self.data_root.exists():
+                        return
+                    path = wire_jsonl_path(self.data_root, date)
+                    if _is_under_denied(path):
+                        raise RuntimeError(
+                            f"refusing wire append under denied path: {path}"
+                        )
+                    fh = path.open("a", encoding="utf-8")
+                    self._handles[date] = fh
                 fh.write(line + "\n")
                 fh.flush()
+            except OSError:
+                if self._stop.is_set() or not self.data_root.exists():
+                    return
+                raise
 
     def flush(self, timeout_sec: float = 2.0) -> None:
         if not self._async:
@@ -471,15 +490,21 @@ class WireTranscript:
         self._queue.join()
 
     def close(self) -> None:
-        if self._stop.is_set():
-            return
+        already = self._stop.is_set()
         self._stop.set()
-        if self._async:
+        if self._async and not already:
             self._queue.put(None)
             t = self._thread
             if t is not None and t.is_alive() and t is not threading.current_thread():
                 t.join(timeout=2.0)
             self._thread = None
+        with self._write_lock:
+            for fh in self._handles.values():
+                try:
+                    fh.close()
+                except OSError:
+                    pass
+            self._handles.clear()
 
 
 class WireTranscriptSocket:
@@ -560,10 +585,18 @@ def wrap_socket(
     socket: str,
     run_id: Optional[str] = None,
     generation_fn: Optional[Callable[[], int]] = None,
-) -> WireTranscriptSocket:
+) -> Any:
+    """Hook send/recv on ``sock`` in place so ``isinstance`` stays valid.
+
+    Warm-session tests (and production) keep the concrete socket type
+    (``FakePrivateWsSocket`` / ``WebsocketsClientSocket``). A delegating
+    wrapper is still available as ``WireTranscriptSocket`` for unit tests.
+    """
     if isinstance(sock, WireTranscriptSocket):
         return sock
-    return WireTranscriptSocket(
+    if getattr(sock, "_wire_transcript", None) is not None:
+        return sock
+    recorder = WireTranscriptSocket(
         sock,
         transcript=transcript,
         venue=venue,
@@ -571,6 +604,22 @@ def wrap_socket(
         run_id=run_id,
         generation_fn=generation_fn,
     )
+    orig_send = sock.send_text
+    orig_recv = sock.recv_text
+
+    def send_text(text: str) -> None:
+        orig_send(text)
+        recorder._safe_record("out", text)  # noqa: SLF001
+
+    def recv_text(*, timeout_sec: Optional[float] = None) -> str:
+        text = orig_recv(timeout_sec=timeout_sec)
+        recorder._safe_record("in", text)  # noqa: SLF001
+        return text
+
+    sock.send_text = send_text  # type: ignore[method-assign]
+    sock.recv_text = recv_text  # type: ignore[method-assign]
+    sock._wire_transcript = transcript
+    return sock
 
 
 def wrap_warm_bundle(
