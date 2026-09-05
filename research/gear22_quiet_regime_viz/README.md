@@ -20,9 +20,9 @@ PYTHONPATH=. python -m research.gear22_quiet_regime_viz \
   --out-dir /tmp/gear22_viz
 ```
 
-Open `/tmp/gear22_viz/gear22_quiet_regime_SOL.html` (and `_XRP.html`).
+Open `/tmp/gear22_viz/index.html` or `gear22_quiet_regime_SOL.html` (and `_XRP.html`).
 Keep the sibling `plotly.min.js` next to the HTML (copied automatically).
-Also written: `coins.json` (stable nav list).
+Also written: `index.html` + `coins.json` (nav list sorted by August `std_spread`).
 
 Regenerate the fixture:
 
@@ -47,6 +47,8 @@ PYTHONPATH=. python -m research.gear22_quiet_regime_viz.build_fixture
 | `--latency-bins` | In-bar **trigger-venue** latency hist bins, **equal-weight tick counts** (default `24`; `0` disables) |
 | `--latency-temporal-bins` | Equal-time mean slots for latency temporal view (default `12`) |
 | `--inline-plotly` | Embed plotly.js inside each HTML (large single-file). Default = sibling `plotly.min.js` |
+| `--std-csv` | August `std_spread` table for index / `coins.json` / nav sort (default `research/data/universe_spread_std_august.csv`) |
+| `--take-yes-only` | If the std CSV has `take`, keep `take=yes` in the multi-coin index (optional when `--coins` is already filtered) |
 
 ### `--since` = last restart
 
@@ -85,8 +87,9 @@ context but is not the dual-stack primary.
 
 ## What each page shows
 
-1. **Coin nav** — ←/→ links, keyboard arrows, swipe; wraps at ends; `file://`-safe
-   relative hrefs. Stable list embedded in the page + sibling `coins.json`.
+1. **Coin nav** — index link, ←/→ links, keyboard arrows, swipe; wraps at ends;
+   `file://`-safe relative hrefs. List order = August `std_spread` descending
+   (see below). Sibling `index.html` + `coins.json`.
 2. **Mid context** (OKX mid + Bybit mid) once at the top.
 3. Per side (**long**, then **short**):
    - UTC-aligned **5m OHLC candles** of that spread
@@ -182,14 +185,48 @@ with `t_{i+1} − t_i > gap_threshold_ms` (default 30s). The band spans
 Intra-bucket **gap_fraction** is separate: fraction of the 5m bucket outside the
 first→last tick extent (empty → `1.0`). It is **not** the inter-tick hole score.
 
+## Pan / zoom the time axis
+
+Candlestick defaults are often box-zoom-only, which feels like “can’t scroll
+left/right”. Pages set Plotly `dragmode=pan`, `scrollZoom=true`, and
+`fixedrange=false` on every shared UTC axis. The rangeslider stays **off**.
+
+| Action | How |
+|--------|-----|
+| **Pan** left/right | Click-drag on the plot (default). Or modebar **Pan**. |
+| **Box zoom** | Modebar **Zoom**, or **Shift+drag** while pan is the active drag mode |
+| **Scroll zoom** | Mouse wheel / trackpad scroll over the plot |
+| **Reset** | Double-click the plot, or modebar **Reset axes** |
+
+A click without a drag on a 5m candle still opens the inspect panel
+(#16 / #17 / #19). Keyboard ←/→ still cycle **coins**, not the time window.
+
+## Index sort (August СКО)
+
+`index.html` and `coins.json` (and therefore coin-page nav) are ordered by
+`std_spread` from `research/data/universe_spread_std_august.csv`:
+
+- column `std_spread`, descending (largest August СКО first)
+- coin column: `base_coin` / `coin` / `symbol` / `ticker`
+- `status=ok` is preferred when a coin has duplicate rows
+- coins **missing** from the table (or non-finite std) go **last**, A–Z
+- if a `take` column exists, `--take-yes-only` keeps `take=yes` in the
+  multi-coin index; coins not in the table are kept. Skip this flag when
+  `--coins` / `out_dir` already lists the filtered set.
+
+Missing CSV → alphabetical fallback so rebuilds still write an index.
+
+Override the path with `--std-csv`. Future CLI rebuilds stay sorted through
+`plot.write_nav_artifacts`.
+
 ## Coin navigation
 
-- Pages embed `CFG = {coin, coins}` and sibling `coins.json`.
+- Pages embed `CFG = {coin, coins}` and sibling `coins.json` / `index.html`.
 - ← / → (and swipe left/right) go to previous/next coin via relative
   `gear22_quiet_regime_<COIN>.html` links.
 - **Wraps** at the ends (last → first).
-- Works under `file://` (no web server). Nav list = coins that actually got a page,
-  in `--coins` order.
+- Works under `file://` (no web server). Nav list = coins that actually got a
+  page, sorted by August `std_spread` (not raw `--coins` order).
 
 ## Moving averages
 
@@ -225,6 +262,7 @@ Return `MetricTrace` with `panel` in
 | `quantiles.py` | Hold weights + TW quantile / mean / hist helpers |
 | `gaps.py` | Inter-tick gap intervals |
 | `plot.py` | Plotly multi-block HTML writer + coin nav + candle click inspect |
+| `coin_order.py` | August `std_spread` load / sort for index + nav |
 | `metrics_ext.py` | Empty extension hook |
 | `cli.py` / `__main__.py` | CLI entry |
 

@@ -13,6 +13,13 @@ import plotly.graph_objects as go
 from plotly.offline import plot as plotly_plot
 from plotly.subplots import make_subplots
 
+from research.gear22_quiet_regime_viz.coin_order import (
+    DEFAULT_AUGUST_STD_CSV,
+    load_august_std_table,
+    order_meta,
+    sort_coins_by_august_std,
+    std_lookup,
+)
 from research.gear22_quiet_regime_viz.candles import (
     DEFAULT_CANDLE_BINS,
     DEFAULT_CANDLE_TEMPORAL_BINS,
@@ -44,6 +51,14 @@ MID_OKX_NAME = "OKX mid (bid+ask)/2"
 MID_BYBIT_NAME = "Bybit mid (bid+ask)/2"
 GAP_FILL = "rgba(220, 40, 40, 0.22)"
 TICK_COLOR = "rgba(40, 40, 40, 0.35)"
+# Default drag is pan so the shared UTC axis can be moved left/right.
+# Modebar still exposes box-zoom; scrollZoom enables wheel/trackpad zoom.
+PLOTLY_CONFIG: dict[str, Any] = {
+    "responsive": True,
+    "displaylogo": False,
+    "scrollZoom": True,
+    "modeBarButtonsToRemove": ["select2d", "lasso2d"],
+}
 MA_COLORS = {3: "#1f77b4", 12: "#ff7f0e", 6: "#2ca02c", 24: "#9467bd"}
 TW_COLORS = {
     "tw_p25": "#54a24b",
@@ -139,9 +154,11 @@ def build_mid_figure(
         margin=dict(l=60, r=30, t=40, b=30),
         legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0),
         hovermode="x unified",
+        dragmode="pan",
+        xaxis_rangeslider_visible=False,
     )
     fig.update_yaxes(title_text="price")
-    fig.update_xaxes(title_text="UTC")
+    fig.update_xaxes(title_text="UTC", fixedrange=False, rangeslider_visible=False)
     return fig
 
 
@@ -410,8 +427,11 @@ def build_spread_block_figure(
         margin=dict(l=60, r=30, t=60, b=40),
         xaxis_rangeslider_visible=False,
         hovermode="x unified",
+        dragmode="pan",
     )
-    fig.update_xaxes(rangeslider_visible=False, row=1, col=1)
+    # Shared UTC axis must stay zoomable/pannable on every row (candlestick
+    # defaults often lock the range / box-zoom only).
+    fig.update_xaxes(fixedrange=False, rangeslider_visible=False)
     for r in (1, 4, 5, 6):
         fig.update_yaxes(title_text="%", row=r, col=1)
     fig.update_xaxes(title_text="UTC", row=6, col=1)
@@ -461,7 +481,7 @@ def _fig_to_div(fig: go.Figure, *, include_plotlyjs: bool | str) -> str:
         fig,
         output_type="div",
         include_plotlyjs=include_plotlyjs,
-        config={"responsive": True, "displaylogo": False},
+        config=PLOTLY_CONFIG,
     )
 
 
@@ -485,11 +505,15 @@ def _nav_html(coin: str, coins: Sequence[str]) -> str:
     )
     return f"""
 <nav class="coin-nav" aria-label="Coin navigation">
+  <a class="nav-btn" href="index.html" title="Index (August std sort)">Index</a>
   <a class="nav-btn" href="{html.escape(coin_html_filename(prev_c))}" title="Previous coin (←)">← {html.escape(prev_c)}</a>
   <span class="coin-links">{links}</span>
   <a class="nav-btn" href="{html.escape(coin_html_filename(next_c))}" title="Next coin (→)">{html.escape(next_c)} →</a>
 </nav>
 <p class="nav-hint">Keyboard ←/→ or swipe left/right cycles coins (wraps). Works with <code>file://</code>.</p>
+<p class="nav-hint">Time axis: <strong>drag to pan</strong> left/right (default). Scroll / trackpad zooms.
+Modebar <em>Zoom</em> is box-zoom; Shift+drag also box-zooms when pan is active. Double-click or
+modebar Reset restores the full window. Click (no drag) a 5m candle still opens inspect.</p>
 """
 
 
@@ -938,13 +962,95 @@ def _candle_inspect_script() -> str:
 """
 
 
-def write_coins_json(out_dir: Path, coins: Sequence[str]) -> Path:
+def write_coins_json(
+    out_dir: Path,
+    coins: Sequence[str],
+    *,
+    extra: Optional[Mapping[str, Any]] = None,
+) -> Path:
+    payload: dict[str, Any] = {"coins": [c.upper() for c in coins]}
+    if extra:
+        payload.update(extra)
     path = Path(out_dir) / "coins.json"
-    path.write_text(
-        json.dumps({"coins": [c.upper() for c in coins]}, indent=2) + "\n",
-        encoding="utf-8",
-    )
+    path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
     return path
+
+
+def write_index_html(
+    out_dir: Path,
+    coins: Sequence[str],
+    *,
+    std_by_coin: Optional[Mapping[str, float]] = None,
+    note: str = "Coins ordered by August std_spread (СКО) descending.",
+) -> Path:
+    """Write a file://-safe index of per-coin pages in the given order."""
+    std_by_coin = std_by_coin or {}
+    rows: list[str] = []
+    for i, coin in enumerate(coins, start=1):
+        href = html.escape(coin_html_filename(coin))
+        label = html.escape(str(coin).upper())
+        std = std_by_coin.get(str(coin).upper())
+        std_cell = f"{std:.6g}" if std is not None else "—"
+        rows.append(
+            f"<tr><td>{i}</td><td><a href=\"{href}\">{label}</a></td>"
+            f"<td>{html.escape(std_cell)}</td></tr>"
+        )
+    body = "\n".join(rows) if rows else "<tr><td colspan='3'>No coins</td></tr>"
+    page = f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>Gear 2.2 quiet-regime — index</title>
+<style>
+  body {{ font-family: "IBM Plex Sans", "Segoe UI", sans-serif; margin: 1.25rem; color: #1b1b1b; background: #f7f5f2; }}
+  h1 {{ font-size: 1.35rem; margin: 0 0 0.35rem; }}
+  .sub {{ color: #444; margin-bottom: 1rem; max-width: 48rem; }}
+  table {{ border-collapse: collapse; font-size: 0.95rem; }}
+  th, td {{ border: 1px solid #ccc; padding: 0.3rem 0.6rem; text-align: left; }}
+  th {{ background: #ece8e1; }}
+  td:first-child, td:last-child {{ font-variant-numeric: tabular-nums; }}
+  a {{ color: #243; }}
+</style>
+</head>
+<body>
+<h1>Gear 2.2 — quiet-regime index</h1>
+<p class="sub">{html.escape(note)} Missing from
+<code>research/data/universe_spread_std_august.csv</code> are listed last (A–Z).
+Open a coin page, then drag the plot to pan the UTC axis.</p>
+<table>
+  <thead><tr><th>#</th><th>Coin</th><th>August std_spread</th></tr></thead>
+  <tbody>
+{body}
+  </tbody>
+</table>
+</body>
+</html>
+"""
+    path = Path(out_dir) / "index.html"
+    path.write_text(page, encoding="utf-8")
+    return path
+
+
+def write_nav_artifacts(
+    out_dir: Path,
+    coins: Sequence[str],
+    *,
+    std_csv: Path | None = DEFAULT_AUGUST_STD_CSV,
+    take_yes_only: bool = False,
+) -> list[str]:
+    """Sort coins by August std and write ``index.html`` + ``coins.json``.
+
+    Returns the ordered coin list used for nav / JSON / index.
+    """
+    table = load_august_std_table(std_csv)
+    ordered = sort_coins_by_august_std(
+        coins, table=table, take_yes_only=take_yes_only
+    )
+    extra = order_meta(ordered, table=table)
+    write_coins_json(out_dir, ordered, extra=extra)
+    write_index_html(out_dir, ordered, std_by_coin=std_lookup(table))
+    return ordered
 
 
 def write_coin_html(
