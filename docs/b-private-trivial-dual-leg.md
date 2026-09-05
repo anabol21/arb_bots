@@ -43,6 +43,12 @@ multi-second pre-send check.
 Ack / fill / flatten / reconcile stay **after** send (observe). Do not add
 new waits that gate the contour.
 
+The standing **wire transcript** records every private+trade send/recv with
+`wall_ms` / `mono_ns` so signal→send, send→ack RTT, and
+`fill_delivery = local_recv − venue_ts` can be derived without putting a
+fill gate on this path. Layout and redaction:
+[`docs/b-private-wire-transcript.md`](b-private-wire-transcript.md).
+
 ## How to flip back to W6
 
 Default (no extra flags beyond live send):

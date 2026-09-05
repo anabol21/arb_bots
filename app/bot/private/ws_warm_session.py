@@ -52,6 +52,13 @@ from app.bot.private.ws_private import (
     trade_ws_url_for_exchange,
 )
 from app.bot.private.ws_reseed import build_signed_rest_reseed
+from app.bot.private.wire_transcript import (
+    WireTranscript,
+    attach_process_wire_transcript,
+    clear_process_wire_transcript,
+    get_process_wire_transcript,
+    wrap_warm_bundle,
+)
 from app.bot.private.ws_socket import PrivateWsSocket
 from app.bot.private.ws_w4_postonly import _handshake_private_and_trade
 
@@ -114,6 +121,7 @@ class PrivateWarmSession:
     silence_timeout_sec: float = _DEFAULT_SILENCE_TIMEOUT_SEC
     reconnect_base_sec: float = _RECONNECT_BASE_SEC
     reconnect_cap_sec: float = _RECONNECT_CAP_SEC
+    wire: Optional[WireTranscript] = None
     _started: bool = False
     _stopped: bool = False
     _handshake_count: int = 0
@@ -315,6 +323,14 @@ class PrivateWarmSession:
                             pass
                 rt.private_socket = None
                 rt.trade_socket = None
+        if self.wire is not None:
+            try:
+                self.wire.flush()
+                self.wire.close()
+            except Exception:  # noqa: BLE001
+                pass
+        if get_process_wire_transcript() is self.wire:
+            clear_process_wire_transcript(close=False)
         LOG.info("warm_stopped run_id=%s", self.run_id)
 
     def _stop_requested(self) -> bool:
@@ -484,6 +500,16 @@ class PrivateWarmSession:
 
     def _bind_fresh_sockets(self) -> None:
         bundle = self.socket_provider()
+        if self.wire is not None:
+            bundle = wrap_warm_bundle(
+                bundle,
+                transcript=self.wire,
+                run_id=self.run_id,
+                bybit_generation_fn=lambda: int(
+                    self.bybit_runtime.reconnect_generation
+                ),
+                okx_generation_fn=lambda: int(self.okx_runtime.reconnect_generation),
+            )
         self.bybit_runtime.bind_sockets(
             private=bundle.bybit_private,
             trade=bundle.bybit_trade,
@@ -654,6 +680,8 @@ def start_warm_private_session(
         and existing.okx_symbol == okx_symbol
     ):
         existing.ensure_ready()
+        if existing.wire is not None:
+            attach_process_wire_transcript(existing.wire)
         if keepalive and not existing.keepalive_running:
             existing.start_keepalive(stop_event=stop_event)
         return existing
@@ -680,6 +708,8 @@ def start_warm_private_session(
         rest_probe_fn=rest_probe_fn,
         profile_gate=gate,
     )
+    wire = WireTranscript(root, run_id=str(j.run_id), env=e)
+    attach_process_wire_transcript(wire)
     session = PrivateWarmSession(
         journal=j,
         bybit_runtime=bybit_rt,
@@ -697,6 +727,7 @@ def start_warm_private_session(
         silence_timeout_sec=float(silence_timeout_sec),
         reconnect_base_sec=float(reconnect_base_sec),
         reconnect_cap_sec=float(reconnect_cap_sec),
+        wire=wire,
     )
     session.start()
     if attach:

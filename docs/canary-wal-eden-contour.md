@@ -78,10 +78,16 @@ BBOT_LOG_PATH=/var/log/spread/bbot-canary-wal-eden.log
 BBOT_BROKER=private_live
 VENUE=live
 LIVE_ORDERS=1
+BBOT_PRIVATE_DATA_ROOT=/data/bbot-canary-wal-eden/private
 # BBOT_PRIVATE_SEND_PATH unset or trivial  → Contour B
 # BBOT_OKX_INST_ID_CODES=WAL-USDT-SWAP:…,EDEN-USDT-SWAP:…
 # keys only in the env file
 ```
+
+Wire transcript (standing contract): every private+trade send/recv is
+appended under `{BBOT_PRIVATE_DATA_ROOT}/wire/` — see
+[`docs/b-private-wire-transcript.md`](b-private-wire-transcript.md).
+No fill-wait on the Contour B path.
 
 Confirm `spread-bbot-gear2.service` is inactive before any canary start.
 

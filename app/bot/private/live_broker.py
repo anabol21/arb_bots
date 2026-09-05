@@ -27,6 +27,7 @@ from typing import Any, Callable, Mapping, Optional
 from app.bot.journal import JournalWriter
 from app.bot.private.order_sign import LiveCredentials
 from app.bot.private.venue import live_orders_enabled, resolve_venue, send_allowed
+from app.bot.private.wire_transcript import bind_place_on_process_transcript
 from app.bot.private.ws_trivial_dual_leg import (
     SEND_PATH_TRIVIAL,
     SEND_PATH_W6,
@@ -368,6 +369,14 @@ class LiveBroker(StubBroker):
         except (TrivialSendError, ValueError, TypeError, KeyError) as exc:
             return f"frame_build_failed:{type(exc).__name__}"
 
+        bind_place_on_process_transcript(
+            req_ids=(("bybit", bybit_req), ("okx", okx_req)),
+            intent_id=pending.intent_id,
+            dual_leg_id=dual_id,
+            signal_ts_ms=pending.signal_ts_ms,
+            phase=phase,
+        )
+
         place_io = None
         session = self._warm_session_or_none()
         if session is not None:
@@ -384,6 +393,9 @@ class LiveBroker(StubBroker):
                 okx_req_id=okx_req,
                 phase=phase,
                 place_io=place_io,
+                intent_id=pending.intent_id,
+                dual_leg_id=dual_id,
+                signal_ts_ms=pending.signal_ts_ms,
             )
         except (TrivialSendError, RuntimeError, TimeoutError) as exc:
             return f"trivial_send_failed:{type(exc).__name__}"

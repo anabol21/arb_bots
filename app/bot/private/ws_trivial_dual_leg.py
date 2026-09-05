@@ -31,6 +31,7 @@ from typing import Any, Callable, Mapping, Optional
 from app.bot.private.journal_v1 import new_opaque_id
 from app.bot.private.order_plan import OrderPlan
 from app.bot.private.order_sign import LiveCredentials
+from app.bot.private.wire_transcript import bind_place_on_process_transcript
 from app.bot.private.ws_messages import (
     build_bybit_trade_place,
     build_okx_trade_place,
@@ -62,6 +63,9 @@ class TrivialSendItem:
     req_id: str
     phase: str  # open | close
     enqueued_ns: int
+    intent_id: Optional[str] = None
+    dual_leg_id: Optional[str] = None
+    signal_ts_ms: Optional[int] = None
 
 
 @dataclass
@@ -307,14 +311,24 @@ class TrivialDualSender:
         bybit_req_id: str,
         okx_req_id: str,
         phase: str,
+        intent_id: Optional[str] = None,
+        dual_leg_id: Optional[str] = None,
+        signal_ts_ms: Optional[int] = None,
     ) -> TrivialSendResult:
         """Critical path: put both legs, then wait until both senders drained.
 
         Does not wait for venue ack/fill. Second put does not wait on first
-        send completing.
+        send completing. Correlation ids are bound before the puts (no I/O).
         """
         if self._bybit_q is None or self._okx_q is None:
             raise RuntimeError("trivial sender queues not ready")
+        bind_place_on_process_transcript(
+            req_ids=(("bybit", bybit_req_id), ("okx", okx_req_id)),
+            intent_id=intent_id,
+            dual_leg_id=dual_leg_id,
+            signal_ts_ms=signal_ts_ms,
+            phase=phase,
+        )
         t0 = time.monotonic_ns()
         b_item = TrivialSendItem(
             venue="bybit",
@@ -322,6 +336,9 @@ class TrivialDualSender:
             req_id=bybit_req_id,
             phase=phase,
             enqueued_ns=t0,
+            intent_id=intent_id,
+            dual_leg_id=dual_leg_id,
+            signal_ts_ms=signal_ts_ms,
         )
         o_item = TrivialSendItem(
             venue="okx",
@@ -329,6 +346,9 @@ class TrivialDualSender:
             req_id=okx_req_id,
             phase=phase,
             enqueued_ns=time.monotonic_ns(),
+            intent_id=intent_id,
+            dual_leg_id=dual_leg_id,
+            signal_ts_ms=signal_ts_ms,
         )
         t1 = o_item.enqueued_ns
         fut_b = asyncio.run_coroutine_threadsafe(self._bybit_q.put(b_item), self._loop)
@@ -389,26 +409,27 @@ def send_signed_dual(
     okx_req_id: str,
     phase: str,
     place_io=None,
+    intent_id: Optional[str] = None,
+    dual_leg_id: Optional[str] = None,
+    signal_ts_ms: Optional[int] = None,
 ) -> TrivialSendResult:
     """Put both signed frames. ``place_io`` is an optional context manager
     (warm ``place_io_section``) — a lock, not a multi-second pre-send check.
     """
+    kwargs = {
+        "bybit_text": bybit_text,
+        "okx_text": okx_text,
+        "bybit_req_id": bybit_req_id,
+        "okx_req_id": okx_req_id,
+        "phase": phase,
+        "intent_id": intent_id,
+        "dual_leg_id": dual_leg_id,
+        "signal_ts_ms": signal_ts_ms,
+    }
     if place_io is None:
-        return sender.enqueue_dual(
-            bybit_text=bybit_text,
-            okx_text=okx_text,
-            bybit_req_id=bybit_req_id,
-            okx_req_id=okx_req_id,
-            phase=phase,
-        )
+        return sender.enqueue_dual(**kwargs)
     with place_io:
-        return sender.enqueue_dual(
-            bybit_text=bybit_text,
-            okx_text=okx_text,
-            bybit_req_id=bybit_req_id,
-            okx_req_id=okx_req_id,
-            phase=phase,
-        )
+        return sender.enqueue_dual(**kwargs)
 
 
 def warm_trade_send_fn(session: Any) -> SendFn:
