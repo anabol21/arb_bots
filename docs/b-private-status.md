@@ -39,6 +39,7 @@ Unlock: [`b-private-unlock.md`](b-private-unlock.md). Контракт журн�
 | W5 | Рыночное открытие + reduce-only закрытие | По одной площадке |
 | W6 | Dual-leg market **по очереди** (Bybit buy → OKX sell), n=20 | `n_completed=20`, `orders_sent=80`, `flat_after=true` |
 | W7 | Dual-leg market **параллельно** (барьер перед WS), n=1 | `status=ok`, `orders_sent=4`, `flat_after=true` |
+| A/B send-path | W6/manager **parallel** open+flatten (`live_broker.default_live_send_pair`) vs primitive dual `queue→send` (не стратегия). Оба контура parallel place. Dry default; live n=1 затем 5. Док: [`b-private-ab-send-path-experiment.md`](b-private-ab-send-path-experiment.md) | Код+док в PR; **live не гоняли** (агент). CLI: `--ab-send-path --ab-contour=A\|B --ab-n=5` |
 
 Профиль dual-leg (W6/W7): `TRUMPUSDT` / `TRUMP-USDT-SWAP`, номинал ≈ 6–8 USD
 на ногу (не BTC min lot — лоты на биржах не совпадают).
@@ -47,6 +48,7 @@ CLI (только явный флаг; транспорт CLI по умолча�
 
 - W6: `--ws-w6-dual-leg --w6-n=N --w6-approve-one-shot` + `BBOT_PRIVATE_W6=1`
 - W7: `--ws-w7-parallel-dual-leg --w7-n=N --w7-approve-one-shot` + `BBOT_PRIVATE_W7=1`
+- A/B send-path: `--ab-send-path --ab-contour=A\|B --ab-n=N --ab-approve-one-shot` + `BBOT_PRIVATE_AB_SEND=1` (Contour A also `BBOT_PRIVATE_W6=1`). Dry default `--ab-send=false`. Doc: [`b-private-ab-send-path-experiment.md`](b-private-ab-send-path-experiment.md)
 - Общее: `VENUE=live`, `LIVE_ORDERS=1`, env `/etc/spread/bbot-private-live.env` (режим 600, не git)
 
 ---
@@ -126,6 +128,7 @@ B-bot чат: [`b-bot-starter-prompt.md`](b-bot-starter-prompt.md).
 | [`b-private-unlock.md`](b-private-unlock.md) | Письменный unlock 2026-08-18 |
 | [`b-private-starter-prompt.md`](b-private-starter-prompt.md) | Старт чата B-private |
 | [`b-private-journal-contract.md`](b-private-journal-contract.md) | Контракт журнала v1 |
+| [`b-private-ab-send-path-experiment.md`](b-private-ab-send-path-experiment.md) | A/B: W6/manager **parallel** place vs primitive dual `queue→send` (читать до live) |
 | [`b-private-secrets-manifest.md`](b-private-secrets-manifest.md) | Имена ключей/путей без значений |
 | [`gear-2-private-params.md`](gear-2-private-params.md) | Параметры для честности M |
 | [`program-roadmap.md`](program-roadmap.md) | Статус задачи в программной карте |

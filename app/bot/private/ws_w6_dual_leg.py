@@ -19,6 +19,7 @@ import logging
 import os
 import statistics
 import threading
+import time
 from dataclasses import dataclass, field
 from decimal import Decimal
 from pathlib import Path
@@ -844,6 +845,45 @@ def _flatten_venue(
     return ("ok", orders)
 
 
+def _flatten_pair_parallel(
+    *,
+    bybit_kw: Mapping[str, Any],
+    okx_kw: Mapping[str, Any],
+    warm_session: Any = None,
+) -> tuple[tuple[str, int], tuple[str, int]]:
+    """Flatten both venues concurrently (live gear2 ``parallel_flatten``)."""
+    out: dict[str, tuple[str, int]] = {}
+
+    def worker(key: str, kwargs: Mapping[str, Any]) -> None:
+        try:
+            kw = dict(kwargs)
+            kw.pop("warm_session", None)
+            out[key] = _flatten_venue(**kw)
+        except Exception:  # noqa: BLE001
+            out[key] = ("flatten_incomplete", 0)
+
+    guard = (
+        warm_session.place_io_section()
+        if warm_session is not None
+        else contextlib.nullcontext()
+    )
+    with guard:
+        t_b = threading.Thread(
+            target=worker, args=("bybit", dict(bybit_kw)), daemon=False
+        )
+        t_o = threading.Thread(
+            target=worker, args=("okx", dict(okx_kw)), daemon=False
+        )
+        t_b.start()
+        t_o.start()
+        t_b.join()
+        t_o.join()
+    return (
+        out.get("bybit", ("flatten_incomplete", 0)),
+        out.get("okx", ("flatten_incomplete", 0)),
+    )
+
+
 def _recover_inflight_w6(
     *,
     sender: ApprovalBoundSender,
@@ -1067,13 +1107,17 @@ def run_w6_dual_leg(
     okx_place_override: Optional[Any] = None,
     fill_inject_fn: Optional[Any] = None,
     parallel_open: bool = False,
+    parallel_flatten: bool = False,
     send_gate: Optional[Any] = None,
     warm_session: Optional[Any] = None,
+    hold_after_open_sec: float = 0.0,
 ) -> W6Report:
     """Execute n dual-leg market rounds (Bybit buy / OKX sell).
 
     Default is sequential: Bybit must fill before OKX is sent.
-    ``parallel_open=True`` (W7) dispatches both WS places after a barrier.
+    ``parallel_open=True`` (W7 / live gear2) dispatches both WS places after a
+    barrier. ``parallel_flatten=True`` flattens both venues concurrently
+    (default off so classic W6/W7 CLI flatten stays sequential).
 
     When a process-lifetime ``warm_session`` is attached (or passed), the send
     path reuses that private WS session: same ``run_id``, no per-signal
@@ -1834,93 +1878,105 @@ def run_w6_dual_leg(
                         latency_ms=_latency(),
                     )
 
-            flat_b, n_b = _flatten_venue(
-                sender=bybit_sender,
-                runtime=bybit_runtime,
-                provider=bybit_provider,
-                place_transport=bybit_transport,
-                vault=vault,
-                credentials=bybit_credentials,
-                env=e,
-                metadata_provider=metadata_provider,
-                profile=bybit_p,
-                dual_leg_id=dual_id,
-                journal=j,
-                baseline=dual_base,
-                terminal_wait_sec=float(terminal_wait_sec),
-                fill_inject_fn=fill_inject_fn,
-                inject_kind="bybit_flatten",
-                warm_session=session,
-            )
-            orders_sent += n_b
-            if flat_b != "ok":
-                o_st, o_n = _flatten_venue(
-                    sender=okx_sender,
-                    runtime=okx_runtime,
-                    provider=okx_provider,
-                    place_transport=okx_transport,
-                    vault=vault,
-                    credentials=okx_credentials,
-                    env=e,
-                    metadata_provider=metadata_provider,
-                    profile=okx_p,
-                    dual_leg_id=dual_id,
-                    journal=j,
-                    baseline=dual_base,
-                    terminal_wait_sec=float(terminal_wait_sec),
-                    fill_inject_fn=fill_inject_fn,
-                    inject_kind="okx_flatten",
+            if hold_after_open_sec > 0:
+                time.sleep(float(hold_after_open_sec))
+
+            flatten_bybit_kw = {
+                "sender": bybit_sender,
+                "runtime": bybit_runtime,
+                "provider": bybit_provider,
+                "place_transport": bybit_transport,
+                "vault": vault,
+                "credentials": bybit_credentials,
+                "env": e,
+                "metadata_provider": metadata_provider,
+                "profile": bybit_p,
+                "dual_leg_id": dual_id,
+                "journal": j,
+                "baseline": dual_base,
+                "terminal_wait_sec": float(terminal_wait_sec),
+                "fill_inject_fn": fill_inject_fn,
+                "inject_kind": "bybit_flatten",
+                "warm_session": session,
+            }
+            flatten_okx_kw = {
+                "sender": okx_sender,
+                "runtime": okx_runtime,
+                "provider": okx_provider,
+                "place_transport": okx_transport,
+                "vault": vault,
+                "credentials": okx_credentials,
+                "env": e,
+                "metadata_provider": metadata_provider,
+                "profile": okx_p,
+                "dual_leg_id": dual_id,
+                "journal": j,
+                "baseline": dual_base,
+                "terminal_wait_sec": float(terminal_wait_sec),
+                "fill_inject_fn": fill_inject_fn,
+                "inject_kind": "okx_flatten",
+                "warm_session": session,
+            }
+
+            if parallel_flatten:
+                (flat_b, n_b), (flat_o, n_o) = _flatten_pair_parallel(
+                    bybit_kw=flatten_bybit_kw,
+                    okx_kw=flatten_okx_kw,
                     warm_session=session,
                 )
-                orders_sent += o_n
-                bybit_sender.lease_supervisor.mark_process_sends_blocked()
-                return _report(
-                    status="flatten_incomplete",
-                    n_requested=n_req,
-                    n_completed=n_completed,
-                    n_aborted=n_aborted,
-                    trade_ws_bound=True,
-                    subscription_ready=True,
-                    reseed_matched=True,
-                    sends_blocked=True,
-                    orders_sent=orders_sent,
-                    error_code="unknown",
-                    latency_ms=_latency(),
-                )
+                orders_sent += n_b + n_o
+                if flat_b != "ok" or flat_o != "ok":
+                    bybit_sender.lease_supervisor.mark_process_sends_blocked()
+                    return _report(
+                        status="flatten_incomplete",
+                        n_requested=n_req,
+                        n_completed=n_completed,
+                        n_aborted=n_aborted,
+                        trade_ws_bound=True,
+                        subscription_ready=True,
+                        reseed_matched=True,
+                        sends_blocked=True,
+                        orders_sent=orders_sent,
+                        error_code="unknown",
+                        latency_ms=_latency(),
+                    )
+            else:
+                flat_b, n_b = _flatten_venue(**flatten_bybit_kw)
+                orders_sent += n_b
+                if flat_b != "ok":
+                    o_st, o_n = _flatten_venue(**flatten_okx_kw)
+                    orders_sent += o_n
+                    bybit_sender.lease_supervisor.mark_process_sends_blocked()
+                    return _report(
+                        status="flatten_incomplete",
+                        n_requested=n_req,
+                        n_completed=n_completed,
+                        n_aborted=n_aborted,
+                        trade_ws_bound=True,
+                        subscription_ready=True,
+                        reseed_matched=True,
+                        sends_blocked=True,
+                        orders_sent=orders_sent,
+                        error_code="unknown",
+                        latency_ms=_latency(),
+                    )
 
-            flat_o, n_o = _flatten_venue(
-                sender=okx_sender,
-                runtime=okx_runtime,
-                provider=okx_provider,
-                place_transport=okx_transport,
-                vault=vault,
-                credentials=okx_credentials,
-                env=e,
-                metadata_provider=metadata_provider,
-                profile=okx_p,
-                dual_leg_id=dual_id,
-                journal=j,
-                baseline=dual_base,
-                terminal_wait_sec=float(terminal_wait_sec),
-                fill_inject_fn=fill_inject_fn,
-                inject_kind="okx_flatten",
-                warm_session=session,
-            )
-            orders_sent += n_o
-            if flat_o != "ok":
-                return _report(
-                    status="flatten_incomplete",
-                    n_requested=n_req,
-                    n_completed=n_completed,
-                    n_aborted=n_aborted,
-                    trade_ws_bound=True,
-                    subscription_ready=True,
-                    reseed_matched=True,
-                    sends_blocked=True,
-                    orders_sent=orders_sent,
-                    error_code="unknown",
-                    latency_ms=_latency(),
-                )
+                flat_o, n_o = _flatten_venue(**flatten_okx_kw)
+                orders_sent += n_o
+                if flat_o != "ok":
+                    return _report(
+                        status="flatten_incomplete",
+                        n_requested=n_req,
+                        n_completed=n_completed,
+                        n_aborted=n_aborted,
+                        trade_ws_bound=True,
+                        subscription_ready=True,
+                        reseed_matched=True,
+                        sends_blocked=True,
+                        orders_sent=orders_sent,
+                        error_code="unknown",
+                        latency_ms=_latency(),
+                    )
             n_completed += 1
 
         latency = _latency()
