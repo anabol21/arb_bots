@@ -40,6 +40,7 @@ from utils.tick_validity import (  # noqa: E402
     book_l1_complete,
 )
 from utils.ws_gap_journal import WsGapJournal  # noqa: E402
+from utils.universe_csv import filter_take_yes_rows  # noqa: E402
 from utils.ws_reconnect import (  # noqa: E402
     BOOK_CONNECT_PRIORITY,
     CANDLE_CONNECT_PRIORITY,
@@ -108,6 +109,7 @@ if not failed_batches_logger.handlers:
 ws_gap_journal = WsGapJournal(GAPS_ROOT, logger=runtime_logger)
 
 UNIVERSE_PATH = os.environ.get("SPREAD_UNIVERSE", "bybit_okx_universe.csv")
+# ROW_START/ROW_END are indices over take=yes coins, not raw CSV row numbers.
 ROW_START = int(os.environ.get("SPREAD_ROW_START", "0"))
 ROW_END = int(os.environ.get("SPREAD_ROW_END", "337"))
 
@@ -138,10 +140,15 @@ def _ms_int(value: Any) -> int:
 
 
 def load_pairs_from_csv(path, row_start=0, row_end=10):
+    """Load collector pairs. Live screen is take=yes; ROW_START/ROW_END slice that list."""
     pairs = []
     with open(path, "r", encoding="utf-8", newline="") as f:
         reader = csv.DictReader(f)
-        rows = list(reader)
+        rows = filter_take_yes_rows(
+            list(reader),
+            fieldnames=reader.fieldnames,
+            path=path,
+        )
 
     subset = rows[row_start:row_end]
 

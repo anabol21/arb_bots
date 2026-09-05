@@ -28,6 +28,7 @@ from app.bot.ws_books import (
     run_okx_books5,
 )
 from app.utils.tick_validity import TickValidityGate, book_l1_complete
+from app.utils.universe_csv import filter_take_yes_rows, require_take_column
 
 ensure_repo_on_syspath()
 from research.is_crypto import is_crypto  # noqa: E402
@@ -55,10 +56,12 @@ def _setup_logger(log_path: Path) -> logging.Logger:
 
 
 def load_universe(path: Optional[Path] = None) -> dict[str, InstrumentMeta]:
+    """Full instrument meta map, including take=no (lot/tick still needed)."""
     csv_path = path or (repo_root() / "bybit_okx_universe.csv")
     out: dict[str, InstrumentMeta] = {}
     with csv_path.open(encoding="utf-8", newline="") as fh:
         reader = csv.DictReader(fh)
+        require_take_column(reader.fieldnames, path=csv_path)
         for row in reader:
             coin = str(row["base_coin"]).strip().upper()
             out[coin] = InstrumentMeta(
@@ -76,7 +79,26 @@ def load_universe(path: Optional[Path] = None) -> dict[str, InstrumentMeta]:
     return out
 
 
+def load_take_yes_coins(path: Optional[Path] = None) -> list[str]:
+    """CSV-driven tradeable coins: take=yes only. Live pair screen."""
+    csv_path = path or (repo_root() / "bybit_okx_universe.csv")
+    with csv_path.open(encoding="utf-8", newline="") as fh:
+        reader = csv.DictReader(fh)
+        rows = filter_take_yes_rows(
+            list(reader),
+            fieldnames=reader.fieldnames,
+            path=csv_path,
+        )
+    coins: list[str] = []
+    for row in rows:
+        coin = str(row["base_coin"]).strip().upper()
+        if coin:
+            coins.append(coin)
+    return coins
+
+
 def parse_coins(raw: str) -> list[str]:
+    """Parse an explicit coin list. CSV-driven discovery must use load_take_yes_coins()."""
     coins = [c.strip().upper() for c in raw.split(",") if c.strip()]
     return [c for c in coins if is_crypto(c)]
 

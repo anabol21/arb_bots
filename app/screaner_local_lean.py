@@ -40,6 +40,7 @@ from schema.lean_event import (  # noqa: E402
     LEAN_BAR_5M_BODY_COLS,
     LEAN_TICK_BODY_COLS,
 )
+from utils.universe_csv import filter_take_yes_rows  # noqa: E402
 
 # --- paths / config (local only) ------------------------------------------------
 
@@ -111,8 +112,14 @@ COLLECT_BYBIT_BARS = False  # optional; model canon is ref_exchange=okx
 
 
 def load_pairs_from_csv(path: Path, row_start: int, row_end: int) -> list[dict[str, str]]:
+    """Load lean pairs. Live screen is take=yes; row_start/row_end slice that list."""
     with path.open("r", encoding="utf-8", newline="") as f:
-        rows = list(csv.DictReader(f))
+        reader = csv.DictReader(f)
+        rows = filter_take_yes_rows(
+            list(reader),
+            fieldnames=reader.fieldnames,
+            path=path,
+        )
     subset = rows[row_start:row_end]
     out: list[dict[str, str]] = []
     for row in subset:
@@ -644,8 +651,18 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
         type=Path,
         default=Path(os.environ.get("SPREAD_LEAN_UNIVERSE", str(DEFAULT_UNIVERSE))),
     )
-    p.add_argument("--row-start", type=int, default=int(os.environ.get("SPREAD_LEAN_ROW_START", "0")))
-    p.add_argument("--row-end", type=int, default=int(os.environ.get("SPREAD_LEAN_ROW_END", "337")))
+    p.add_argument(
+        "--row-start",
+        type=int,
+        default=int(os.environ.get("SPREAD_LEAN_ROW_START", "0")),
+        help="slice start over take=yes coins",
+    )
+    p.add_argument(
+        "--row-end",
+        type=int,
+        default=int(os.environ.get("SPREAD_LEAN_ROW_END", "337")),
+        help="slice end over take=yes coins",
+    )
     p.add_argument(
         "--persist-every",
         type=int,
