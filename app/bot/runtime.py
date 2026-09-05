@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import csv
 import logging
 import os
 import sys
@@ -28,6 +27,7 @@ from app.bot.ws_books import (
     run_okx_books5,
 )
 from app.utils.tick_validity import TickValidityGate, book_l1_complete
+from app.utils.universe_csv import load_take_yes_base_coins, read_universe_dicts
 
 ensure_repo_on_syspath()
 from research.is_crypto import is_crypto  # noqa: E402
@@ -55,28 +55,34 @@ def _setup_logger(log_path: Path) -> logging.Logger:
 
 
 def load_universe(path: Optional[Path] = None) -> dict[str, InstrumentMeta]:
+    """Full instrument meta map, including take=no (lot/tick still needed)."""
     csv_path = path or (repo_root() / "bybit_okx_universe.csv")
     out: dict[str, InstrumentMeta] = {}
-    with csv_path.open(encoding="utf-8", newline="") as fh:
-        reader = csv.DictReader(fh)
-        for row in reader:
-            coin = str(row["base_coin"]).strip().upper()
-            out[coin] = InstrumentMeta(
-                base_coin=coin,
-                okx_symbol=str(row["okx_symbol"]).strip(),
-                bybit_symbol=str(row["bybit_symbol"]).strip(),
-                okx_lot_size=float(row["okx_lot_size"]),
-                okx_min_size=float(row["okx_min_size"]),
-                bybit_qty_step=float(row["bybit_qty_step"]),
-                bybit_min_order_qty=float(row["bybit_min_order_qty"]),
-                okx_tick_size=float(row.get("okx_tick_size") or 0),
-                bybit_tick_size=float(row.get("bybit_tick_size") or 0),
-                bybit_min_notional_value=float(row.get("bybit_min_notional_value") or 0),
-            )
+    for row in read_universe_dicts(csv_path):
+        coin = str(row["base_coin"]).strip().upper()
+        out[coin] = InstrumentMeta(
+            base_coin=coin,
+            okx_symbol=str(row["okx_symbol"]).strip(),
+            bybit_symbol=str(row["bybit_symbol"]).strip(),
+            okx_lot_size=float(row["okx_lot_size"]),
+            okx_min_size=float(row["okx_min_size"]),
+            bybit_qty_step=float(row["bybit_qty_step"]),
+            bybit_min_order_qty=float(row["bybit_min_order_qty"]),
+            okx_tick_size=float(row.get("okx_tick_size") or 0),
+            bybit_tick_size=float(row.get("bybit_tick_size") or 0),
+            bybit_min_notional_value=float(row.get("bybit_min_notional_value") or 0),
+        )
     return out
 
 
+def load_take_yes_coins(path: Optional[Path] = None) -> list[str]:
+    """CSV-driven tradeable coins: take=yes only. Live pair screen."""
+    csv_path = path or (repo_root() / "bybit_okx_universe.csv")
+    return load_take_yes_base_coins(csv_path)
+
+
 def parse_coins(raw: str) -> list[str]:
+    """Parse an explicit coin list. CSV-driven discovery must use load_take_yes_coins()."""
     coins = [c.strip().upper() for c in raw.split(",") if c.strip()]
     return [c for c in coins if is_crypto(c)]
 
