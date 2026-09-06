@@ -153,10 +153,11 @@ class PrivateWarmSession:
     def place_io_section(self) -> Iterator[None]:
         """Serialize warm keepalive against in-flight trade place/ack/recv.
 
-        Acquires the session lock only to bump the counter (so a mid-tick
-        keepalive finishes first), then releases so parallel W6 workers can
-        place on both venues concurrently. Keepalive skips all socket I/O and
-        reconnect while ``place_inflight``.
+        Acquires the session lock only to bump ``_place_inflight``, then
+        releases so Contour B / W6 workers are not blocked on keepalive
+        ``recv_text``. Keepalive holds this lock only for flag checks (and a
+        brief heartbeat send); it re-checks the counter before each socket
+        recv and exits without draining trade if place is inflight.
         """
         with self._lock:
             if self._stopped:
@@ -432,9 +433,26 @@ class PrivateWarmSession:
                 type(exc).__name__,
             )
 
+    def _keepalive_io_blocked(self) -> bool:
+        """True when keepalive must not touch sockets. Caller holds ``_lock``."""
+        return bool(self._stopped or self._place_inflight > 0)
+
+    def _keepalive_recv_socket(
+        self, runtime: PrivateStreamRuntime, *, trade: bool
+    ) -> Any:
+        """Snapshot one socket under lock, or None if keepalive must yield."""
+        with self._lock:
+            if self._keepalive_io_blocked():
+                return None
+            sock = runtime.trade_socket if trade else runtime.private_socket
+            if sock is None:
+                self.note_disconnect()
+                return None
+            return sock
+
     def _keepalive_tick(self) -> None:
         with self._lock:
-            if self._stopped or self._place_inflight > 0 or not self.is_ready():
+            if self._keepalive_io_blocked() or not self.is_ready():
                 return
             now = time.monotonic()
             if (now - self._last_hb_mono) >= float(self.heartbeat_every_sec):
@@ -446,59 +464,86 @@ class PrivateWarmSession:
                         self.note_disconnect()
                         return
                 self._last_hb_mono = now
-            # Drain private inboxes (heartbeat ack / order updates).
-            for rt in (self.bybit_runtime, self.okx_runtime):
-                sock = rt.private_socket
-                if sock is None:
-                    self.note_disconnect()
-                    return
-                try:
-                    raw = sock.recv_text(timeout_sec=_DEFAULT_RECV_TIMEOUT_SEC)
-                except TimeoutError:
+        # recv_text stays outside ``_lock`` so place_io_section can bump
+        # ``_place_inflight`` while a 0.2s drain would otherwise block send.
+        if not self._drain_keepalive_private():
+            return
+        if not self._drain_keepalive_trade():
+            return
+        with self._lock:
+            if self._keepalive_io_blocked():
+                return
+            if self._any_socket_dead():
+                self.note_disconnect()
+
+    def _drain_keepalive_private(self) -> bool:
+        """Drain private inboxes without holding ``_lock``. False = stop tick."""
+        for rt in (self.bybit_runtime, self.okx_runtime):
+            sock = self._keepalive_recv_socket(rt, trade=False)
+            if sock is None:
+                return False
+            try:
+                raw = sock.recv_text(timeout_sec=_DEFAULT_RECV_TIMEOUT_SEC)
+            except TimeoutError:
+                with self._lock:
+                    if self._keepalive_io_blocked():
+                        return False
                     if rt.silence_exceeded(
                         silence_timeout_sec=float(self.silence_timeout_sec)
                     ):
                         rt.handle_silence_timeout()
                         self.note_disconnect()
-                        return
-                    # Fall through to trade drain / silence below.
-                except Exception:  # noqa: BLE001
-                    self.note_disconnect()
-                    return
-                else:
-                    try:
-                        rt.handle_inbound_text(raw)
-                    except Exception:  # noqa: BLE001
-                        self.note_disconnect()
-                        return
-            # Drain trade inboxes for pong/noise only; stash anything else so
-            # place/ack cannot lose frames to keepalive.
-            from app.bot.private.ws_private import is_ws_noise_frame
+                        return False
+                continue
+            except Exception:  # noqa: BLE001
+                self.note_disconnect()
+                return False
+            placing = False
+            with self._lock:
+                placing = self._keepalive_io_blocked()
+            try:
+                rt.handle_inbound_text(raw)
+            except Exception:  # noqa: BLE001
+                self.note_disconnect()
+                return False
+            if placing:
+                return False
+        return True
 
-            for rt in (self.bybit_runtime, self.okx_runtime):
-                sock = rt.trade_socket
-                if sock is None:
-                    self.note_disconnect()
-                    return
-                try:
-                    raw = sock.recv_text(timeout_sec=_DEFAULT_RECV_TIMEOUT_SEC)
-                except TimeoutError:
+    def _drain_keepalive_trade(self) -> bool:
+        """Drain trade inboxes without holding ``_lock``. False = stop tick."""
+        from app.bot.private.ws_private import is_ws_noise_frame
+
+        for rt in (self.bybit_runtime, self.okx_runtime):
+            sock = self._keepalive_recv_socket(rt, trade=True)
+            if sock is None:
+                return False
+            try:
+                raw = sock.recv_text(timeout_sec=_DEFAULT_RECV_TIMEOUT_SEC)
+            except TimeoutError:
+                with self._lock:
+                    if self._keepalive_io_blocked():
+                        return False
                     if rt.trade_silence_exceeded(
                         silence_timeout_sec=float(self.silence_timeout_sec)
                     ):
                         rt.handle_silence_timeout()
                         self.note_disconnect()
-                        return
-                    continue
-                except Exception:  # noqa: BLE001
-                    self.note_disconnect()
-                    return
-                rt.note_trade_activity()
-                if is_ws_noise_frame(rt.exchange, raw):
-                    continue
-                rt.stash_trade_inbound(raw)
-            if self._any_socket_dead():
+                        return False
+                continue
+            except Exception:  # noqa: BLE001
                 self.note_disconnect()
+                return False
+            with self._lock:
+                if self._keepalive_io_blocked():
+                    # Already past recv: stash so place/ack can still see the frame.
+                    rt.stash_trade_inbound(raw)
+                    return False
+                rt.note_trade_activity()
+            if is_ws_noise_frame(rt.exchange, raw):
+                continue
+            rt.stash_trade_inbound(raw)
+        return True
 
     def _bind_fresh_sockets(self) -> None:
         bundle = self.socket_provider()
