@@ -226,6 +226,7 @@ composite = √(r_vol · r_atr)   # default variant = geom
 - Ветки **C** (`regime_on` поверх score) и **D** (случайный вход на частоте B) — сравнение по заранее заявленным метрикам (filters, signal rates, occupancy / `slot_busy` / `pending_skip` / `not_topn`), не по short-window PnL.
 - Occupancy identity, honest holes календаря, устойчивость rates на более длинных окнах.
 - При необходимости `K>1` как отдельный эксперимент контура — не обязательный вход в 2.5.
+- Наблюдательный **floor** (не гейт симулятора): [`gear22-floor-metric.md`](gear22-floor-metric.md) — `tf-select α25` trim-средних SMA-12 за 3h/12h. Не классификатор режима и не live-порог.
 
 ### Вне гира 2.2
 
@@ -295,7 +296,7 @@ composite = √(r_vol · r_atr)   # default variant = geom
 | 1 | **Закрыт (1.0):** `run_backtest`, гейты, профиль исполнения, фиксированный вектор, контракт симулятора, санитария, `gear1.svg` | — | Поиск параметров; скринер как замена 1.0; живой бот |
 | 1.5 | **Закрыт:** скринер более волатильных монет (Top‑N / кластер); канон score — soft short blend `α≈0.75` (`regime_ma_ratio` + heatmap/CLI); [`regime-metrics-v0.md`](regime-metrics-v0.md) | — | Max-PnL подбор порогов скринера; попарно «выше score ⇒ строго волатильнее»; живая торговля; смена канона без записи в docs; `regime_on` как оставшийся блокер закрытия |
 | 2 | **закрыт (контур; 2.2 вне scope):** [`model_gear2.ipynb`](../model_gear2.ipynb), pending-skip, A vs B по отсевам [`gear-2-close-20260825.md`](gear-2-close-20260825.md) (канон, не cells). Validator YELLOW; Critic accept-with-caveats | — | Поиск `VARIATION`; политика размера; прибыль на коротком ряде; C/D в этом close |
-| 2.2 | **следующий этап:** stricter stats / C/D / occupancy / rates | Протоколы гипотез; честные дыры; без PnL-победителя | Политика размера (2.5); поиск `VARIATION` (3); live-ready |
+| 2.2 | **следующий этап:** stricter stats / C/D / occupancy / rates; floor-формула для наблюдения — [`gear22-floor-metric.md`](gear22-floor-metric.md) | Протоколы гипотез; честные дыры; без PnL-победителя | Политика размера (2.5); поиск `VARIATION` (3); live-ready |
 | 2.5 | Константный размер в гире 2; ждёт 2.2 | Политика размера; отчёт риска; тест не смешан с подгонкой | Поиск порогов сделки; отключение исполнения; старт до 2.2 |
 | 3 | — | Поиск по эпизодам; train/test; отчёт устойчивости | Старт без 2+2.2+2.5; «победитель» без теста |
 
