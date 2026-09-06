@@ -39,6 +39,7 @@ from app.bot.private.ws_messages import (
     build_okx_private_subscribe,
     build_okx_trade_cancel,
     build_okx_trade_place,
+    new_okx_ws_id,
 )
 from app.bot.private.ws_socket import (
     PrivateWsSocket,
@@ -79,8 +80,7 @@ def new_trade_req_id(*, exchange: str) -> str:
     import uuid
 
     if exchange == "okx":
-        # ``w4`` + 24 hex = 26 chars, all alphanumeric.
-        return f"w4{uuid.uuid4().hex[:24]}"
+        return new_okx_ws_id(prefix="w4")
     return f"w4_{uuid.uuid4().hex[:24]}"
 
 
@@ -253,6 +253,7 @@ class PrivateStreamRuntime:
     subscription_readiness: SubscriptionReadiness = SubscriptionReadiness.NOT_READY
     authenticated: bool = False
     last_recv_mono_ns: Optional[int] = None
+    last_trade_recv_mono_ns: Optional[int] = None
     _last_seq: Optional[int] = None
     _seen_event_keys: set[str] = field(default_factory=set)
     _order_states: dict[str, OrderStateSnapshot] = field(default_factory=dict)
@@ -260,6 +261,9 @@ class PrivateStreamRuntime:
     _fingerprint_by_attempt: dict[str, str] = field(default_factory=dict)
     # OKX WS Place/Cancel: positive instIdCode (from instruments). Bybit unused.
     okx_inst_id_code: Optional[int] = None
+    # Keepalive may drain trade noise (pong); non-noise frames are stashed so
+    # place/ack recv cannot lose them to the supervisor thread.
+    _trade_inbound_stash: list[str] = field(default_factory=list)
 
     @property
     def sends_blocked(self) -> bool:
@@ -303,6 +307,8 @@ class PrivateStreamRuntime:
         sock = open_private_socket(url)
         sock.connect()
         self.trade_socket = sock
+        self.last_trade_recv_mono_ns = time.monotonic_ns()
+        self._trade_inbound_stash.clear()
         _safe_log("connect", exchange=self.exchange, channel="trade", gen=self.reconnect_generation)
 
     def bind_sockets(
@@ -320,6 +326,8 @@ class PrivateStreamRuntime:
         if trade is not None:
             trade.connect()
             self.trade_socket = trade
+            self.last_trade_recv_mono_ns = time.monotonic_ns()
+            self._trade_inbound_stash.clear()
 
     @classmethod
     def create_gated(
@@ -357,6 +365,7 @@ class PrivateStreamRuntime:
         self.sequence_state = SequenceHealth.RESEED_REQUIRED
         self._sends_blocked = True
         self._last_seq = None
+        self._trade_inbound_stash.clear()
         self._journal_stream_recon(
             sequence_state=SequenceHealth.RESEED_REQUIRED,
             observation_source="private_ws",
@@ -436,11 +445,47 @@ class PrivateStreamRuntime:
         self.private_socket.send_text(msg.text)
         _safe_log("heartbeat", exchange=self.exchange, gen=self.reconnect_generation)
 
+    def send_trade_heartbeat(self) -> None:
+        """Application ping on the trade socket (idle health; not private-only)."""
+        assert self.trade_socket is not None
+        msg = self.build_heartbeat()
+        self.trade_socket.send_text(msg.text)
+        # Successful send proves the trade socket is still writable; idle
+        # silence uses this so a ping-only keepalive does not false-trip.
+        self.note_trade_activity()
+        _safe_log(
+            "trade_heartbeat", exchange=self.exchange, gen=self.reconnect_generation
+        )
+
     def silence_exceeded(self, *, silence_timeout_sec: float, now_mono_ns: Optional[int] = None) -> bool:
         if self.last_recv_mono_ns is None:
             return False
         now = now_mono_ns if now_mono_ns is not None else time.monotonic_ns()
         return (now - self.last_recv_mono_ns) >= int(silence_timeout_sec * 1_000_000_000)
+
+    def trade_silence_exceeded(
+        self, *, silence_timeout_sec: float, now_mono_ns: Optional[int] = None
+    ) -> bool:
+        if self.last_trade_recv_mono_ns is None:
+            return False
+        now = now_mono_ns if now_mono_ns is not None else time.monotonic_ns()
+        return (now - self.last_trade_recv_mono_ns) >= int(
+            silence_timeout_sec * 1_000_000_000
+        )
+
+    def note_trade_activity(self) -> None:
+        self.last_trade_recv_mono_ns = time.monotonic_ns()
+
+    def stash_trade_inbound(self, text: str) -> None:
+        """Preserve a non-noise trade frame drained by keepalive for place/ack."""
+        if not isinstance(text, str):
+            raise TypeError("stash_trade_inbound requires str")
+        self._trade_inbound_stash.append(text)
+
+    def _pop_trade_inbound(self) -> Optional[str]:
+        if not self._trade_inbound_stash:
+            return None
+        return self._trade_inbound_stash.pop(0)
 
     def handle_silence_timeout(self) -> None:
         """Heartbeat/silence failure → reconnect generation + reseed block."""
@@ -717,6 +762,7 @@ class PrivateStreamRuntime:
         assert self.trade_socket is not None
         msg = self.build_trade_place(plan, req_id=req_id)
         self.trade_socket.send_text(msg.text)
+        self.note_trade_activity()
         self.register_plan_fingerprint(plan)
         _safe_log("trade_place_sent", exchange=self.exchange, gen=self.reconnect_generation)
         return msg
@@ -727,6 +773,7 @@ class PrivateStreamRuntime:
         assert self.trade_socket is not None
         msg = self.build_trade_cancel(plan, req_id=req_id)
         self.trade_socket.send_text(msg.text)
+        self.note_trade_activity()
         _safe_log("trade_cancel_sent", exchange=self.exchange, gen=self.reconnect_generation)
         return msg
 
@@ -738,6 +785,7 @@ class PrivateStreamRuntime:
         else:
             msg = build_okx_private_login(self.credentials)
         self.trade_socket.send_text(msg.text)
+        self.note_trade_activity()
         _safe_log("trade_auth_sent", exchange=self.exchange, gen=self.reconnect_generation)
         return msg
 
@@ -760,7 +808,20 @@ class PrivateStreamRuntime:
                 ack_state="accepted" if ok else "received",
                 venue_code=sanitize_venue_code(data.get("retCode")),
             )
+        event = str(data.get("event") or "")
         req = str(data.get("id") or "")
+        # Overnight canary 60033: ``{"event":"error","msg":"Parameter id error",
+        # "code":"60033"}`` has no ``id``. Treat as reject for the in-flight
+        # place. A mismatched id is some other request — keep waiting.
+        if event == "error":
+            if req and req != expect_req_id:
+                raise TimeoutError("trade ack id mismatch")
+            return TradeAckObservation(
+                req_id=req or expect_req_id,
+                accepted=False,
+                ack_state="received",
+                venue_code=sanitize_venue_code(data.get("code")),
+            )
         if req != expect_req_id:
             raise TimeoutError("trade ack id mismatch")
         code_ok = str(data.get("code", "")) == "0"
@@ -791,10 +852,15 @@ class PrivateStreamRuntime:
         deadline = time.monotonic() + float(timeout_sec)
         while time.monotonic() < deadline:
             remaining = max(0.05, deadline - time.monotonic())
-            try:
-                raw = self.trade_socket.recv_text(timeout_sec=min(1.0, remaining))
-            except TimeoutError:
-                continue
+            raw = self._pop_trade_inbound()
+            if raw is None:
+                try:
+                    raw = self.trade_socket.recv_text(
+                        timeout_sec=min(1.0, remaining)
+                    )
+                except TimeoutError:
+                    continue
+            self.note_trade_activity()
             if is_ws_noise_frame(self.exchange, raw):
                 continue
             try:

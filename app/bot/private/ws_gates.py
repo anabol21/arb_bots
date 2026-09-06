@@ -213,11 +213,79 @@ def assert_ws_w7_send_gates(env: Optional[Mapping[str, str]] = None) -> str:
     return venue
 
 
+def _trivial_opt_out(env: Mapping[str, str]) -> bool:
+    """True when the operator forced the old W6 manager onto the live path."""
+    raw = (env.get("BBOT_PRIVATE_SEND_PATH") or "trivial").strip().lower()
+    return raw in {"w6", "a", "contour_a", "manager"}
+
+
+def assert_ws_trivial_dual_leg_gates(env: Optional[Mapping[str, str]] = None) -> str:
+    """Default live-manager send: VENUE=live + LIVE_ORDERS=1. No W6 flag.
+
+    Does not require ``BBOT_PRIVATE_W6=1``. Refuses when the operator
+    selected ``BBOT_PRIVATE_SEND_PATH=w6`` (use ``assert_ws_w6_send_gates``).
+    Never opens a socket by itself.
+    """
+    if env is None:
+        raise WsProfileGateError("trivial dual-leg requires an explicit env mapping")
+    if _trivial_opt_out(env):
+        raise WsProfileGateError(
+            "trivial dual-leg refuses BBOT_PRIVATE_SEND_PATH=w6; "
+            "use W6 gates for the opt-in manager path"
+        )
+    try:
+        venue = resolve_venue(env)
+    except ValueError as exc:
+        raise WsProfileGateError(str(exc)) from exc
+    if venue != "live":
+        raise WsProfileGateError(f"trivial dual-leg refuses VENUE={venue!r}; require live")
+    if not live_orders_enabled(env):
+        raise WsProfileGateError("trivial dual-leg requires LIVE_ORDERS=1")
+    profile = resolve_private_profile(env)
+    if profile.name != "live":
+        raise WsProfileGateError(
+            f"trivial dual-leg refuses credential profile {profile.name!r}; require live"
+        )
+    if not profile.live_orders_flag:
+        raise WsProfileGateError("trivial dual-leg requires live profile LIVE_ORDERS flag")
+    return venue
+
+
+def assert_ws_warm_private_gates(env: Optional[Mapping[str, str]] = None) -> str:
+    """Warm private WS at private-live startup: VENUE=live + LIVE_ORDERS=1.
+
+    Connects only when ``start_warm_private_session`` (or equivalent) is called
+    explicitly — ``LIVE_ORDERS=1`` alone never opens a socket. No separate
+    warm opt-in flag; private sockets are on by default once the warm
+    supervisor is started for a private-live unit.
+    """
+    if env is None:
+        raise WsProfileGateError("warm private WS requires an explicit env mapping")
+    try:
+        venue = resolve_venue(env)
+    except ValueError as exc:
+        raise WsProfileGateError(str(exc)) from exc
+    if venue != "live":
+        raise WsProfileGateError(f"warm private refuses VENUE={venue!r}; require live")
+    if not live_orders_enabled(env):
+        raise WsProfileGateError("warm private requires LIVE_ORDERS=1")
+    profile = resolve_private_profile(env)
+    if profile.name != "live":
+        raise WsProfileGateError(
+            f"warm private refuses credential profile {profile.name!r}; require live"
+        )
+    if not profile.live_orders_flag:
+        raise WsProfileGateError("warm private requires live profile LIVE_ORDERS flag")
+    return venue
+
+
 def is_live_send_ws_profile_gate(gate: object) -> bool:
-    """True for W4/W5/W6/W7 send gates (call with env only; no environment= kwarg)."""
+    """True for W4/W5/W6/W7/warm/trivial send gates (call with env only; no environment= kwarg)."""
     return (
         gate is assert_ws_w4_send_gates
         or gate is assert_ws_w5_send_gates
         or gate is assert_ws_w6_send_gates
         or gate is assert_ws_w7_send_gates
+        or gate is assert_ws_warm_private_gates
+        or gate is assert_ws_trivial_dual_leg_gates
     )

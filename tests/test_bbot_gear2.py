@@ -25,6 +25,13 @@ from app.policy.trade_manager import (
 )
 from validation.check_bbot_gear2 import check_gear2_journal
 
+try:
+    import websockets  # noqa: F401
+
+    _HAS_WEBSOCKETS = True
+except ImportError:
+    _HAS_WEBSOCKETS = False
+
 
 def _tick(*, coin_unused: str = "BTC", **kwargs: object) -> TickView:
     spread_long = float(kwargs.get("spread_long", 0.0))  # type: ignore[arg-type]
@@ -269,6 +276,7 @@ class Gear2BrokerTests(unittest.TestCase):
         self.assertFalse(restarted.can_open())
 
 
+@unittest.skipUnless(_HAS_WEBSOCKETS, "runtime import needs websockets (pre-existing env gap)")
 class Gear2RuntimeProfileTests(unittest.TestCase):
     def test_runtime_defaults(self) -> None:
         tmp = Path(tempfile.mkdtemp())

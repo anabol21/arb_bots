@@ -53,6 +53,19 @@ Runtime Storage позже копирует эти пути только в **н
 
 Спека профиля: [`b-bot-gear2-contour.md`](b-bot-gear2-contour.md).
 
+Отдельный canary WAL/EDEN (не пишет в `/data/bbot` и не в `/data/bbot-gear2`;
+unit **не** enable/start с этим патчем; gear2 остаётся stopped):
+
+| Роль | Значение |
+|------|----------|
+| Unit (шаблон) | `spread-bbot-canary-wal-eden.service` |
+| Log | `/var/log/spread/bbot-canary-wal-eden.log` |
+| Data | `/data/bbot-canary-wal-eden/{journal,state,.tmp}` |
+| Coins / sockets | WAL, EDEN (4 public L1) |
+| Профиль | `BBOT_PROFILE=canary_wal_eden`, notional 10 |
+
+Спека: [`canary-wal-eden-contour.md`](canary-wal-eden-contour.md).
+
 Каталог `/var/log/spread` общий с D — ок; имя файла лога бота должно отличаться
 (`bbot.log`, не `runtime.log`).
 

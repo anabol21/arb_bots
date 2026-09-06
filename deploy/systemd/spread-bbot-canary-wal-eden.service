@@ -1,0 +1,50 @@
+# Isolated WAL/EDEN canary unit (Contour B live send path).
+# Do not install, enable, or start on VPS by creating this file in the repo.
+# Do not overwrite collector / D storage units, spread-bbot.service, or
+# spread-bbot-gear2.service. Gear2 stays stopped.
+# Paths are canary-only (/data/bbot-canary-wal-eden), never D trees, never
+# /data/bbot or /data/bbot-gear2.
+#
+# Live secrets / VENUE / LIVE_ORDERS stay in a mode-600 env file outside git.
+# Without that file the process fails closed (private_live requires live gate).
+
+[Unit]
+Description=Spread B-bot WAL/EDEN canary (isolated; Contour B)
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=300
+StartLimitBurst=5
+# Do NOT After= or BindsTo= spread-collector or spread-bbot-gear2
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/root/spread_staging
+Environment=BBOT_DATA_ROOT=/data/bbot-canary-wal-eden
+Environment=BBOT_LOG_PATH=/var/log/spread/bbot-canary-wal-eden.log
+Environment=BBOT_COINS=WAL,EDEN
+Environment=BBOT_MODE=policy
+Environment=BBOT_PROFILE=canary_wal_eden
+Environment=BBOT_BROKER=private_live
+Environment=BBOT_NOTIONAL_USDT=10
+Environment=BBOT_TRADE_LAT_MS=100
+# Default send is Contour B (queue→ws.send). Do not set BBOT_PRIVATE_SEND_PATH=w6.
+# EnvironmentFile supplies VENUE=live, LIVE_ORDERS=1, keys — not committed.
+EnvironmentFile=-/etc/spread/bbot-canary-wal-eden.env
+# NO SPREAD_* vars, NO BACKUP_RCLONE_PATH=spread-compacted, NO API keys in this unit
+ExecStart=/root/venv/bin/python -m app.bot
+Restart=always
+RestartSec=5
+KillSignal=SIGTERM
+TimeoutStopSec=30
+StandardOutput=append:/var/log/spread/bbot-canary-wal-eden.log
+StandardError=append:/var/log/spread/bbot-canary-wal-eden.log
+MemoryMax=256M
+CPUQuota=20%
+LimitNOFILE=4096
+Nice=10
+ReadWritePaths=/data/bbot-canary-wal-eden /var/log/spread
+InaccessiblePaths=/data/live /data/bars /data/compacted /data/spool /data/bbot /data/bbot-gear2
+
+[Install]
+WantedBy=multi-user.target

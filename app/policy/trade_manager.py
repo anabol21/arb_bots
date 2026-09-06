@@ -58,6 +58,38 @@ GEAR2_WOULD_SEND_VARIATION: dict[str, float] = {
 
 GEAR2_WOULD_SEND_COINS = ("BTC", "ETH", "SOL", "XRP")
 
+# Existing live-size contour (not the four-coin would_send stub list).
+# Canary does not replace this allowlist.
+LIVE_SIZE_COINS = ("SOL", "XRP")
+
+# Isolated WAL/EDEN canary (Track 3). Same elif / gate class as gear2_would_send;
+# variation is 0.1 / 0.7, not gear2's 0.02. Not the frozen gear-1.0 vector.
+CANARY_WAL_EDEN_VARIATION: dict[str, float] = {
+    "thresh_open_long": 0.1,
+    "thresh_open_short": 0.1,
+    "thresh_close_long": 0.1,
+    "thresh_close_short": 0.1,
+    "open_frac": 0.7,
+    "close_frac": 0.7,
+}
+
+CANARY_WAL_EDEN_COINS = ("WAL", "EDEN")
+
+CANARY_WAL_EDEN_HYPER: dict[str, object] = {
+    "max_freshness_ms": None,
+    "max_latency_okx_ms": 54.0,
+    "max_latency_bybit_ms": 35.0,
+    "avg_window_sec": 10.0,
+    "Trade_Lat": 100,
+    "Check_volume": False,
+    "Check_l1_depth": True,
+    "position_size": 10.0,
+    "position_frac": 1.0,
+    "fee_rate": 0.00075,
+    "k": 1,
+    "regime_topn": None,
+}
+
 # Gear-2 close HYPER shape with slice p95 latency from gear-2-close-20260825.md.
 # avg_window_sec=10 matches model_gear2 / close doc, not live gear1 (2s).
 GEAR2_WOULD_SEND_HYPER: dict[str, object] = {
@@ -67,6 +99,7 @@ GEAR2_WOULD_SEND_HYPER: dict[str, object] = {
     "avg_window_sec": 10.0,
     "Trade_Lat": 100,
     "Check_volume": False,
+    "Check_l1_depth": False,
     "position_size": 10.0,
     "position_frac": 1.0,
     "fee_rate": 0.00075,
@@ -75,25 +108,63 @@ GEAR2_WOULD_SEND_HYPER: dict[str, object] = {
 }
 
 
-def variation_for_profile(profile: str) -> dict[str, float]:
-    """Return VARIATION for ``gear1``, ``signal_test``, or ``gear2_would_send``."""
+def _norm_profile(profile: str) -> str:
     name = (profile or "gear1").strip().lower()
-    if name in ("gear1", "default", ""):
+    if name == "default":
+        return "gear1"
+    if name == "gear2":
+        return "gear2_would_send"
+    if name == "canary":
+        return "canary_wal_eden"
+    return name
+
+
+def uses_gear2_market_manager(profile: str) -> bool:
+    """True for gear2_would_send and the WAL/EDEN canary (shared elif chain)."""
+    return _norm_profile(profile) in {"gear2_would_send", "canary_wal_eden"}
+
+
+def live_size_coins_for_profile(profile: str) -> tuple[str, ...]:
+    """LIVE_SIZE-style allowlist for a live contour.
+
+    ``gear2_would_send`` / default live-size: SOL, XRP.
+    Canary: WAL, EDEN only (does not inherit SOL/XRP).
+    """
+    name = _norm_profile(profile)
+    if name == "canary_wal_eden":
+        return CANARY_WAL_EDEN_COINS
+    return LIVE_SIZE_COINS
+
+
+def live_size_coin_allowed(coin: str, profile: str) -> bool:
+    """Whether ``coin`` may be used on the LIVE_SIZE-style contour for ``profile``."""
+    return str(coin).strip().upper() in live_size_coins_for_profile(profile)
+
+
+def variation_for_profile(profile: str) -> dict[str, float]:
+    """Return VARIATION for ``gear1``, ``signal_test``, ``gear2_would_send``, or canary."""
+    name = _norm_profile(profile)
+    if name in ("gear1", ""):
         return dict(DEFAULT_VARIATION)
     if name == "signal_test":
         return dict(SIGNAL_TEST_VARIATION)
-    if name in ("gear2_would_send", "gear2"):
+    if name == "gear2_would_send":
         return dict(GEAR2_WOULD_SEND_VARIATION)
+    if name == "canary_wal_eden":
+        return dict(CANARY_WAL_EDEN_VARIATION)
     raise ValueError(
-        f"unknown BBOT_PROFILE {profile!r}; expected gear1|signal_test|gear2_would_send"
+        f"unknown BBOT_PROFILE {profile!r}; expected "
+        "gear1|signal_test|gear2_would_send|canary_wal_eden"
     )
 
 
 def hyper_for_profile(profile: str) -> dict[str, object]:
     """Return HYPER for the live profile. Frozen gear1 stays DEFAULT_HYPER."""
-    name = (profile or "gear1").strip().lower()
-    if name in ("gear2_would_send", "gear2"):
+    name = _norm_profile(profile)
+    if name == "gear2_would_send":
         return dict(GEAR2_WOULD_SEND_HYPER)
+    if name == "canary_wal_eden":
+        return dict(CANARY_WAL_EDEN_HYPER)
     return dict(DEFAULT_HYPER)
 
 # Frozen HYPER. Latency caps = pooled p95 of trigger-leg delivery on the
@@ -163,6 +234,58 @@ def _book_cols_for(side: Side, *, is_open: bool) -> tuple[str, str]:
     if side == "long":
         return "okx_bid_size", "bybit_ask_size"
     return "okx_ask_size", "bybit_bid_size"
+
+
+_SIZE_TO_PRICE = {
+    "okx_ask_size": "okx_ask",
+    "okx_bid_size": "okx_bid",
+    "bybit_ask_size": "bybit_ask",
+    "bybit_bid_size": "bybit_bid",
+}
+
+
+def planned_coin_qty(notional_usdt: float, exec_price: Optional[float]) -> Optional[float]:
+    """Coin qty for one leg: notional / execution price. None if price unusable."""
+    if exec_price is None or exec_price != exec_price or float(exec_price) <= 0:
+        return None
+    return float(notional_usdt) / float(exec_price)
+
+
+def l1_depth_covers_planned(
+    size: Optional[float],
+    planned_qty: Optional[float],
+) -> bool:
+    """True iff L1 size is present and covers planned coin qty. Missing → closed."""
+    if size is None or planned_qty is None:
+        return False
+    if size != size or planned_qty != planned_qty:
+        return False
+    return float(size) >= float(planned_qty)
+
+
+def _gate_l1_depth_ok(
+    tick: TickView,
+    side: Side,
+    *,
+    is_open: bool,
+    check_l1_depth: bool,
+    notional_usdt: float,
+) -> bool:
+    """Pre-signal L1 depth gate: buy→ask size, sell→bid size vs planned qty.
+
+    Owned by the policy manager (same class as thresh / frac / avg_window).
+    Not a post-intent broker check and not ``app.bot.sizing``.
+    """
+    if not check_l1_depth:
+        return True
+    c_okx, c_bybit = _book_cols_for(side, is_open=is_open)
+    for size_col in (c_okx, c_bybit):
+        size = getattr(tick, size_col)
+        price = getattr(tick, _SIZE_TO_PRICE[size_col])
+        planned = planned_coin_qty(notional_usdt, price)
+        if not l1_depth_covers_planned(size, planned):
+            return False
+    return True
 
 
 def _resolve_spreads(tick: TickView) -> tuple[Optional[float], Optional[float]]:
@@ -288,6 +411,16 @@ def _pass_gates(
         position_size=position_size,
     ):
         return Intent("flat", "gate_volume")
+
+    check_l1_depth = bool(hyper.get("Check_l1_depth", False))
+    if not _gate_l1_depth_ok(
+        tick,
+        side,
+        is_open=is_open,
+        check_l1_depth=check_l1_depth,
+        notional_usdt=position_size,
+    ):
+        return Intent("flat", "gate_l1_depth")
     return None
 
 

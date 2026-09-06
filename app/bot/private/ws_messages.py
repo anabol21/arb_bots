@@ -10,12 +10,78 @@ import base64
 import hashlib
 import hmac
 import json
+import re
 import time
+import uuid
 from dataclasses import dataclass
 from typing import Any, Mapping, Optional, Sequence
 
 from app.bot.private.order_plan import OrderPlan, OrderPlanError
 from app.bot.private.order_sign import LiveCredentials
+
+# OKX trade WS ``id`` (place/cancel): case-sensitive alphanumerics, ≤32.
+# Underscore is illegal — live 60033 "Parameter id error" on Contour B
+# (2026-09-05, ``id`` = new_opaque_id("req")[:32] = ``req_<hex>``).
+OKX_WS_ID_MAX_LEN = 32
+OKX_WS_ID_ERROR_CODE = "60033"
+OKX_WS_ID_ERROR_MSG = "Parameter id error"
+OKX_WS_ID_PARAMETER = "id"
+_OKX_WS_ID_RE = re.compile(r"^[A-Za-z0-9]{1,32}$")
+
+
+class OkxWsIdError(ValueError):
+    """Local charset check matching OKX trade WS ``60033`` / Parameter id error."""
+
+    code = OKX_WS_ID_ERROR_CODE
+    msg = OKX_WS_ID_ERROR_MSG
+    parameter = OKX_WS_ID_PARAMETER
+
+    def __init__(self, req_id: object, *, reason: str) -> None:
+        self.req_id = req_id
+        self.reason = reason
+        super().__init__(
+            f"OKX WS {self.parameter} error ({self.code}): {self.msg} ({reason})"
+        )
+
+
+def okx_ws_id_is_legal(req_id: object) -> bool:
+    return isinstance(req_id, str) and bool(_OKX_WS_ID_RE.fullmatch(req_id))
+
+
+def assert_okx_ws_message_id(req_id: object) -> str:
+    """Raise ``OkxWsIdError`` (60033 semantics) if ``id`` is not OKX-legal."""
+    if not isinstance(req_id, str) or not req_id:
+        raise OkxWsIdError(req_id, reason="empty or not a string")
+    if not req_id.isascii() or not req_id.isalnum():
+        raise OkxWsIdError(
+            req_id, reason="must be alphanumeric letters/numbers only (no underscore)"
+        )
+    if len(req_id) > OKX_WS_ID_MAX_LEN:
+        raise OkxWsIdError(
+            req_id, reason=f"length {len(req_id)} > {OKX_WS_ID_MAX_LEN}"
+        )
+    return req_id
+
+
+def sanitize_okx_ws_id(req_id: object) -> str:
+    """Strip non-alnum, truncate to 32. Fail-closed if nothing remains."""
+    raw = "" if req_id is None else str(req_id)
+    cleaned = "".join(ch for ch in raw if ch.isascii() and ch.isalnum())
+    if not cleaned:
+        raise OkxWsIdError(req_id, reason="empty after stripping non-alnum")
+    return assert_okx_ws_message_id(cleaned[:OKX_WS_ID_MAX_LEN])
+
+
+def new_okx_ws_id(*, prefix: str = "req") -> str:
+    """Generate an OKX-legal trade WS ``id`` (no underscore)."""
+    cleaned_prefix = "".join(
+        ch for ch in str(prefix) if ch.isascii() and ch.isalnum()
+    ) or "req"
+    room = OKX_WS_ID_MAX_LEN - len(cleaned_prefix)
+    if room < 8:
+        cleaned_prefix = cleaned_prefix[: OKX_WS_ID_MAX_LEN - 8]
+        room = OKX_WS_ID_MAX_LEN - len(cleaned_prefix)
+    return assert_okx_ws_message_id(f"{cleaned_prefix}{uuid.uuid4().hex[:room]}")
 
 
 @dataclass(frozen=True)
@@ -291,7 +357,8 @@ def build_okx_trade_place(
         args_obj["px"] = plan.price
     if plan.reduce_only:
         args_obj["reduceOnly"] = True
-    frame = {"id": req_id, "op": "order", "args": [args_obj]}
+    # Frame-boundary sanitize: journal ``prefix_hex`` ids stay unchanged elsewhere.
+    frame = {"id": sanitize_okx_ws_id(req_id), "op": "order", "args": [args_obj]}
     return WsOutboundMessage(
         venue="okx_live",
         channel="trade",
@@ -316,7 +383,11 @@ def build_okx_trade_cancel(
         "instIdCode": code,
         "clOrdId": plan.order_attempt_id.replace("_", "")[:32],
     }
-    frame = {"id": req_id, "op": "cancel-order", "args": [args_obj]}
+    frame = {
+        "id": sanitize_okx_ws_id(req_id),
+        "op": "cancel-order",
+        "args": [args_obj],
+    }
     return WsOutboundMessage(
         venue="okx_live",
         channel="trade",

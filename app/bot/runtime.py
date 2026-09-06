@@ -85,6 +85,7 @@ def _try_load_policy():
     try:
         from app.policy.trade_manager import (
             BotState,
+            CANARY_WAL_EDEN_COINS,
             DEFAULT_HYPER,
             DEFAULT_VARIATION,
             GEAR2_WOULD_SEND_COINS,
@@ -92,7 +93,9 @@ def _try_load_policy():
             TickView,
             decide,
             hyper_for_profile,
+            live_size_coin_allowed,
             update_causal_ma,
+            uses_gear2_market_manager,
             variation_for_profile,
         )
         from app.policy.features import CausalMaWindow
@@ -112,6 +115,9 @@ def _try_load_policy():
             "hyper_for_profile": hyper_for_profile,
             "SIGNAL_TEST_COINS": SIGNAL_TEST_COINS,
             "GEAR2_WOULD_SEND_COINS": GEAR2_WOULD_SEND_COINS,
+            "CANARY_WAL_EDEN_COINS": CANARY_WAL_EDEN_COINS,
+            "uses_gear2_market_manager": uses_gear2_market_manager,
+            "live_size_coin_allowed": live_size_coin_allowed,
         }
     except Exception:
         return None
@@ -158,26 +164,47 @@ class BotRuntime:
             "default",
             "gear2_would_send",
             "gear2",
+            "canary_wal_eden",
+            "canary",
         ):
             raise ValueError(
-                f"BBOT_PROFILE must be gear1|signal_test|gear2_would_send, got {self.profile!r}"
+                f"BBOT_PROFILE must be gear1|signal_test|gear2_would_send|"
+                f"canary_wal_eden, got {self.profile!r}"
             )
         if self.profile == "default":
             self.profile = "gear1"
         if self.profile == "gear2":
             self.profile = "gear2_would_send"
+        if self.profile == "canary":
+            self.profile = "canary_wal_eden"
         coins_raw = (os.environ.get("BBOT_COINS") or "").strip()
         if not coins_raw:
             if self.mode == "policy" and self.profile == "signal_test":
                 coins_raw = "BTC,ETH,LA,DOGE"
             elif self.mode == "policy" and self.profile == "gear2_would_send":
                 coins_raw = "BTC,ETH,SOL,XRP"
+            elif self.mode == "policy" and self.profile == "canary_wal_eden":
+                coins_raw = "WAL,EDEN"
             else:
                 coins_raw = "BTC,ETH"
         self.coins = parse_coins(coins_raw)
         if not self.coins:
             raise RuntimeError("BBOT_COINS empty after is_crypto filter")
-        self.notional = float(os.environ.get("BBOT_NOTIONAL_USDT") or "100")
+        if self.profile == "canary_wal_eden":
+            from app.policy.trade_manager import live_size_coin_allowed
+
+            bad = [c for c in self.coins if not live_size_coin_allowed(c, self.profile)]
+            if bad:
+                raise ValueError(
+                    f"canary_wal_eden refuses coins {bad}; allowed WAL,EDEN"
+                )
+        notional_raw = (os.environ.get("BBOT_NOTIONAL_USDT") or "").strip()
+        if notional_raw:
+            self.notional = float(notional_raw)
+        elif self.profile == "canary_wal_eden":
+            self.notional = 10.0
+        else:
+            self.notional = 100.0
         self.trade_lat_ms = int(os.environ.get("BBOT_TRADE_LAT_MS") or "100")
         self.data_root = resolve_data_root()
         self.log_path = resolve_log_path(self.data_root)
@@ -201,6 +228,9 @@ class BotRuntime:
         if self.policy is not None:
             self.variation = self.policy["variation_for_profile"](self.profile)
             self.hyper = self.policy["hyper_for_profile"](self.profile)
+            if self.profile == "canary_wal_eden" and self.hyper is not None:
+                # Gate planned qty must match the broker notional ($10/leg).
+                self.hyper["position_size"] = float(self.notional)
         self.ma_windows: dict[str, Any] = {}
         if self.policy is not None:
             CausalMaWindow = self.policy["CausalMaWindow"]
@@ -208,7 +238,7 @@ class BotRuntime:
             for c in self.coins:
                 self.ma_windows[c] = CausalMaWindow(avg_window_sec=avg_sec)
         self.market_state: Any = None
-        if self.policy is not None and self.profile == "gear2_would_send":
+        if self.policy is not None and self._uses_market_manager():
             MarketState = self.policy["MarketState"]
             pos = self.broker.position
             position_side = None
@@ -237,6 +267,25 @@ class BotRuntime:
         self._ma_cache: dict[str, tuple[Optional[float], Optional[float]]] = {
             c: (None, None) for c in self.coins
         }
+        self._private_warm: Any = None
+        self._l1_ring_warned = False
+
+    def _uses_market_manager(self) -> bool:
+        if self.policy is not None:
+            fn = self.policy.get("uses_gear2_market_manager")
+            if fn is not None:
+                return bool(fn(self.profile))
+        return self.profile in ("gear2_would_send", "canary_wal_eden")
+
+    def start_private_warm_if_live_send(self, **overrides: Any) -> Any:
+        """Warm private WS before the signal loop when live private send is armed.
+
+        ON BY DEFAULT for ``VENUE=live`` + ``LIVE_ORDERS=1`` (no opt-in flag).
+        Stub / would_send units leave LIVE_ORDERS off and get ``None``.
+        """
+        from app.bot.private.ws_warm_session import start_warm_private_for_bot_process
+
+        return start_warm_private_for_bot_process(**overrides)
 
     def _meta(self, coin: str) -> InstrumentMeta:
         if coin not in self.universe:
@@ -266,9 +315,25 @@ class BotRuntime:
             self.gate.note_disconnect(base_coin, exchange)
             self.log.info(f"ws_cancelled | coin={base_coin} | exchange={exchange}")
 
+    def _maybe_record_l1(self, base_coin: str, exchange: str, book: dict[str, Any]) -> None:
+        """Cheap public-book ring append. Before coalesce so intermediate ticks stay."""
+        try:
+            from app.bot.private.l1_tick_ring import record_public_l1
+
+            record_public_l1(
+                coin=base_coin,
+                venue=exchange,
+                book=book,
+                profile=self.profile,
+            )
+        except Exception:  # noqa: BLE001 — never stall the public book path
+            if not getattr(self, "_l1_ring_warned", False):
+                self._l1_ring_warned = True
+                self.log.warning("l1_ring_append_failed | coin=%s | exchange=%s", base_coin, exchange)
+
     def _on_book(self, base_coin: str, exchange: str, book: dict[str, Any]) -> None:
         """Coalesce: one in-flight handler per coin; dirty flag drains one more run."""
-        _ = book  # store already updated in-place by ws_books
+        self._maybe_record_l1(base_coin, exchange, book)
         coin = base_coin.upper()
         self._book_last_exchange[coin] = exchange
         if self._book_inflight.get(coin):
@@ -344,7 +409,7 @@ class BotRuntime:
                 if self.mode == "probe" and self.probe_intent_placed:
                     self.probe_done = True
                 return
-            if self.mode == "policy" and self.profile == "gear2_would_send":
+            if self.mode == "policy" and self._uses_market_manager():
                 self._policy_maybe_act(
                     base_coin=base_coin,
                     event_local_ts_ms=event_local_ts_ms,
@@ -481,7 +546,7 @@ class BotRuntime:
                     "refusing opens"
                 )
             return
-        if self.broker.has_pending() and self.profile != "gear2_would_send":
+        if self.broker.has_pending() and not self._uses_market_manager():
             return
 
         TickView = self.policy["TickView"]
@@ -560,9 +625,12 @@ class BotRuntime:
             "max_latency_okx_ms": hyper.get("max_latency_okx_ms"),
             "max_latency_bybit_ms": hyper.get("max_latency_bybit_ms"),
         }
-        if self.profile == "gear2_would_send":
+        if self._uses_market_manager():
             extra["gear2_arm"] = "A"
             extra["k_policy"] = 1
+        if self.profile == "canary_wal_eden":
+            extra["canary_contour"] = "wal_eden"
+            extra["check_l1_depth"] = True
         if self.variation is not None:
             extra["thresh_open_long"] = self.variation["thresh_open_long"]
             extra["thresh_open_short"] = self.variation["thresh_open_short"]
@@ -571,7 +639,7 @@ class BotRuntime:
             extra["open_frac"] = self.variation["open_frac"]
             extra["close_frac"] = self.variation["close_frac"]
 
-        if self.profile == "gear2_would_send":
+        if self._uses_market_manager():
             self._gear2_maybe_act(
                 base_coin=base_coin,
                 event_local_ts_ms=event_local_ts_ms,
@@ -780,6 +848,28 @@ class BotRuntime:
                 "policy_missing | continuing WS-only; will not open intents"
             )
 
+        # Private WS: process-lifetime like public L1 when live private send is on.
+        try:
+            self._private_warm = self.start_private_warm_if_live_send(
+                stop_event=self.stop_event
+            )
+        except Exception as exc:
+            self.log.error(
+                "private_warm_failed | err=%s | refusing cold signal loop",
+                type(exc).__name__,
+            )
+            raise
+        if self._private_warm is not None:
+            self.log.info(
+                "private_warm_started | run_id=%s | ready=%s | handshake_count=%s | keepalive=%s",
+                self._private_warm.run_id,
+                self._private_warm.is_ready(),
+                self._private_warm._handshake_count,  # noqa: SLF001
+                self._private_warm.keepalive_running,
+            )
+        else:
+            self.log.info("private_warm_skipped | live_private_send=false")
+
         tasks: list[asyncio.Task] = [asyncio.create_task(self._heartbeat())]
         for coin in self.coins:
             meta = self._meta(coin)
@@ -818,6 +908,11 @@ class BotRuntime:
         except asyncio.CancelledError:
             self.stop_event.set()
             raise
+        finally:
+            from app.bot.private.ws_warm_session import clear_process_warm_session
+
+            clear_process_warm_session(stop=True)
+            self._private_warm = None
 
 
 def main() -> int:

@@ -582,6 +582,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
         return main_ws_w6_dual_leg(argv)
 
+    if "--ws-warm-session" in argv:
+        from app.bot.private.ws_w6_dual_leg import main_ws_warm_session
+
+        return main_ws_warm_session(argv)
+
     if "--ws-w7-parallel-dual-leg" in argv:
         from app.bot.private.ws_w7_parallel_dual_leg import main_ws_w7_parallel_dual_leg
 
