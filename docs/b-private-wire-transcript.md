@@ -67,6 +67,12 @@ Strip or replace: API keys, secrets, passphrases, signatures
 Keep for chronometry and correlation: `op`, `reqId`/`id`, `orderLinkId`,
 `clOrdId`, symbol, side, qty, retCode/code, and venue fill timestamps.
 
+Overnight canary (2026-09-05, EDEN intent `653fc03f-…`): OKX inbound
+`{"event":"error","msg":"Parameter id error","code":"60033"}` on outbound
+`"id":"req_c08a00f2…"`. Cause is the message `id` underscore from
+`new_opaque_id("req")`, not `clOrdId`. Fixed at the OKX frame boundary
+(`sanitize_okx_ws_id` / `assert_okx_ws_message_id` in `ws_messages.py`).
+
 ## Derive the AB intervals (offline)
 
 Join outbound place rows (`dir=out`, trade socket, `op` in
@@ -81,10 +87,14 @@ stream).
 | `fill_delivery` | `in.wall_ms − in.venue_ts_ms` when the inbound fill carries Bybit `execTime` or OKX `fillTime` / `uTime` (also stored as `fill_delivery_ms` on that row) |
 
 Fills appear on the private stream after send. Contour B does **not** wait
-for them; read the transcript (or `wire_in` lines) once they arrive.
+for them before marking position; it waits only for trade-socket **ACK**
+(accept/reject/timeout). Read fill rows in the transcript (or `wire_in`)
+once they arrive. The canary dashboard
+([`canary-trade-chronometry.md`](canary-trade-chronometry.md)) reads these
+rows after dual ACK; it does not add a fill-wait on send.
 
 ## Tests
 
 ```bash
-PYTHONPATH=. python3 -m unittest tests.test_wire_transcript tests.test_trivial_dual_leg tests.test_canary_wal_eden tests.test_bbot_gear2 -v
+PYTHONPATH=. python3 -m unittest tests.test_okx_ws_message_id tests.test_wire_transcript tests.test_trivial_dual_leg tests.test_dual_leg_ack tests.test_canary_wal_eden tests.test_bbot_gear2 -v
 ```
