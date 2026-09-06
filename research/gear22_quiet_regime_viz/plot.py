@@ -23,15 +23,24 @@ from research.gear22_quiet_regime_viz.candles import (
     SPREAD_SHORT_COL,
     align_inspect_customdata,
     build_bar_inspect_payloads,
+    causal_sma,
     downsample_ticks,
 )
 from research.gear22_quiet_regime_viz.gaps import gaps_to_vrect_datetimes
+from research.gear22_quiet_regime_viz.floors import (
+    FLOOR_PANEL_STYLES,
+    INNER_BAND_EDGE,
+    INNER_BAND_FILL,
+    OUTER_BAND_EDGE,
+    SMA3_NAME,
+    TF_SELECT_25_NAME,
+    compute_chosen_floor,
+)
 from research.gear22_quiet_regime_viz.metrics_ext import (
     MetricTrace,
-    collect_extension_traces,
     extension_help_html,
 )
-from research.gear22_quiet_regime_viz.quantiles import TW_QUANTILE_NAMES
+from research.gear22_quiet_regime_viz.quantiles import TW_ROW6_NAMES
 
 # Match app.policy.features / gear2 open_long vs open_short.
 SPREAD_LONG_LABEL = (
@@ -60,6 +69,7 @@ PANEL_ROW = {
     "mean_std": 4,
     "range_iqr": 5,
     "tw_quantiles": 6,
+    "floor": 0,  # standalone figure, not a 6-row extra
     # Back-compat aliases from the first revision.
     "edge": 1,
     "mid": 0,  # mid is a separate figure
@@ -162,23 +172,28 @@ def build_spread_block_figure(
     latency_bins: int = DEFAULT_LATENCY_BINS,
     latency_temporal_bins: int = DEFAULT_LATENCY_TEMPORAL_BINS,
 ) -> go.Figure:
-    """One long or short stack: candles → stats → TW quantiles."""
+    """One long or short stack: candles → stats → TW quantiles (6 rows)."""
     title_prefix = f"{coin} · {side.upper()}"
+    titles = (
+        f"{title_prefix}: {side_label} — 5m candles + causal MAs + sparse ticks"
+        " (click candle → in-bar inspect)",
+        f"{title_prefix}: tick count (hover: update_rate_hz)",
+        f"{title_prefix}: gap_fraction (extent to bucket edges — not inter-tick holes)",
+        f"{title_prefix}: mean ± std (equal-weight ticks / 5m)",
+        f"{title_prefix}: min / max / IQR (q25–q75, equal-weight)",
+        f"{title_prefix}: time-weighted p25 / p50 / p95 / p99 (hold→next; last→bar end)",
+    )
+    row_heights = [0.30, 0.12, 0.12, 0.14, 0.14, 0.18]
+    n_rows = 6
+    fig_height = 1180
+    vspace = 0.028
     fig = make_subplots(
-        rows=6,
+        rows=n_rows,
         cols=1,
         shared_xaxes=True,
-        vertical_spacing=0.028,
-        row_heights=[0.30, 0.12, 0.12, 0.14, 0.14, 0.18],
-        subplot_titles=(
-            f"{title_prefix}: {side_label} — 5m candles + causal MAs + sparse ticks"
-            " (click candle → in-bar inspect)",
-            f"{title_prefix}: tick count (hover: update_rate_hz)",
-            f"{title_prefix}: gap_fraction (extent to bucket edges — not inter-tick holes)",
-            f"{title_prefix}: mean ± std (equal-weight ticks / 5m)",
-            f"{title_prefix}: min / max / IQR (q25–q75, equal-weight)",
-            f"{title_prefix}: time-weighted p25 / p50 / p95 / p99 (hold→next; last→bar end)",
-        ),
+        vertical_spacing=vspace,
+        row_heights=row_heights,
+        subplot_titles=titles,
     )
 
     has_ohlc = buckets["tick_count"].fillna(0).astype(int) > 0
@@ -350,7 +365,7 @@ def build_spread_block_figure(
             col=1,
         )
 
-    for name in TW_QUANTILE_NAMES:
+    for name in TW_ROW6_NAMES:
         if name not in buckets.columns:
             continue
         fig.add_trace(
@@ -386,36 +401,275 @@ def build_spread_block_figure(
         panel = tr.panel
         if panel.startswith(side_key):
             panel = panel[len(side_key) :]
+        elif panel.startswith("long_") or panel.startswith("short_"):
+            continue
         elif panel not in PANEL_ROW:
             continue
         row = PANEL_ROW.get(panel)
         if row is None or row < 1:
             continue
+        if row > n_rows:
+            continue
+        scatter_kw: dict[str, Any] = dict(
+            x=list(tr.x),
+            y=list(tr.y),
+            mode=tr.mode,
+            name=tr.name,
+            line=dict(**tr.line) if tr.line else None,
+            connectgaps=False,
+            showlegend=tr.showlegend,
+        )
+        if tr.legendgroup:
+            scatter_kw["legendgroup"] = tr.legendgroup
         fig.add_trace(
-            go.Scatter(
-                x=list(tr.x),
-                y=list(tr.y),
-                mode=tr.mode,
-                name=tr.name,
-                line=dict(**tr.line) if tr.line else None,
-            ),
+            go.Scatter(**scatter_kw),
             row=row,
             col=1,
         )
 
     fig.update_layout(
         template="plotly_white",
-        height=1180,
+        height=fig_height,
         legend=dict(orientation="h", yanchor="bottom", y=1.01, x=0, font=dict(size=10)),
         margin=dict(l=60, r=30, t=60, b=40),
         xaxis_rangeslider_visible=False,
         hovermode="x unified",
     )
     fig.update_xaxes(rangeslider_visible=False, row=1, col=1)
-    for r in (1, 4, 5, 6):
+    pct_rows = (1, 4, 5, 6)
+    for r in pct_rows:
         fig.update_yaxes(title_text="%", row=r, col=1)
-    fig.update_xaxes(title_text="UTC", row=6, col=1)
+    fig.update_xaxes(title_text="UTC", row=n_rows, col=1)
     return fig
+
+
+def _edge_name(label: str, source: str) -> str:
+    if source in ("tw_p01", "tw_p05", "tw_p95", "tw_p99"):
+        return f"{label} ({source})"
+    if source == "inspect_tw":
+        return f"{label} (inspect TW)"
+    if source == "hist_tw":
+        return f"{label} (hist TW reconstructed)"
+    if source == "hist":
+        return f"{label} (hist reconstructed)"
+    if source == "tw_p25":
+        return f"{label} (tw p25 fallback)"
+    if source == "missing":
+        return f"{label} (unavailable)"
+    return label
+
+
+def _inner_band_name(p05_source: str, p95_source: str) -> str:
+    if p05_source == "tw_p25":
+        return "tw p25–p95 (p5 unavailable on this build)"
+    if p05_source == "tw_p05" and p95_source == "tw_p95":
+        return "tw p5–p95"
+    if p05_source in ("hist", "hist_tw") and p95_source == "tw_p95":
+        kind = "hist TW" if p05_source == "hist_tw" else "hist"
+        return f"p5 ({kind} reconstructed)–p95 (tw)"
+    return "p5–p95"
+
+
+def _outer_band_name(p01_source: str, p99_source: str) -> str:
+    if p01_source == "missing":
+        return "p99 (p1 unavailable on this build)"
+    if p01_source == "tw_p01" and p99_source == "tw_p99":
+        return "tw p1–p99"
+    if p01_source == "inspect_tw" and p99_source in ("tw_p99", "inspect_tw"):
+        return "p1–p99 (inspect TW p1 + tw p99)"
+    if p01_source in ("hist", "hist_tw"):
+        kind = "hist TW" if p01_source == "hist_tw" else "hist"
+        return f"p1 ({kind} reconstructed)–p99"
+    return "p1–p99"
+
+
+def _finite_pair(a: np.ndarray, b: np.ndarray) -> bool:
+    return bool(np.isfinite(a).any() and np.isfinite(b).any())
+
+
+def build_floor_only_figure(
+    *,
+    coin: str,
+    side: str,
+    x: Sequence[Any],
+    sma12: np.ndarray,
+    sma3: np.ndarray,
+    p01: Optional[np.ndarray] = None,
+    p05: Optional[np.ndarray] = None,
+    p95: Optional[np.ndarray] = None,
+    p99: Optional[np.ndarray] = None,
+    p01_source: str = "tw_p01",
+    p05_source: str = "tw_p05",
+    p95_source: str = "tw_p95",
+    p99_source: str = "tw_p99",
+) -> go.Figure:
+    """Standalone one-row floor + corridor figure (shared x).
+
+    Used by both the generator (after the 6-row stack) and HTML inject.
+    Series: dashed p1–p99, filled p5–p95, SMA-3 (display),
+    tf-select α25 computed from SMA-12 (not plotted as the midline).
+    """
+    title_prefix = f"{coin} · {side.upper()}"
+    inner_name = _inner_band_name(p05_source, p95_source)
+    outer_name = _outer_band_name(p01_source, p99_source)
+    fig = go.Figure()
+    s12 = np.asarray(sma12, dtype="float64")
+    s3 = np.asarray(sma3, dtype="float64")
+    chosen = compute_chosen_floor(s12)
+    xs = list(x)
+    lo01 = np.asarray(p01, dtype="float64") if p01 is not None else np.array([])
+    lo05 = np.asarray(p05, dtype="float64") if p05 is not None else np.array([])
+    hi95 = np.asarray(p95, dtype="float64") if p95 is not None else np.array([])
+    hi99 = np.asarray(p99, dtype="float64") if p99 is not None else np.array([])
+
+    if lo01.size and hi99.size and p01_source != "missing" and _finite_pair(lo01, hi99):
+        fig.add_trace(
+            go.Scatter(
+                x=xs,
+                y=list(hi99),
+                mode="lines",
+                name=_edge_name("p99", p99_source),
+                line=dict(width=1.15, color=OUTER_BAND_EDGE, dash="dash"),
+                connectgaps=False,
+                legendgroup="outer",
+                showlegend=False,
+            )
+        )
+        fig.add_trace(
+            go.Scatter(
+                x=xs,
+                y=list(lo01),
+                mode="lines",
+                name=outer_name,
+                line=dict(width=1.15, color=OUTER_BAND_EDGE, dash="dash"),
+                connectgaps=False,
+                legendgroup="outer",
+            )
+        )
+    elif hi99.size and np.isfinite(hi99).any() and p01_source == "missing":
+        fig.add_trace(
+            go.Scatter(
+                x=xs,
+                y=list(hi99),
+                mode="lines",
+                name=outer_name,
+                line=dict(width=1.15, color=OUTER_BAND_EDGE, dash="dash"),
+                connectgaps=False,
+            )
+        )
+
+    if lo05.size and hi95.size and _finite_pair(lo05, hi95):
+        fig.add_trace(
+            go.Scatter(
+                x=xs,
+                y=list(hi95),
+                mode="lines",
+                name=_edge_name("p95", p95_source),
+                line=dict(width=0.9, color=INNER_BAND_EDGE),
+                connectgaps=False,
+                legendgroup="inner",
+                showlegend=False,
+                hoverinfo="skip",
+            )
+        )
+        fig.add_trace(
+            go.Scatter(
+                x=xs,
+                y=list(lo05),
+                mode="lines",
+                name=inner_name,
+                fill="tonexty",
+                fillcolor=INNER_BAND_FILL,
+                line=dict(width=0.9, color=INNER_BAND_EDGE),
+                connectgaps=False,
+                legendgroup="inner",
+            )
+        )
+
+    fig.add_trace(
+        go.Scatter(
+            x=xs,
+            y=list(s3),
+            mode="lines",
+            name=SMA3_NAME,
+            line=dict(FLOOR_PANEL_STYLES[SMA3_NAME]),
+            connectgaps=False,
+        )
+    )
+    fig.add_trace(
+        go.Scatter(
+            x=xs,
+            y=list(chosen[TF_SELECT_25_NAME]),
+            mode="lines",
+            name=TF_SELECT_25_NAME,
+            line=dict(FLOOR_PANEL_STYLES[TF_SELECT_25_NAME]),
+            connectgaps=False,
+        )
+    )
+    fig.update_yaxes(title_text="%")
+    fig.update_xaxes(title_text="UTC")
+    fig.update_layout(
+        title=dict(
+            text=(
+                f"{title_prefix}: p1–p99 (dashed) · p5–p95 corridor · "
+                "SMA-3 · tf-select α25"
+            ),
+            font=dict(size=13),
+        ),
+        template="plotly_white",
+        height=420,
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0, font=dict(size=10)),
+        margin=dict(l=60, r=30, t=70, b=40),
+        hovermode="x unified",
+    )
+    return fig
+
+
+def build_floor_figure_from_buckets(
+    *,
+    coin: str,
+    side: str,
+    buckets: pd.DataFrame,
+) -> Optional[go.Figure]:
+    """Generator-path corridor figure from true TW bucket columns.
+
+    Display midline is SMA-3 (``ma_3``). Floor metric stays on SMA-12.
+    """
+    if buckets is None or buckets.empty or "bar_start_dt" not in buckets.columns:
+        return None
+
+    def _sma_col(col: str, window: int) -> np.ndarray | None:
+        if col in buckets.columns:
+            return buckets[col].to_numpy(dtype="float64")
+        if "close" in buckets.columns:
+            return causal_sma(buckets["close"].to_numpy(dtype="float64"), window)
+        return None
+
+    sma3 = _sma_col("ma_3", 3)
+    sma12 = _sma_col("ma_12", 12)
+    if sma3 is None or sma12 is None or sma12.size == 0:
+        return None
+
+    def _col(name: str) -> np.ndarray | None:
+        if name not in buckets.columns:
+            return None
+        return buckets[name].to_numpy(dtype="float64")
+
+    return build_floor_only_figure(
+        coin=coin,
+        side=side,
+        x=list(buckets["bar_start_dt"]),
+        sma12=sma12,
+        sma3=sma3,
+        p01=_col("tw_p01"),
+        p05=_col("tw_p05"),
+        p95=_col("tw_p95"),
+        p99=_col("tw_p99"),
+        p01_source="tw_p01" if _col("tw_p01") is not None else "missing",
+        p05_source="tw_p05" if _col("tw_p05") is not None else "missing",
+        p95_source="tw_p95",
+        p99_source="tw_p99" if _col("tw_p99") is not None else "missing",
+    )
 
 
 def build_window_hist_figure(
@@ -964,6 +1218,7 @@ def write_coin_html(
     candle_temporal_bins: int = DEFAULT_CANDLE_TEMPORAL_BINS,
     latency_bins: int = DEFAULT_LATENCY_BINS,
     latency_temporal_bins: int = DEFAULT_LATENCY_TEMPORAL_BINS,
+    floors: bool = True,
 ) -> Path:
     """Write one coin page: mid context + long stack + hist + short stack + hist."""
     out_path = Path(out_path)
@@ -977,12 +1232,6 @@ def write_coin_html(
         include_js = False
         script_tag = '<script src="plotly.min.js"></script>\n'
 
-    ext = collect_extension_traces(
-        ticks,
-        buckets_long,
-        buckets_short=buckets_short,
-        coin=coin,
-    )
     mid_fig = build_mid_figure(
         coin=coin, ticks=ticks, gaps=gaps, max_tick_points=max_tick_points
     )
@@ -996,7 +1245,7 @@ def write_coin_html(
         gaps=gaps,
         ma_bars=ma_bars,
         max_tick_points=max_tick_points,
-        extension_traces=ext,
+        extension_traces=None,
         candle_bins=candle_bins,
         candle_temporal_bins=candle_temporal_bins,
         latency_bins=latency_bins,
@@ -1012,7 +1261,7 @@ def write_coin_html(
         gaps=gaps,
         ma_bars=ma_bars,
         max_tick_points=max_tick_points,
-        extension_traces=ext,
+        extension_traces=None,
         candle_bins=candle_bins,
         candle_temporal_bins=candle_temporal_bins,
         latency_bins=latency_bins,
@@ -1036,11 +1285,35 @@ def write_coin_html(
     div_hist_long = _fig_to_div(hist_long, include_plotlyjs=False)
     div_short = _fig_to_div(short_fig, include_plotlyjs=False)
     div_hist_short = _fig_to_div(hist_short, include_plotlyjs=False)
+    if floors:
+        long_floor = build_floor_figure_from_buckets(
+            coin=coin, side="long", buckets=buckets_long
+        )
+        short_floor = build_floor_figure_from_buckets(
+            coin=coin, side="short", buckets=buckets_short
+        )
+        div_floor_long = (
+            _fig_to_div(long_floor, include_plotlyjs=False) if long_floor else ""
+        )
+        div_floor_short = (
+            _fig_to_div(short_floor, include_plotlyjs=False) if short_floor else ""
+        )
+    else:
+        div_floor_long = ""
+        div_floor_short = ""
 
     meta_rows = "".join(
         f"<tr><th>{html.escape(str(k))}</th><td>{html.escape(str(v))}</td></tr>"
         for k, v in meta.items()
     )
+    floor_sub = (
+        "After each 6-row stack: one graph — TW p1–p99 (dashed) and "
+        "p5–p95 corridor, SMA-3 inside the inner band, tf-select α25 "
+        "floor (from SMA-12). Observation only — not a live threshold."
+        if floors
+        else ""
+    )
+    floor_help = extension_help_html() if floors else ""
     page = f"""<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -1096,6 +1369,7 @@ equal-time temporal means; plus <strong>trigger-venue latency</strong>
 (local_recv − exchange_ts; NaN/missing skipped). Compact bins only — not
 full ticks. Not a live trading terminal; no threshold candidates are
 invented on this page.
+{floor_sub}
 </p>
 <table class="meta"><tbody>{meta_rows}</tbody></table>
 
@@ -1103,13 +1377,15 @@ invented on this page.
 
 <h2 class="block">LONG spread — open_long</h2>
 {div_long}
+{div_floor_long}
 {div_hist_long}
 
 <h2 class="block short">SHORT spread — open_short</h2>
 {div_short}
+{div_floor_short}
 {div_hist_short}
 
-{extension_help_html()}
+{floor_help}
 {_candle_inspect_panel_html()}
 {_nav_script(coin, coins)}
 {_candle_inspect_script()}
