@@ -115,6 +115,22 @@ def wire_jsonl_path(data_root: Path, event_date: str) -> Path:
     return wire_dir(data_root, event_date) / "wire.jsonl"
 
 
+def _safe_intent_id(intent_id: str) -> str:
+    text = str(intent_id).strip()
+    if not text or "/" in text or "\\" in text or ".." in text:
+        raise ValueError(f"unsafe intent_id for report path: {intent_id!r}")
+    return text
+
+
+def trade_report_dir(data_root: Path, intent_id: str) -> Path:
+    """``{data_root}/reports/trades/<intent_id>/`` — never D trees."""
+    if _is_under_denied(data_root):
+        raise RuntimeError(f"refusing trade report under denied path: {data_root}")
+    path = Path(data_root) / "reports" / "trades" / _safe_intent_id(intent_id)
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
 def _assert_log_path_allowed(path: Path, *, label: str = "BBOT_PRIVATE_LOG_PATH") -> None:
     """Fail-closed: refuse D collector trees and collector/stub log names."""
     name = path.name

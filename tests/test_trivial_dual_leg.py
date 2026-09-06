@@ -11,6 +11,7 @@ from unittest.mock import patch
 
 from app.bot.broker import make_broker
 from app.bot.journal import JournalWriter
+from app.bot.private.dual_leg_ack import AckOutcome
 from app.bot.private.live_broker import LiveBroker, LiveBrokerError, make_live_broker
 from app.bot.private.order_sign import LiveCredentials
 from app.bot.private.ws_gates import WsProfileGateError, assert_ws_trivial_dual_leg_gates
@@ -47,6 +48,18 @@ def _meta(coin: str = "SOL") -> InstrumentMeta:
 
 def _book(*, bid: float = 1.0, ask: float = 1.01) -> dict:
     return {"bid_price": bid, "ask_price": ask, "bid_qty": 10.0, "ask_qty": 10.0}
+
+
+def _ack_ok(venue: str, req_id: str, _timeout: float) -> AckOutcome:
+    """Hermetic both-accepted ACK. Production uses warm recv_trade_ack."""
+    return AckOutcome(
+        venue=venue,
+        req_id=req_id,
+        accepted=True,
+        timed_out=False,
+        venue_code="0",
+        recv_ns=1,
+    )
 
 
 def _live_env(td: str, **extra: str) -> dict[str, str]:
@@ -207,6 +220,7 @@ class LiveBrokerPlaceTests(unittest.TestCase):
 
         kwargs.setdefault("send_fn", _send)
         kwargs.setdefault("inst_id_codes", {"SOL-USDT-SWAP": 193761})
+        kwargs.setdefault("ack_wait_fn", _ack_ok)
         env = kwargs.pop("env", None) or {
             "VENUE": "live",
             "LIVE_ORDERS": "1",

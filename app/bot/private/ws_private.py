@@ -808,7 +808,20 @@ class PrivateStreamRuntime:
                 ack_state="accepted" if ok else "received",
                 venue_code=sanitize_venue_code(data.get("retCode")),
             )
+        event = str(data.get("event") or "")
         req = str(data.get("id") or "")
+        # Overnight canary 60033: ``{"event":"error","msg":"Parameter id error",
+        # "code":"60033"}`` has no ``id``. Treat as reject for the in-flight
+        # place. A mismatched id is some other request — keep waiting.
+        if event == "error":
+            if req and req != expect_req_id:
+                raise TimeoutError("trade ack id mismatch")
+            return TradeAckObservation(
+                req_id=req or expect_req_id,
+                accepted=False,
+                ack_state="received",
+                venue_code=sanitize_venue_code(data.get("code")),
+            )
         if req != expect_req_id:
             raise TimeoutError("trade ack id mismatch")
         code_ok = str(data.get("code", "")) == "0"

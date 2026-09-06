@@ -10,6 +10,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from app.bot.journal import JournalWriter
+from app.bot.private.dual_leg_ack import AckOutcome
 from app.bot.private.live_broker import LiveBroker
 from app.bot.private.order_sign import LiveCredentials
 from app.bot.private.paths import wire_jsonl_path
@@ -316,7 +317,17 @@ class ContourBDoesNotWaitTests(unittest.TestCase):
         def _send(item) -> None:
             if getattr(item, "text", None) is None:
                 return
-            # Deliberately no recv.
+            # Deliberately no fill recv on the send path.
+
+        def _ack_ok(venue: str, req_id: str, _timeout: float) -> AckOutcome:
+            return AckOutcome(
+                venue=venue,
+                req_id=req_id,
+                accepted=True,
+                timed_out=False,
+                venue_code="0",
+                recv_ns=1,
+            )
 
         with tempfile.TemporaryDirectory() as td:
             broker = LiveBroker(
@@ -329,6 +340,7 @@ class ContourBDoesNotWaitTests(unittest.TestCase):
                 send_fn=_send,
                 inst_id_codes={"SOL-USDT-SWAP": 193761},
                 bybit_credentials=_creds(),
+                ack_wait_fn=_ack_ok,
             )
             orig_recv = FakePrivateWsSocket.recv_text
 

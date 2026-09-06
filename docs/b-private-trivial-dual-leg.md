@@ -29,10 +29,19 @@ After strategy filters in `LiveBroker.place` (kept):
 3. dual `queue.put` → long-lived sender `ws.send` on **both** legs
    (`TrivialDualSender.enqueue_dual`)
 4. no wait-for-fill before the other leg
+5. **after** both sends: short dual trade-socket ACK wait (default 2s,
+   `BBOT_PRIVATE_ACK_TIMEOUT_SEC`). Local `open_long` / `open_short` /
+   close-clear only if **both** Bybit `retCode` and OKX order/`event=error`
+   ACKs succeed. One-leg reject or ACK timeout → stay / return **flat** and
+   reduce-only flatten any accepted (or timed-out) **open** leg.
 
 Warm private+trade WS is already up (`PrivateWarmSession`, process lifetime).
-`place_io_section` is a lock so keepalive does not steal ACK frames — not a
-multi-second pre-send check.
+`place_io_section` is a short lock that only bumps `_place_inflight` so
+keepalive does not steal ACK frames — not a multi-second pre-send check.
+Keepalive must not hold that lock across `recv_text` (canary: Bybit
+`X-BAPI-TIMESTAMP` at signal+1ms, `ws.send` ~512ms later while keepalive
+drained four sockets at 0.2s each). ACK wait is **after** send, while the
+counter is raised. It is not a pre-signal gate and not a fill_delivery wait.
 
 ## What moved off the hot path
 
@@ -44,8 +53,14 @@ multi-second pre-send check.
 | `prepare_approved` + journal fsync / preflight before `ws.send` | not on default path |
 | sequential per-leg prepare | both frames built, then dual put |
 
-Ack / fill / flatten / reconcile stay **after** send (observe). Do not add
-new waits that gate the contour.
+Fill / reconcile stay **after** send (observe). The only post-send wait on
+Contour B is the short dual **trade ACK** (accept/reject/timeout), which
+gates local position — not venue fill. Do not add a fill-wait gate.
+
+Canary (WAL/EDEN) additionally freezes a public L1 ring and writes a
+chronometry HTML page **after** both ACKs — see
+[`canary-trade-chronometry.md`](canary-trade-chronometry.md). That work is
+not on signal→send.
 
 The standing **wire transcript** records every private+trade send/recv with
 `wall_ms` / `mono_ns` so signal→send, send→ack RTT, and
@@ -90,14 +105,15 @@ A matching warm-session `okx_runtime.okx_inst_id_code` is a last-resort cache.
 | Path | Role |
 |------|------|
 | `app/bot/private/ws_trivial_dual_leg.py` | path resolve, signed frames, dual sender |
-| `app/bot/private/live_broker.py` | filters + `default_live_send_pair` |
+| `app/bot/private/dual_leg_ack.py` | post-send dual ACK wait + flatten venue set |
+| `app/bot/private/live_broker.py` | filters + `default_live_send_pair` + ack-aware position |
 | `app/bot/private/ws_gates.py` | `assert_ws_trivial_dual_leg_gates` (no W6 flag) |
 | `app/bot/broker.py` | `BBOT_BROKER=private_live` |
 
 ## Tests (local)
 
 ```bash
-PYTHONPATH=. python3 -m unittest tests.test_okx_ws_message_id tests.test_trivial_dual_leg -v
+PYTHONPATH=. python3 -m unittest tests.test_okx_ws_message_id tests.test_trivial_dual_leg tests.test_dual_leg_ack -v
 PYTHONPATH=. python3 -m unittest tests.test_bbot_gear2 tests.test_warm_ws_place_threadsafe -q
 ```
 
@@ -108,9 +124,13 @@ gear2 or mutate VPS.
 
 - VPS deploy / live gear2 restart / SOL leftover flatten
 - Gear2 strategy thresholds
-- New fill-wait gates on the contour
+- New fill-wait gates on the contour (ACK-only; fills stay observational)
 - Changing W6/W7 CLI defaults
-- Contour B still marks local `open_long` / `position` after both
-  `ws.send`s, not after venue accept. A one-leg OKX reject (this 60033)
-  can leave Bybit filled and local state open. Fail-closed ack-aware
-  position is a follow-up — it is not on this id-charset fix.
+- VPS deploy of the ACK-aware position change (code + unit tests only)
+
+Overnight canary 2026-09-05 (EDEN, OKX `60033`) left Bybit filled and local
+`open_long` because Contour B marked position after `ws.send`. ACK-aware
+position is now on this path: that reject returns `dual_ack_rejected:okx:60033`,
+keeps local flat, and flatten-closes the accepted Bybit leg. The OKX
+alphanumeric `id` sanitize remains the venue-side prevention of that
+specific `60033`.
