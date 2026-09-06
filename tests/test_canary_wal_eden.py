@@ -234,6 +234,41 @@ class CanaryRuntimeProfileTests(unittest.TestCase):
         self.assertEqual(rt.market_state.k_live, 1)
         self.assertTrue(rt._uses_market_manager())
 
+    def test_public_book_appends_l1_ring(self) -> None:
+        from app.bot.private.l1_tick_ring import clear_process_rings, freeze_window
+
+        tmp = Path(tempfile.mkdtemp())
+        env = {
+            "BBOT_MODE": "policy",
+            "BBOT_PROFILE": "canary_wal_eden",
+            "BBOT_DATA_ROOT": str(tmp),
+            "BBOT_LOG_PATH": str(tmp / "bbot.log"),
+            "BBOT_COINS": "WAL,EDEN",
+            "BBOT_BROKER": "stub",
+        }
+        clear_process_rings()
+        with patch.dict(os.environ, env, clear=False):
+            from app.bot.runtime import BotRuntime
+
+            rt = BotRuntime()
+        rt._maybe_record_l1(
+            "WAL",
+            "bybit",
+            {
+                "bid_price": 0.42,
+                "ask_price": 0.43,
+                "bid_size": 10.0,
+                "ask_size": 11.0,
+                "local_recv_ts_ms": 1_700_000_000_100,
+            },
+        )
+        ticks = freeze_window("WAL", start_ms=0, end_ms=9_000_000_000_000)
+        self.assertEqual(len(ticks), 1)
+        self.assertEqual(ticks[0].venue, "bybit")
+        self.assertEqual(ticks[0].bid, 0.42)
+        self.assertEqual(ticks[0].event_local_ts_ms, 1_700_000_000_100)
+        clear_process_rings()
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -30,6 +30,7 @@ class AckOutcome:
     timed_out: bool
     venue_code: Optional[str] = None
     recv_ns: Optional[int] = None
+    wall_ms: Optional[int] = None
     error: Optional[str] = None
 
     @property
@@ -134,6 +135,7 @@ def _timeout_outcome(venue: str, req_id: str, *, error: str = "timeout") -> AckO
         accepted=False,
         timed_out=True,
         recv_ns=time.monotonic_ns(),
+        wall_ms=int(time.time() * 1000),
         error=error,
     )
 
@@ -164,13 +166,15 @@ def recv_one_trade_ack(
             error=type(exc).__name__,
         )
     accepted = bool(getattr(obs, "accepted", False))
+    now_ns = time.monotonic_ns()
     return AckOutcome(
         venue=venue,
         req_id=str(getattr(obs, "req_id", req_id) or req_id),
         accepted=accepted,
         timed_out=False,
         venue_code=getattr(obs, "venue_code", None),
-        recv_ns=time.monotonic_ns(),
+        recv_ns=now_ns,
+        wall_ms=int(time.time() * 1000),
     )
 
 

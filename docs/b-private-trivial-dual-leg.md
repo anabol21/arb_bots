@@ -54,6 +54,11 @@ Fill / reconcile stay **after** send (observe). The only post-send wait on
 Contour B is the short dual **trade ACK** (accept/reject/timeout), which
 gates local position — not venue fill. Do not add a fill-wait gate.
 
+Canary (WAL/EDEN) additionally freezes a public L1 ring and writes a
+chronometry HTML page **after** both ACKs — see
+[`canary-trade-chronometry.md`](canary-trade-chronometry.md). That work is
+not on signal→send.
+
 The standing **wire transcript** records every private+trade send/recv with
 `wall_ms` / `mono_ns` so signal→send, send→ack RTT, and
 `fill_delivery = local_recv − venue_ts` can be derived without putting a

@@ -29,6 +29,10 @@ from pathlib import Path
 from typing import Any, Callable, Mapping, Optional
 
 from app.bot.journal import JournalWriter
+from app.bot.private.chronometry import (
+    emit_after_dual_ack,
+    persist_signal_book_on_place,
+)
 from app.bot.private.dual_leg_ack import (
     DualAckResult,
     FlattenAttempt,
@@ -171,6 +175,8 @@ class LiveBroker(StubBroker):
         self.last_send_path: Optional[str] = None
         self.last_ack_result: Optional[DualAckResult] = None
         self.last_flatten: list[FlattenAttempt] = []
+        self._chrono_anchor_wall_ms: Optional[int] = None
+        self._chrono_anchor_mono_ns: Optional[int] = None
 
     def _get_sender(self) -> TrivialDualSender:
         if self._sender is None:
@@ -325,6 +331,15 @@ class LiveBroker(StubBroker):
             status="placed",
             extra=dict(extra or {}),
         )
+        persist_signal_book_on_place(
+            intent_id=intent_id,
+            okx_book=okx_book,
+            bybit_book=bybit_book,
+            event_local_ts_ms=int(signal_ts_ms),
+            extra=pending.extra,
+        )
+        self._chrono_anchor_wall_ms = int(time.time() * 1000)
+        self._chrono_anchor_mono_ns = time.monotonic_ns()
 
         send_abort = self.default_live_send_pair(
             pending=pending,
@@ -347,6 +362,17 @@ class LiveBroker(StubBroker):
             f"live_broker | sent | intent_id={intent_id} | side={journal_side} | "
             f"coin={base_coin} | send_path={self.last_send_path} | "
             f"dual_ack=both_accepted | k_live=1"
+        )
+        emit_after_dual_ack(
+            data_root=self.data_root,
+            pending=pending,
+            phase=phase,
+            env=self.env,
+            send_result=self.last_send_result,
+            ack_result=self.last_ack_result,
+            anchor_wall_ms=self._chrono_anchor_wall_ms,
+            anchor_mono_ns=self._chrono_anchor_mono_ns,
+            log=self._log,
         )
         return None
 

@@ -89,6 +89,13 @@ appended under `{BBOT_PRIVATE_DATA_ROOT}/wire/` — see
 [`docs/b-private-wire-transcript.md`](b-private-wire-transcript.md).
 No fill-wait on the Contour B path.
 
+After both trade ACKs succeed, the canary writes a chronometry dashboard
+under `{BBOT_DATA_ROOT}/reports/trades/<intent_id>/` (JSON + self-contained
+HTML). A rolling public L1 ring (default 60s) feeds the tape; the
+signal-time book is snapshotted at `place` so signal spread survives
+ring wrap. See [`canary-trade-chronometry.md`](canary-trade-chronometry.md).
+The 2026-09-06 EDEN open cannot be reconstructed: no ring existed then.
+
 OKX trade WS `id` must be alphanumeric ≤32. Canary 2026-09-05 EDEN
 rejected `60033` / `Parameter id error` because Contour B sent
 `new_opaque_id("req")` (`req_<hex>`). `clOrdId` was already legal.
@@ -104,5 +111,7 @@ Confirm `spread-bbot-gear2.service` is inactive before any canary start.
 Local tests:
 
 ```bash
-PYTHONPATH=. python3 -m unittest tests.test_canary_wal_eden tests.test_bbot_gear2 -v
+PYTHONPATH=. python3 -m unittest \
+  tests.test_canary_wal_eden tests.test_bbot_gear2 \
+  tests.test_l1_tick_ring tests.test_chronometry_dashboard -v
 ```
