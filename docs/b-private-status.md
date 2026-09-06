@@ -96,6 +96,16 @@ trade channel gets heartbeat + silence + non-noise stash so ACK frames are not
 stolen. Cold (non-warm) W6 path unchanged. Fail-closed: `TimeoutError` →
 ambiguous timeout; venue rejects stay rejects.
 
+**Warm keepalive must not hold `_lock` across `recv_text` (2026-09-06).**
+Canary Contour B: Bybit `X-BAPI-TIMESTAMP` at signal+1ms, `ws.send` ~512ms
+later. `_keepalive_tick` held `threading.RLock` around four
+`recv_text(timeout_sec=0.2)` drains; `place_io_section()` only needs that
+lock to bump `_place_inflight`, so send waited for idle keepalive I/O.
+Keepalive now locks only for flag checks / brief heartbeat send, recvs
+outside the lock, and re-checks the counter before each socket (exits if
+place became inflight; stashes a trade frame already in hand). Contour B
+asyncio sender queues are unchanged. No VPS deploy in this change.
+
 **`l1_at_send` / journal fill stamps ≠ venue fill latency.** Метки public
 journal `l1_at_send` и stub `Trade_Lat_ms=100` не измеряют время матча на
 бирже. Сравнивать place→fill нужно по private journal `request_sent` →

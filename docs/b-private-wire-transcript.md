@@ -89,7 +89,9 @@ stream).
 Fills appear on the private stream after send. Contour B does **not** wait
 for them before marking position; it waits only for trade-socket **ACK**
 (accept/reject/timeout). Read fill rows in the transcript (or `wire_in`)
-once they arrive.
+once they arrive. The canary dashboard
+([`canary-trade-chronometry.md`](canary-trade-chronometry.md)) reads these
+rows after dual ACK; it does not add a fill-wait on send.
 
 ## Tests
 

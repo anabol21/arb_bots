@@ -36,9 +36,12 @@ After strategy filters in `LiveBroker.place` (kept):
    reduce-only flatten any accepted (or timed-out) **open** leg.
 
 Warm private+trade WS is already up (`PrivateWarmSession`, process lifetime).
-`place_io_section` is a lock so keepalive does not steal ACK frames — not a
-multi-second pre-send check. ACK wait is **after** send, inside that lock.
-It is not a pre-signal gate and not a fill_delivery wait.
+`place_io_section` is a short lock that only bumps `_place_inflight` so
+keepalive does not steal ACK frames — not a multi-second pre-send check.
+Keepalive must not hold that lock across `recv_text` (canary: Bybit
+`X-BAPI-TIMESTAMP` at signal+1ms, `ws.send` ~512ms later while keepalive
+drained four sockets at 0.2s each). ACK wait is **after** send, while the
+counter is raised. It is not a pre-signal gate and not a fill_delivery wait.
 
 ## What moved off the hot path
 
@@ -53,6 +56,11 @@ It is not a pre-signal gate and not a fill_delivery wait.
 Fill / reconcile stay **after** send (observe). The only post-send wait on
 Contour B is the short dual **trade ACK** (accept/reject/timeout), which
 gates local position — not venue fill. Do not add a fill-wait gate.
+
+Canary (WAL/EDEN) additionally freezes a public L1 ring and writes a
+chronometry HTML page **after** both ACKs — see
+[`canary-trade-chronometry.md`](canary-trade-chronometry.md). That work is
+not on signal→send.
 
 The standing **wire transcript** records every private+trade send/recv with
 `wall_ms` / `mono_ns` so signal→send, send→ack RTT, and
