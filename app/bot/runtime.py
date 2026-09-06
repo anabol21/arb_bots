@@ -268,6 +268,7 @@ class BotRuntime:
             c: (None, None) for c in self.coins
         }
         self._private_warm: Any = None
+        self._l1_ring_warned = False
 
     def _uses_market_manager(self) -> bool:
         if self.policy is not None:
@@ -314,9 +315,25 @@ class BotRuntime:
             self.gate.note_disconnect(base_coin, exchange)
             self.log.info(f"ws_cancelled | coin={base_coin} | exchange={exchange}")
 
+    def _maybe_record_l1(self, base_coin: str, exchange: str, book: dict[str, Any]) -> None:
+        """Cheap public-book ring append. Before coalesce so intermediate ticks stay."""
+        try:
+            from app.bot.private.l1_tick_ring import record_public_l1
+
+            record_public_l1(
+                coin=base_coin,
+                venue=exchange,
+                book=book,
+                profile=self.profile,
+            )
+        except Exception:  # noqa: BLE001 — never stall the public book path
+            if not getattr(self, "_l1_ring_warned", False):
+                self._l1_ring_warned = True
+                self.log.warning("l1_ring_append_failed | coin=%s | exchange=%s", base_coin, exchange)
+
     def _on_book(self, base_coin: str, exchange: str, book: dict[str, Any]) -> None:
         """Coalesce: one in-flight handler per coin; dirty flag drains one more run."""
-        _ = book  # store already updated in-place by ws_books
+        self._maybe_record_l1(base_coin, exchange, book)
         coin = base_coin.upper()
         self._book_last_exchange[coin] = exchange
         if self._book_inflight.get(coin):

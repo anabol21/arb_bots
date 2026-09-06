@@ -69,6 +69,7 @@ def resolve_data_root(env: Optional[dict] = None) -> Path:
     (root / "journal").mkdir(parents=True, exist_ok=True)
     (root / "probes").mkdir(parents=True, exist_ok=True)
     (root / "state").mkdir(parents=True, exist_ok=True)
+    (root / "wire").mkdir(parents=True, exist_ok=True)
     (root / ".tmp").mkdir(parents=True, exist_ok=True)
     return root.resolve()
 
@@ -98,6 +99,36 @@ def auth_probe_jsonl_path(data_root: Path, event_date: str) -> Path:
 def events_jsonl_path(data_root: Path, event_date: str) -> Path:
     """Append-only path for ``bbot.private.journal.v1`` (``events.jsonl``)."""
     return journal_dir(data_root, event_date) / "events.jsonl"
+
+
+def wire_dir(data_root: Path, event_date: str) -> Path:
+    """Append-only private wire transcript tree (not the journal)."""
+    if _is_under_denied(data_root):
+        raise RuntimeError(f"refusing wire under denied path: {data_root}")
+    path = data_root / "wire" / f"event_date={event_date}"
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def wire_jsonl_path(data_root: Path, event_date: str) -> Path:
+    """One JSONL stream for all private+trade sockets that day."""
+    return wire_dir(data_root, event_date) / "wire.jsonl"
+
+
+def _safe_intent_id(intent_id: str) -> str:
+    text = str(intent_id).strip()
+    if not text or "/" in text or "\\" in text or ".." in text:
+        raise ValueError(f"unsafe intent_id for report path: {intent_id!r}")
+    return text
+
+
+def trade_report_dir(data_root: Path, intent_id: str) -> Path:
+    """``{data_root}/reports/trades/<intent_id>/`` — never D trees."""
+    if _is_under_denied(data_root):
+        raise RuntimeError(f"refusing trade report under denied path: {data_root}")
+    path = Path(data_root) / "reports" / "trades" / _safe_intent_id(intent_id)
+    path.mkdir(parents=True, exist_ok=True)
+    return path
 
 
 def _assert_log_path_allowed(path: Path, *, label: str = "BBOT_PRIVATE_LOG_PATH") -> None:

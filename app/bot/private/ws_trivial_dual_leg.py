@@ -15,7 +15,9 @@ Contour B initially broke on venue without those fields.
 
 Warm private+trade sockets must already be up (``PrivateWarmSession``).
 This module does not recover inflight leases, consume approvals, or
-acquire leases. Journal / ack / fill observation is after both sends.
+acquire leases. Journal / fill observation is after both sends. Trade ACK
+wait (Contour B local position) is owned by ``live_broker`` /
+``dual_leg_ack`` after ``enqueue_dual`` returns.
 """
 
 from __future__ import annotations
@@ -31,9 +33,13 @@ from typing import Any, Callable, Mapping, Optional
 from app.bot.private.journal_v1 import new_opaque_id
 from app.bot.private.order_plan import OrderPlan
 from app.bot.private.order_sign import LiveCredentials
+from app.bot.private.wire_transcript import bind_place_on_process_transcript
 from app.bot.private.ws_messages import (
+    assert_okx_ws_message_id,
     build_bybit_trade_place,
     build_okx_trade_place,
+    new_okx_ws_id,
+    sanitize_okx_ws_id,
 )
 
 SEND_PATH_TRIVIAL = "trivial"
@@ -62,6 +68,9 @@ class TrivialSendItem:
     req_id: str
     phase: str  # open | close
     enqueued_ns: int
+    intent_id: Optional[str] = None
+    dual_leg_id: Optional[str] = None
+    signal_ts_ms: Optional[int] = None
 
 
 @dataclass
@@ -193,7 +202,12 @@ def build_signed_place_text(
         plan_venue = "okx_live"
     else:
         raise TrivialSendError(f"venue must be bybit|okx, got {venue!r}")
-    rid = req_id or new_opaque_id("req")[:32]
+    # Bybit reqId may keep journal-style ``prefix_``. OKX trade WS ``id``
+    # must be alphanumeric ≤32 — ``new_opaque_id("req")`` is illegal there.
+    if plan_venue == "okx_live":
+        rid = sanitize_okx_ws_id(req_id) if req_id else new_okx_ws_id()
+    else:
+        rid = req_id or new_opaque_id("req")[:32]
     plan = make_frame_plan(
         venue=plan_venue,
         symbol=symbol,
@@ -213,6 +227,11 @@ def build_signed_place_text(
             raise TrivialSendError("okx place requires positive instIdCode")
         msg = build_okx_trade_place(plan, req_id=rid, inst_id_code=inst_id_code)
     assert_signed_place_frame(plan_venue, msg.text)
+    if plan_venue == "okx_live":
+        try:
+            rid = str(json.loads(msg.text)["id"])
+        except (json.JSONDecodeError, KeyError, TypeError) as exc:
+            raise TrivialSendError("okx place missing id after build") from exc
     return msg.text, rid, plan
 
 
@@ -237,6 +256,10 @@ def assert_signed_place_frame(venue: str, text: str) -> None:
     if venue == "okx_live":
         if not data.get("id"):
             raise TrivialSendError("okx place missing id")
+        try:
+            assert_okx_ws_message_id(data.get("id"))
+        except ValueError as exc:
+            raise TrivialSendError("okx place id is not alphanumeric ≤32") from exc
         args = data.get("args") or []
         if not args or not isinstance(args[0], dict):
             raise TrivialSendError("okx place missing args")
@@ -307,14 +330,27 @@ class TrivialDualSender:
         bybit_req_id: str,
         okx_req_id: str,
         phase: str,
+        intent_id: Optional[str] = None,
+        dual_leg_id: Optional[str] = None,
+        signal_ts_ms: Optional[int] = None,
     ) -> TrivialSendResult:
         """Critical path: put both legs, then wait until both senders drained.
 
         Does not wait for venue ack/fill. Second put does not wait on first
-        send completing.
+        send completing. Correlation ids are bound before the puts (no I/O).
         """
         if self._bybit_q is None or self._okx_q is None:
             raise RuntimeError("trivial sender queues not ready")
+        bind_place_on_process_transcript(
+            req_ids=(("bybit", bybit_req_id), ("okx", okx_req_id)),
+            intent_id=intent_id,
+            dual_leg_id=dual_leg_id,
+            signal_ts_ms=signal_ts_ms,
+            phase=phase,
+        )
+        with self._sent_lock:
+            self._sent_ns.pop(f"{phase}:bybit", None)
+            self._sent_ns.pop(f"{phase}:okx", None)
         t0 = time.monotonic_ns()
         b_item = TrivialSendItem(
             venue="bybit",
@@ -322,6 +358,9 @@ class TrivialDualSender:
             req_id=bybit_req_id,
             phase=phase,
             enqueued_ns=t0,
+            intent_id=intent_id,
+            dual_leg_id=dual_leg_id,
+            signal_ts_ms=signal_ts_ms,
         )
         o_item = TrivialSendItem(
             venue="okx",
@@ -329,6 +368,9 @@ class TrivialDualSender:
             req_id=okx_req_id,
             phase=phase,
             enqueued_ns=time.monotonic_ns(),
+            intent_id=intent_id,
+            dual_leg_id=dual_leg_id,
+            signal_ts_ms=signal_ts_ms,
         )
         t1 = o_item.enqueued_ns
         fut_b = asyncio.run_coroutine_threadsafe(self._bybit_q.put(b_item), self._loop)
@@ -343,6 +385,51 @@ class TrivialDualSender:
             first_sent_ns=first_sent,
             second_sent_ns=second_sent,
             items=[b_item, o_item],
+            error=self._errors[-1] if self._errors else None,
+        )
+
+    def enqueue_one(
+        self,
+        *,
+        venue: str,
+        text: str,
+        req_id: str,
+        phase: str,
+        intent_id: Optional[str] = None,
+        dual_leg_id: Optional[str] = None,
+        signal_ts_ms: Optional[int] = None,
+    ) -> TrivialSendResult:
+        """Put one already-signed frame (reduce-only flatten of one accepted leg)."""
+        key = str(venue).strip().lower()
+        if key not in {"bybit", "okx"}:
+            raise TrivialSendError(f"enqueue_one venue must be bybit|okx, got {venue!r}")
+        queue = self._bybit_q if key == "bybit" else self._okx_q
+        if queue is None:
+            raise RuntimeError("trivial sender queues not ready")
+        with self._sent_lock:
+            self._sent_ns.pop(f"{phase}:{key}", None)
+        t0 = time.monotonic_ns()
+        item = TrivialSendItem(
+            venue=key,
+            text=text,
+            req_id=req_id,
+            phase=phase,
+            enqueued_ns=t0,
+            intent_id=intent_id,
+            dual_leg_id=dual_leg_id,
+            signal_ts_ms=signal_ts_ms,
+        )
+        fut = asyncio.run_coroutine_threadsafe(queue.put(item), self._loop)
+        fut.result(timeout=5.0)
+        sent = self._wait_sent(phase, key, timeout_sec=5.0)
+        return TrivialSendResult(
+            first_enqueued_ns=t0,
+            second_enqueued_ns=t0,
+            first_sent_ns=sent,
+            second_sent_ns=sent if sent is not None else None,
+            first_venue=key,
+            second_venue=key,
+            items=[item],
             error=self._errors[-1] if self._errors else None,
         )
 
@@ -389,26 +476,27 @@ def send_signed_dual(
     okx_req_id: str,
     phase: str,
     place_io=None,
+    intent_id: Optional[str] = None,
+    dual_leg_id: Optional[str] = None,
+    signal_ts_ms: Optional[int] = None,
 ) -> TrivialSendResult:
     """Put both signed frames. ``place_io`` is an optional context manager
     (warm ``place_io_section``) — a lock, not a multi-second pre-send check.
     """
+    kwargs = {
+        "bybit_text": bybit_text,
+        "okx_text": okx_text,
+        "bybit_req_id": bybit_req_id,
+        "okx_req_id": okx_req_id,
+        "phase": phase,
+        "intent_id": intent_id,
+        "dual_leg_id": dual_leg_id,
+        "signal_ts_ms": signal_ts_ms,
+    }
     if place_io is None:
-        return sender.enqueue_dual(
-            bybit_text=bybit_text,
-            okx_text=okx_text,
-            bybit_req_id=bybit_req_id,
-            okx_req_id=okx_req_id,
-            phase=phase,
-        )
+        return sender.enqueue_dual(**kwargs)
     with place_io:
-        return sender.enqueue_dual(
-            bybit_text=bybit_text,
-            okx_text=okx_text,
-            bybit_req_id=bybit_req_id,
-            okx_req_id=okx_req_id,
-            phase=phase,
-        )
+        return sender.enqueue_dual(**kwargs)
 
 
 def warm_trade_send_fn(session: Any) -> SendFn:
