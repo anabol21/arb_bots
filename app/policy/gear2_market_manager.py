@@ -41,6 +41,7 @@ class MarketState:
     n_filtered_by_latency: int = 0
     n_filtered_by_avg: int = 0
     n_filtered_by_size: int = 0
+    n_filtered_by_l1_depth: int = 0
     n_filtered_not_topn: int = 0
     seq: int = 0
 
@@ -53,6 +54,7 @@ class MarketState:
             "n_filtered_by_latency": self.n_filtered_by_latency,
             "n_filtered_by_avg": self.n_filtered_by_avg,
             "n_filtered_by_size": self.n_filtered_by_size,
+            "n_filtered_by_l1_depth": self.n_filtered_by_l1_depth,
             "n_filtered_not_topn": self.n_filtered_not_topn,
             "seq": self.seq,
         }
@@ -76,6 +78,8 @@ def _count_gate_fail(state: MarketState, reason: str) -> None:
         state.n_filtered_by_avg += 1
     elif reason == "gate_volume":
         state.n_filtered_by_size += 1
+    elif reason == "gate_l1_depth":
+        state.n_filtered_by_l1_depth += 1
 
 
 def decide_market_tick(

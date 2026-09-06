@@ -210,6 +210,158 @@ class WarmPlaceIoGuardTests(unittest.TestCase):
                 self.assertEqual(got, ack)
 
             self.assertFalse(session.place_inflight)
+            session.stop()
+
+    def test_keepalive_tick_does_not_hold_lock_during_blocking_recv(self) -> None:
+        """place_io_section must enter while keepalive is blocked in recv_text.
+
+        Old design held ``_lock`` across ``recv_text`` (0.2s × sockets), so
+        Contour B waited ~500ms to bump ``_place_inflight`` before ws.send.
+        """
+        from app.bot.private.selftest import W2PrivateWsTests
+        from app.bot.private.ws_private import RestReseedResult
+        from app.bot.private.ws_socket import FakePrivateWsSocket
+        from app.bot.private.ws_warm_session import (
+            WarmSocketBundle,
+            start_warm_private_session,
+        )
+
+        class _HoldRecvSocket:
+            """Delegates to Fake except recv, which blocks until released."""
+
+            def __init__(
+                self,
+                inner: FakePrivateWsSocket,
+                entered: threading.Event,
+                release: threading.Event,
+            ) -> None:
+                self._inner = inner
+                self._entered = entered
+                self._release = release
+
+            def recv_text(self, *, timeout_sec=None) -> str:
+                del timeout_sec
+                self._entered.set()
+                if not self._release.wait(timeout=5.0):
+                    raise TimeoutError("hold-recv not released")
+                raise TimeoutError("hold-recv released empty")
+
+            def send_text(self, text: str) -> None:
+                self._inner.send_text(text)
+
+            def close(self) -> None:
+                self._inner.close()
+
+            def connect(self) -> None:
+                self._inner.connect()
+
+            @property
+            def connected(self) -> bool:
+                return self._inner.connected
+
+        with tempfile.TemporaryDirectory() as td:
+            env = self._live_env(td)
+            Path(env["BBOT_PRIVATE_DATA_ROOT"]).mkdir(parents=True, exist_ok=True)
+
+            def provider() -> WarmSocketBundle:
+                bpriv = FakePrivateWsSocket()
+                btrade = FakePrivateWsSocket(exchange="bybit")
+                opriv = FakePrivateWsSocket()
+                otrade = FakePrivateWsSocket(exchange="okx")
+                self._push_hs(bpriv, btrade, okx=False)
+                self._push_hs(opriv, otrade, okx=True)
+                return WarmSocketBundle(
+                    bybit_private=bpriv,
+                    bybit_trade=btrade,
+                    okx_private=opriv,
+                    okx_trade=otrade,
+                )
+
+            session = start_warm_private_session(
+                env=env,
+                bybit_credentials=W2PrivateWsTests()._creds(),
+                okx_credentials=W2PrivateWsTests()._creds(okx=True),
+                socket_provider=provider,
+                rest_probe_fn=lambda **_: RestReseedResult(matched=True),
+                attach=True,
+                keepalive=False,
+                heartbeat_every_sec=3600.0,
+                silence_timeout_sec=30.0,
+            )
+            entered_recv = threading.Event()
+            release_recv = threading.Event()
+            inner = session.bybit_runtime.private_socket
+            assert isinstance(inner, FakePrivateWsSocket)
+            session.bybit_runtime.private_socket = _HoldRecvSocket(
+                inner, entered_recv, release_recv
+            )
+            trade = session.bybit_runtime.trade_socket
+            assert isinstance(trade, FakePrivateWsSocket)
+            ack = json.dumps(
+                {
+                    "reqId": "req_place_hold",
+                    "op": "order.create",
+                    "retCode": 0,
+                    "success": True,
+                }
+            )
+
+            tick_done = threading.Event()
+            tick_err: list[BaseException] = []
+
+            def _tick() -> None:
+                try:
+                    session._keepalive_tick()  # noqa: SLF001
+                except BaseException as exc:  # noqa: BLE001
+                    tick_err.append(exc)
+                finally:
+                    tick_done.set()
+
+            ticker = threading.Thread(target=_tick, name="keepalive-tick", daemon=True)
+            ticker.start()
+            self.assertTrue(
+                entered_recv.wait(timeout=2.0),
+                "keepalive tick must reach recv_text",
+            )
+
+            place_wait_sec: list[float] = []
+            place_err: list[BaseException] = []
+
+            def _place() -> None:
+                try:
+                    t0 = time.monotonic()
+                    with session.place_io_section():
+                        place_wait_sec.append(time.monotonic() - t0)
+                        trade.push_inbound(ack)
+                        release_recv.set()
+                        self.assertTrue(tick_done.wait(timeout=2.0))
+                        # Tick must yield after private recv and not steal trade ACK.
+                        self.assertEqual(list(trade._inbox), [ack])  # noqa: SLF001
+                except BaseException as exc:  # noqa: BLE001
+                    place_err.append(exc)
+                    release_recv.set()
+
+            placer = threading.Thread(target=_place, name="place-io", daemon=True)
+            placer.start()
+            placer.join(timeout=1.0)
+            if placer.is_alive():
+                release_recv.set()
+                ticker.join(timeout=2.0)
+                placer.join(timeout=2.0)
+                self.fail(
+                    "place_io_section stayed blocked while keepalive recv held "
+                    "(old lock-across-recv design)"
+                )
+            ticker.join(timeout=2.0)
+            self.assertEqual(tick_err, [], msg=repr(tick_err))
+            self.assertEqual(place_err, [], msg=repr(place_err))
+            self.assertEqual(len(place_wait_sec), 1)
+            self.assertLess(
+                place_wait_sec[0],
+                0.05,
+                f"place_io_section waited {place_wait_sec[0]*1000:.1f}ms for keepalive lock",
+            )
+            session.stop()
 
     def test_trade_heartbeat_sent_on_keepalive_tick(self) -> None:
         from app.bot.private.selftest import W2PrivateWsTests
@@ -264,6 +416,7 @@ class WarmPlaceIoGuardTests(unittest.TestCase):
             self.assertTrue(
                 saw_trade_ping, "keepalive must ping trade sockets, not only private"
             )
+            session.stop()
 
     def test_keepalive_stashes_non_noise_trade_frame(self) -> None:
         from app.bot.private.selftest import W2PrivateWsTests
@@ -320,6 +473,7 @@ class WarmPlaceIoGuardTests(unittest.TestCase):
             )
             self.assertTrue(got.accepted)
             self.assertEqual(session.bybit_runtime._trade_inbound_stash, [])  # noqa: SLF001
+            session.stop()
 
 
 if __name__ == "__main__":

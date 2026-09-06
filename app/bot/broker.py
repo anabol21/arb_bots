@@ -2,8 +2,11 @@
 
 ``BBOT_BROKER=stub`` (default): ``StubBroker``.
 ``BBOT_BROKER=private_testnet``: testnet-only adapter; refuses live venue
-and does not enable send. After a GREEN would_send soak this is the mount
-point for ``app.bot.private`` — not a live sender.
+and does not enable send.
+``BBOT_BROKER=private_live``: live sender. Requires ``VENUE=live`` and
+``LIVE_ORDERS=1``. Default send path is trivial dual-leg (Contour B /
+bybit_ws queue→ws.send). Full W6 is opt-in via
+``BBOT_PRIVATE_SEND_PATH=w6`` + ``BBOT_PRIVATE_W6=1``.
 """
 
 from __future__ import annotations
@@ -58,4 +61,17 @@ def make_broker(
             log=log,
             env=e,
         )
-    raise ValueError(f"BBOT_BROKER must be stub|private_testnet, got {kind!r}")
+    if kind in ("private_live", "live"):
+        from app.bot.private.live_broker import make_live_broker
+
+        return make_live_broker(
+            data_root=data_root,
+            journal=journal,
+            trade_lat_ms=trade_lat_ms,
+            notional_usdt=notional_usdt,
+            log=log,
+            env=e,
+        )
+    raise ValueError(
+        f"BBOT_BROKER must be stub|private_testnet|private_live, got {kind!r}"
+    )

@@ -66,6 +66,23 @@ heartbeat/ping, auto-reconnect с bounded backoff в фоне (в т.ч. на id
 сигнал на здоровой сессии. CLI: `--ws-warm-session` (без send); dual-leg send
 подхватывает process warm session автоматически.
 
+**Default live-manager send = trivial dual-leg (2026-09-04).** Staging A/B
+showed Contour A (full W6 recover→approve→lease→prepare on signal→send)
+~2.3–2.6 s with ~340 ms leg skew. Contour B (queue→ws.send) ~0.7–1.1 ms
+signal→send. The live manager default is now Contour B:
+`app/bot/private/ws_trivial_dual_leg.py` + `live_broker.default_live_send_pair`.
+Strategy filters (coin, size, open/close, already-in-position / held_coin)
+stay in `place`. Recover / operator_approval / lease / prepare_approved+
+journal fsync / preflight are **off** the hot path. Frames still use W6
+`build_bybit_trade_place` / `build_okx_trade_place` (reqId+HMAC+orderLinkId,
+OKX instIdCode; OKX WS `id` alphanumeric ≤32 — no underscore). Opt back to W6: `BBOT_PRIVATE_SEND_PATH=w6` **and**
+`BBOT_PRIVATE_W6=1`. `BBOT_PRIVATE_W6=1` alone does not switch the manager.
+See [`b-private-trivial-dual-leg.md`](b-private-trivial-dual-leg.md).
+After both `ws.send`s, Contour B requires both venue trade ACKs before
+local `open_*` / close-clear; one-leg reject or ACK timeout stays flat
+and flatten-closes the accepted open leg (overnight EDEN `60033` mode).
+This is a code default only — no VPS/live deploy in this change.
+
 **Warm + parallel place thread safety (2026-09-04).** Production symptom:
 reduce-only close `request_sent` → immediate `post_dispatch_ambiguity` /
 `error_code=unknown` (not the 5s ack timeout) when warm gen≥2 + W6/W7
@@ -78,6 +95,16 @@ loop thread + `run_coroutine_threadsafe` under a per-socket lock; warm
 trade channel gets heartbeat + silence + non-noise stash so ACK frames are not
 stolen. Cold (non-warm) W6 path unchanged. Fail-closed: `TimeoutError` →
 ambiguous timeout; venue rejects stay rejects.
+
+**Warm keepalive must not hold `_lock` across `recv_text` (2026-09-06).**
+Canary Contour B: Bybit `X-BAPI-TIMESTAMP` at signal+1ms, `ws.send` ~512ms
+later. `_keepalive_tick` held `threading.RLock` around four
+`recv_text(timeout_sec=0.2)` drains; `place_io_section()` only needs that
+lock to bump `_place_inflight`, so send waited for idle keepalive I/O.
+Keepalive now locks only for flag checks / brief heartbeat send, recvs
+outside the lock, and re-checks the counter before each socket (exits if
+place became inflight; stashes a trade frame already in hand). Contour B
+asyncio sender queues are unchanged. No VPS deploy in this change.
 
 **`l1_at_send` / journal fill stamps ≠ venue fill latency.** Метки public
 journal `l1_at_send` и stub `Trade_Lat_ms=100` не измеряют время матча на
@@ -122,6 +149,7 @@ B-bot чат: [`b-bot-starter-prompt.md`](b-bot-starter-prompt.md).
 | Документ | Роль |
 |----------|------|
 | [`b-private-status.md`](b-private-status.md) | Этот статус для чужих оркестраторов |
+| [`b-private-trivial-dual-leg.md`](b-private-trivial-dual-leg.md) | Default live send = Contour B; how to flip W6 |
 | [`b-private-roadmap.md`](b-private-roadmap.md) | Цель ветки и гейты P0–P9 |
 | [`b-private-unlock.md`](b-private-unlock.md) | Письменный unlock 2026-08-18 |
 | [`b-private-starter-prompt.md`](b-private-starter-prompt.md) | Старт чата B-private |
