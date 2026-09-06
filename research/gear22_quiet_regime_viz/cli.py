@@ -64,7 +64,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--data-root",
         type=Path,
-        required=True,
+        default=None,
         help="Local dump root (compacted spread_*.parquet, hive, or CSV).",
     )
     p.add_argument(
@@ -89,8 +89,19 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--out-dir",
         type=Path,
-        required=True,
+        default=None,
         help="Directory for per-coin HTML pages (+ plotly.min.js, coins.json).",
+    )
+    p.add_argument(
+        "--inject-html-dir",
+        type=Path,
+        default=None,
+        help=(
+            "Patch already-built 6-row coin HTML in this directory: extract "
+            "embedded SMA-3 (display) / SMA-12 (floor) / tw_p95 / tw_p99, "
+            "append one corridor + tf-select α25 figure per side, leave "
+            "index.html and coins.json in place. Does not read ticks."
+        ),
     )
     p.add_argument(
         "--gap-threshold-ms",
@@ -154,6 +165,14 @@ def build_arg_parser() -> argparse.ArgumentParser:
             "Default: copy sibling plotly.min.js next to the HTML (file://-friendly)."
         ),
     )
+    p.add_argument(
+        "--no-floors",
+        action="store_true",
+        help=(
+            "Disable the corridor + SMA-12 tf-select α25 floor panel. "
+            "Default: floors on."
+        ),
+    )
     return p
 
 
@@ -172,6 +191,7 @@ def run_viz(
     candle_temporal_bins: int = DEFAULT_CANDLE_TEMPORAL_BINS,
     latency_bins: int = DEFAULT_LATENCY_BINS,
     latency_temporal_bins: int = DEFAULT_LATENCY_TEMPORAL_BINS,
+    floors: bool = True,
 ) -> list[Path]:
     since_ms = parse_since_ms(since)
     until_ms = parse_since_ms(until) if until else int(
@@ -253,6 +273,11 @@ def run_viz(
             "bar_ms": BAR_MS,
             "data_root": str(data_root),
             "plotly": "inline" if inline_plotly else "sibling plotly.min.js",
+            "floors": (
+                "p1–p99 dashed + p5–p95 corridor, SMA-3, tf-select α25 of SMA-12"
+                if floors
+                else "off"
+            ),
         }
         path = write_coin_html(
             out_dir / coin_html_filename(coin_u),
@@ -270,6 +295,7 @@ def run_viz(
             candle_temporal_bins=candle_temporal_bins,
             latency_bins=latency_bins,
             latency_temporal_bins=latency_temporal_bins,
+            floors=floors,
         )
         print(f"wrote {path} (ticks={len(sub)} gaps={len(gaps)})")
         written.append(path)
@@ -278,6 +304,17 @@ def run_viz(
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = build_arg_parser().parse_args(argv)
+    if args.inject_html_dir is not None:
+        from research.gear22_quiet_regime_viz.inject_floors import (
+            inject_html_dir,
+            maybe_annotate_index,
+        )
+
+        inject_html_dir(args.inject_html_dir)
+        maybe_annotate_index(Path(args.inject_html_dir) / "index.html")
+        return 0
+    if args.data_root is None or args.out_dir is None:
+        raise SystemExit("--data-root and --out-dir are required unless --inject-html-dir")
     run_viz(
         data_root=args.data_root,
         coins=args.coins,
@@ -292,6 +329,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         candle_temporal_bins=args.candle_temporal_bins,
         latency_bins=args.latency_bins,
         latency_temporal_bins=args.latency_temporal_bins,
+        floors=not args.no_floors,
     )
     return 0
 
