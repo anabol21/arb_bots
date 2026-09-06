@@ -78,6 +78,9 @@ journal fsync / preflight are **off** the hot path. Frames still use W6
 OKX instIdCode; OKX WS `id` alphanumeric ≤32 — no underscore). Opt back to W6: `BBOT_PRIVATE_SEND_PATH=w6` **and**
 `BBOT_PRIVATE_W6=1`. `BBOT_PRIVATE_W6=1` alone does not switch the manager.
 See [`b-private-trivial-dual-leg.md`](b-private-trivial-dual-leg.md).
+After both `ws.send`s, Contour B requires both venue trade ACKs before
+local `open_*` / close-clear; one-leg reject or ACK timeout stays flat
+and flatten-closes the accepted open leg (overnight EDEN `60033` mode).
 This is a code default only — no VPS/live deploy in this change.
 
 **Warm + parallel place thread safety (2026-09-04).** Production symptom:

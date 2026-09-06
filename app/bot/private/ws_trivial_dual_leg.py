@@ -15,7 +15,9 @@ Contour B initially broke on venue without those fields.
 
 Warm private+trade sockets must already be up (``PrivateWarmSession``).
 This module does not recover inflight leases, consume approvals, or
-acquire leases. Journal / ack / fill observation is after both sends.
+acquire leases. Journal / fill observation is after both sends. Trade ACK
+wait (Contour B local position) is owned by ``live_broker`` /
+``dual_leg_ack`` after ``enqueue_dual`` returns.
 """
 
 from __future__ import annotations
@@ -346,6 +348,9 @@ class TrivialDualSender:
             signal_ts_ms=signal_ts_ms,
             phase=phase,
         )
+        with self._sent_lock:
+            self._sent_ns.pop(f"{phase}:bybit", None)
+            self._sent_ns.pop(f"{phase}:okx", None)
         t0 = time.monotonic_ns()
         b_item = TrivialSendItem(
             venue="bybit",
@@ -380,6 +385,51 @@ class TrivialDualSender:
             first_sent_ns=first_sent,
             second_sent_ns=second_sent,
             items=[b_item, o_item],
+            error=self._errors[-1] if self._errors else None,
+        )
+
+    def enqueue_one(
+        self,
+        *,
+        venue: str,
+        text: str,
+        req_id: str,
+        phase: str,
+        intent_id: Optional[str] = None,
+        dual_leg_id: Optional[str] = None,
+        signal_ts_ms: Optional[int] = None,
+    ) -> TrivialSendResult:
+        """Put one already-signed frame (reduce-only flatten of one accepted leg)."""
+        key = str(venue).strip().lower()
+        if key not in {"bybit", "okx"}:
+            raise TrivialSendError(f"enqueue_one venue must be bybit|okx, got {venue!r}")
+        queue = self._bybit_q if key == "bybit" else self._okx_q
+        if queue is None:
+            raise RuntimeError("trivial sender queues not ready")
+        with self._sent_lock:
+            self._sent_ns.pop(f"{phase}:{key}", None)
+        t0 = time.monotonic_ns()
+        item = TrivialSendItem(
+            venue=key,
+            text=text,
+            req_id=req_id,
+            phase=phase,
+            enqueued_ns=t0,
+            intent_id=intent_id,
+            dual_leg_id=dual_leg_id,
+            signal_ts_ms=signal_ts_ms,
+        )
+        fut = asyncio.run_coroutine_threadsafe(queue.put(item), self._loop)
+        fut.result(timeout=5.0)
+        sent = self._wait_sent(phase, key, timeout_sec=5.0)
+        return TrivialSendResult(
+            first_enqueued_ns=t0,
+            second_enqueued_ns=t0,
+            first_sent_ns=sent,
+            second_sent_ns=sent if sent is not None else None,
+            first_venue=key,
+            second_venue=key,
+            items=[item],
             error=self._errors[-1] if self._errors else None,
         )
 

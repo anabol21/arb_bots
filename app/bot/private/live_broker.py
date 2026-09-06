@@ -4,7 +4,10 @@
 uses: K_live=1, already-in-position, held_coin, open vs close, qty/lot.
 
 Default send is ``ws_trivial_dual_leg`` (Contour B / bybit_ws queue→ws.send)
-with W6 ``build_trade_place`` frames. Full W6 recover → approve → lease →
+with W6 ``build_trade_place`` frames. After both ``ws.send``s, Contour B
+waits for both venue trade ACKs (not fills) before local ``open_*`` / close.
+One-leg reject or ACK timeout keeps local flat and flatten-closes the
+accepted (or timed-out) open leg. Full W6 recover → approve → lease →
 prepare_approved+journal/preflight is **not** on signal→ws.send.
 
 Opt back into W6 (safety experiments only):
@@ -21,10 +24,20 @@ from __future__ import annotations
 import os
 import time
 import uuid
+from contextlib import nullcontext
 from pathlib import Path
 from typing import Any, Callable, Mapping, Optional
 
 from app.bot.journal import JournalWriter
+from app.bot.private.dual_leg_ack import (
+    DualAckResult,
+    FlattenAttempt,
+    WaitOneFn,
+    abort_string,
+    flatten_venues,
+    resolve_ack_timeout_sec,
+    wait_dual_place_acks,
+)
 from app.bot.private.order_sign import LiveCredentials
 from app.bot.private.venue import live_orders_enabled, resolve_venue, send_allowed
 from app.bot.private.wire_transcript import bind_place_on_process_transcript
@@ -52,6 +65,16 @@ from app.bot.stub_broker import (
 )
 
 
+def _flatten_reason(result: DualAckResult, venue: str) -> str:
+    peer = result.okx if venue == "bybit" else result.bybit
+    mine = result.bybit if venue == "bybit" else result.okx
+    if mine.timed_out:
+        return "ack_timeout"
+    if peer.timed_out:
+        return "peer_timeout"
+    return "peer_reject"
+
+
 class LiveBrokerError(RuntimeError):
     """Live broker construction / send-path selection failure."""
 
@@ -69,6 +92,8 @@ def make_live_broker(
     bybit_credentials: Optional[LiveCredentials] = None,
     okx_credentials: Optional[LiveCredentials] = None,
     sender: Optional[TrivialDualSender] = None,
+    ack_wait_fn: Optional[WaitOneFn] = None,
+    ack_timeout_sec: Optional[float] = None,
 ) -> "LiveBroker":
     venue = resolve_venue(env)
     if venue != "live":
@@ -96,6 +121,8 @@ def make_live_broker(
         bybit_credentials=bybit_credentials,
         okx_credentials=okx_credentials,
         sender=sender,
+        ack_wait_fn=ack_wait_fn,
+        ack_timeout_sec=ack_timeout_sec,
     )
 
 
@@ -116,6 +143,8 @@ class LiveBroker(StubBroker):
         bybit_credentials: Optional[LiveCredentials] = None,
         okx_credentials: Optional[LiveCredentials] = None,
         sender: Optional[TrivialDualSender] = None,
+        ack_wait_fn: Optional[WaitOneFn] = None,
+        ack_timeout_sec: Optional[float] = None,
     ) -> None:
         super().__init__(
             data_root=data_root,
@@ -133,8 +162,15 @@ class LiveBroker(StubBroker):
         self._okx_credentials = okx_credentials
         self._owned_sender = sender is None
         self._sender = sender
+        self._ack_wait_fn = ack_wait_fn
+        if ack_timeout_sec is not None:
+            self._ack_timeout_sec = float(ack_timeout_sec)
+        else:
+            self._ack_timeout_sec = resolve_ack_timeout_sec(self.env)
         self.last_send_result: Optional[TrivialSendResult] = None
         self.last_send_path: Optional[str] = None
+        self.last_ack_result: Optional[DualAckResult] = None
+        self.last_flatten: list[FlattenAttempt] = []
 
     def _get_sender(self) -> TrivialDualSender:
         if self._sender is None:
@@ -212,7 +248,7 @@ class LiveBroker(StubBroker):
     def on_valid_tick(self, **kwargs: Any) -> bool:
         """Live fills are venue-observed, not Trade_Lat stub fills.
 
-        Pending is cleared in ``place`` after both ws.send. A later tick
+        Pending is cleared in ``place`` after both trade ACKs. A later tick
         must not invent a second fill.
         """
         return False
@@ -298,6 +334,7 @@ class LiveBroker(StubBroker):
         if send_abort:
             return send_abort
 
+        # Both venue trade ACKs succeeded. Fill remains observational.
         if journal_side in ("open_long", "open_short"):
             self.position = journal_side
             self.held_coin = pending.base_coin.upper()
@@ -308,7 +345,8 @@ class LiveBroker(StubBroker):
         self._persist_pending()
         self._log(
             f"live_broker | sent | intent_id={intent_id} | side={journal_side} | "
-            f"coin={base_coin} | send_path={self.last_send_path} | k_live=1"
+            f"coin={base_coin} | send_path={self.last_send_path} | "
+            f"dual_ack=both_accepted | k_live=1"
         )
         return None
 
@@ -384,27 +422,175 @@ class LiveBroker(StubBroker):
                 return "warm_session_not_ready"
             place_io = session.place_io_section()
 
+        # Hold place_io across send + ACK recv so keepalive cannot steal frames.
+        ctx = place_io if place_io is not None else nullcontext()
         try:
-            result = send_signed_dual(
-                sender=self._get_sender(),
-                bybit_text=bybit_text,
-                okx_text=okx_text,
-                bybit_req_id=bybit_req,
-                okx_req_id=okx_req,
-                phase=phase,
-                place_io=place_io,
+            with ctx:
+                result = send_signed_dual(
+                    sender=self._get_sender(),
+                    bybit_text=bybit_text,
+                    okx_text=okx_text,
+                    bybit_req_id=bybit_req,
+                    okx_req_id=okx_req,
+                    phase=phase,
+                    place_io=None,
+                    intent_id=pending.intent_id,
+                    dual_leg_id=dual_id,
+                    signal_ts_ms=pending.signal_ts_ms,
+                )
+                self.last_send_result = result
+                if result.error:
+                    return f"trivial_send_failed:{result.error}"
+                if result.first_sent_ns is None or result.second_sent_ns is None:
+                    return "trivial_send_incomplete"
+                return self._observe_dual_acks_and_flatten(
+                    pending=pending,
+                    phase=phase,
+                    bybit_req=bybit_req,
+                    okx_req=okx_req,
+                    bybit_leg=bybit_leg,
+                    okx_leg=okx_leg,
+                    inst_code=int(inst_code),
+                    creds=creds,
+                    session=session,
+                    dual_id=dual_id,
+                )
+        except (TrivialSendError, RuntimeError, TimeoutError) as exc:
+            return f"trivial_send_failed:{type(exc).__name__}"
+
+    def _observe_dual_acks_and_flatten(
+        self,
+        *,
+        pending: PendingIntent,
+        phase: str,
+        bybit_req: str,
+        okx_req: str,
+        bybit_leg: PendingLeg,
+        okx_leg: PendingLeg,
+        inst_code: int,
+        creds: LiveCredentials,
+        session: Any,
+        dual_id: str,
+    ) -> Optional[str]:
+        """After both ws.send: require both trade ACKs before local position."""
+        bybit_rt = getattr(session, "bybit_runtime", None) if session is not None else None
+        okx_rt = getattr(session, "okx_runtime", None) if session is not None else None
+        result = wait_dual_place_acks(
+            bybit_req_id=bybit_req,
+            okx_req_id=okx_req,
+            timeout_sec=self._ack_timeout_sec,
+            bybit_runtime=bybit_rt,
+            okx_runtime=okx_rt,
+            wait_one=self._ack_wait_fn,
+        )
+        self.last_ack_result = result
+        self._log(
+            "live_broker | dual_ack | "
+            f"intent_id={pending.intent_id} | phase={phase} | "
+            f"bybit={result.bybit.status}:{result.bybit.venue_code or result.bybit.error or ''} | "
+            f"okx={result.okx.status}:{result.okx.venue_code or result.okx.error or ''} | "
+            f"started_ns={result.recv_started_ns} | finished_ns={result.recv_finished_ns}"
+        )
+        if result.both_accepted:
+            return None
+        abort = abort_string(result)
+        self.last_flatten = []
+        for venue in flatten_venues(result=result, phase=phase):
+            attempt = self._flatten_open_leg(
+                venue=venue,
+                pending=pending,
+                bybit_leg=bybit_leg,
+                okx_leg=okx_leg,
+                inst_code=inst_code,
+                creds=creds,
+                dual_id=dual_id,
+                reason=_flatten_reason(result, venue),
+            )
+            self.last_flatten.append(attempt)
+            self._log(
+                "live_broker | flatten | "
+                f"intent_id={pending.intent_id} | venue={attempt.venue} | "
+                f"reason={attempt.reason} | req_id={attempt.req_id or ''} | "
+                f"sent_ns={attempt.sent_ns or ''} | error={attempt.error or ''}"
+            )
+        self._log(
+            f"live_broker | dual_ack_abort | intent_id={pending.intent_id} | "
+            f"abort={abort} | flatten={len(self.last_flatten)}"
+        )
+        return abort
+
+    def _flatten_open_leg(
+        self,
+        *,
+        venue: str,
+        pending: PendingIntent,
+        bybit_leg: PendingLeg,
+        okx_leg: PendingLeg,
+        inst_code: int,
+        creds: LiveCredentials,
+        dual_id: str,
+        reason: str,
+    ) -> FlattenAttempt:
+        """Reduce-only close of one accepted/timeout open leg. Fail-closed send."""
+        flip = {"buy": "sell", "sell": "buy"}
+        if venue == "bybit":
+            side = flip[bybit_leg.leg_side]
+            symbol = pending.bybit_symbol
+            qty = str(bybit_leg.qty)
+            credentials: Optional[LiveCredentials] = creds
+            inst_id_code: Optional[int] = None
+        else:
+            side = flip[okx_leg.leg_side]
+            symbol = pending.okx_symbol
+            qty = str(okx_leg.qty)
+            credentials = self._okx_credentials
+            inst_id_code = inst_code
+        try:
+            text, req, _ = build_signed_place_text(
+                venue=venue,
+                symbol=symbol,
+                side=side,
+                qty=qty,
+                credentials=credentials,
+                reduce_only=True,
+                inst_id_code=inst_id_code,
+                order_attempt_id=f"f{venue[0]}{dual_id}"[:32],
+                dual_leg_id=dual_id,
+            )
+        except (TrivialSendError, ValueError, TypeError, KeyError) as exc:
+            return FlattenAttempt(
+                venue=venue,
+                req_id=None,
+                reason=reason,
+                error=f"frame_build_failed:{type(exc).__name__}",
+            )
+        try:
+            sent = self._get_sender().enqueue_one(
+                venue=venue,
+                text=text,
+                req_id=req,
+                phase="flatten",
                 intent_id=pending.intent_id,
                 dual_leg_id=dual_id,
                 signal_ts_ms=pending.signal_ts_ms,
             )
         except (TrivialSendError, RuntimeError, TimeoutError) as exc:
-            return f"trivial_send_failed:{type(exc).__name__}"
-        self.last_send_result = result
-        if result.error:
-            return f"trivial_send_failed:{result.error}"
-        if result.first_sent_ns is None or result.second_sent_ns is None:
-            return "trivial_send_incomplete"
-        return None
+            return FlattenAttempt(
+                venue=venue,
+                req_id=req,
+                reason=reason,
+                error=f"send_failed:{type(exc).__name__}",
+            )
+        err = sent.error
+        if sent.first_sent_ns is None:
+            err = err or "flatten_send_incomplete"
+        return FlattenAttempt(
+            venue=venue,
+            req_id=req,
+            reason=reason,
+            sent_ns=sent.first_sent_ns,
+            error=err,
+        )
 
     def _send_via_w6(
         self,
