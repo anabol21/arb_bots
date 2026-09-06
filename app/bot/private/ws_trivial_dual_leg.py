@@ -33,8 +33,11 @@ from app.bot.private.order_plan import OrderPlan
 from app.bot.private.order_sign import LiveCredentials
 from app.bot.private.wire_transcript import bind_place_on_process_transcript
 from app.bot.private.ws_messages import (
+    assert_okx_ws_message_id,
     build_bybit_trade_place,
     build_okx_trade_place,
+    new_okx_ws_id,
+    sanitize_okx_ws_id,
 )
 
 SEND_PATH_TRIVIAL = "trivial"
@@ -197,7 +200,12 @@ def build_signed_place_text(
         plan_venue = "okx_live"
     else:
         raise TrivialSendError(f"venue must be bybit|okx, got {venue!r}")
-    rid = req_id or new_opaque_id("req")[:32]
+    # Bybit reqId may keep journal-style ``prefix_``. OKX trade WS ``id``
+    # must be alphanumeric ≤32 — ``new_opaque_id("req")`` is illegal there.
+    if plan_venue == "okx_live":
+        rid = sanitize_okx_ws_id(req_id) if req_id else new_okx_ws_id()
+    else:
+        rid = req_id or new_opaque_id("req")[:32]
     plan = make_frame_plan(
         venue=plan_venue,
         symbol=symbol,
@@ -217,6 +225,11 @@ def build_signed_place_text(
             raise TrivialSendError("okx place requires positive instIdCode")
         msg = build_okx_trade_place(plan, req_id=rid, inst_id_code=inst_id_code)
     assert_signed_place_frame(plan_venue, msg.text)
+    if plan_venue == "okx_live":
+        try:
+            rid = str(json.loads(msg.text)["id"])
+        except (json.JSONDecodeError, KeyError, TypeError) as exc:
+            raise TrivialSendError("okx place missing id after build") from exc
     return msg.text, rid, plan
 
 
@@ -241,6 +254,10 @@ def assert_signed_place_frame(venue: str, text: str) -> None:
     if venue == "okx_live":
         if not data.get("id"):
             raise TrivialSendError("okx place missing id")
+        try:
+            assert_okx_ws_message_id(data.get("id"))
+        except ValueError as exc:
+            raise TrivialSendError("okx place id is not alphanumeric ≤32") from exc
         args = data.get("args") or []
         if not args or not isinstance(args[0], dict):
             raise TrivialSendError("okx place missing args")

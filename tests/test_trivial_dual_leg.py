@@ -127,8 +127,13 @@ class SignedFrameTests(unittest.TestCase):
         )
         data = json.loads(text)
         self.assertEqual(data["id"], req)
+        self.assertTrue(str(req).isalnum())
+        self.assertNotIn("_", str(req))
+        self.assertLessEqual(len(str(req)), 32)
         self.assertEqual(data["args"][0]["instIdCode"], 193761)
         self.assertIsInstance(data["args"][0]["instIdCode"], int)
+        cl = data["args"][0]["clOrdId"]
+        self.assertTrue(str(cl).isalnum())
         assert_signed_place_frame("okx_live", text)
 
     def test_unsigned_primitive_rejected(self) -> None:

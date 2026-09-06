@@ -21,7 +21,11 @@ After strategy filters in `LiveBroker.place` (kept):
 1. coin / qty / open vs close / `already_in_position` / `held_coin` / `k_live`
 2. build two **signed** place frames with W6 builders
    (`build_bybit_trade_place`, `build_okx_trade_place`) — reqId + HMAC +
-   `orderLinkId`, OKX `instIdCode`
+   `orderLinkId`, OKX `instIdCode`. OKX trade WS message `id` is sanitized
+   at the frame boundary to alphanumeric ≤32 (`sanitize_okx_ws_id`).
+   Journal `new_opaque_id("req")` (`req_<hex>`) is **not** legal on OKX
+   (`60033` / `Parameter id error` on canary 2026-09-05); Bybit `reqId`
+   may still use `prefix_`.
 3. dual `queue.put` → long-lived sender `ws.send` on **both** legs
    (`TrivialDualSender.enqueue_dual`)
 4. no wait-for-fill before the other leg
@@ -93,7 +97,7 @@ A matching warm-session `okx_runtime.okx_inst_id_code` is a last-resort cache.
 ## Tests (local)
 
 ```bash
-PYTHONPATH=. python3 -m unittest tests.test_trivial_dual_leg -v
+PYTHONPATH=. python3 -m unittest tests.test_okx_ws_message_id tests.test_trivial_dual_leg -v
 PYTHONPATH=. python3 -m unittest tests.test_bbot_gear2 tests.test_warm_ws_place_threadsafe -q
 ```
 
@@ -106,3 +110,7 @@ gear2 or mutate VPS.
 - Gear2 strategy thresholds
 - New fill-wait gates on the contour
 - Changing W6/W7 CLI defaults
+- Contour B still marks local `open_long` / `position` after both
+  `ws.send`s, not after venue accept. A one-leg OKX reject (this 60033)
+  can leave Bybit filled and local state open. Fail-closed ack-aware
+  position is a follow-up — it is not on this id-charset fix.

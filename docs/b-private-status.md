@@ -75,7 +75,7 @@ Strategy filters (coin, size, open/close, already-in-position / held_coin)
 stay in `place`. Recover / operator_approval / lease / prepare_approved+
 journal fsync / preflight are **off** the hot path. Frames still use W6
 `build_bybit_trade_place` / `build_okx_trade_place` (reqId+HMAC+orderLinkId,
-OKX instIdCode). Opt back to W6: `BBOT_PRIVATE_SEND_PATH=w6` **and**
+OKX instIdCode; OKX WS `id` alphanumeric ≤32 — no underscore). Opt back to W6: `BBOT_PRIVATE_SEND_PATH=w6` **and**
 `BBOT_PRIVATE_W6=1`. `BBOT_PRIVATE_W6=1` alone does not switch the manager.
 See [`b-private-trivial-dual-leg.md`](b-private-trivial-dual-leg.md).
 This is a code default only — no VPS/live deploy in this change.

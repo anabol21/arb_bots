@@ -89,6 +89,10 @@ appended under `{BBOT_PRIVATE_DATA_ROOT}/wire/` — see
 [`docs/b-private-wire-transcript.md`](b-private-wire-transcript.md).
 No fill-wait on the Contour B path.
 
+OKX trade WS `id` must be alphanumeric ≤32. Canary 2026-09-05 EDEN
+rejected `60033` / `Parameter id error` because Contour B sent
+`new_opaque_id("req")` (`req_<hex>`). `clOrdId` was already legal.
+
 Confirm `spread-bbot-gear2.service` is inactive before any canary start.
 
 Local tests:
