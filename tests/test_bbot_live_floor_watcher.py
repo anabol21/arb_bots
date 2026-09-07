@@ -16,6 +16,7 @@ import numpy as np
 from app.bot.floor_watcher import (
     BAR_MS,
     CLOSE_HISTORY,
+    DEFAULT_BAR_SAMPLE_CAP,
     FORMULA_ID,
     SMA12_HISTORY,
     FloorJournalWriter,
@@ -23,7 +24,9 @@ from app.bot.floor_watcher import (
     _floors,
     causal_sma,
     floor_watch_enabled,
+    tw_p05_p95_from_samples,
 )
+from app.bot.floor_plot import load_floor_rows, render_coin_html, write_coin_plots
 from app.bot.paths import floor_metrics_jsonl_path, resolve_data_root
 
 
@@ -131,6 +134,8 @@ class FloorJournalTests(unittest.TestCase):
             self.assertIn("sma3", rec)
             self.assertIn("sma12", rec)
             self.assertIn("floor_tf_select_a25", rec)
+            self.assertIn("tw_p05", rec)
+            self.assertIn("tw_p95", rec)
             self.assertNotIn("ticks", rec)
             self.assertNotIn("book", rec)
 
@@ -146,20 +151,96 @@ class FloorJournalTests(unittest.TestCase):
             resolve_data_root({"BBOT_DATA_ROOT": "/data/bars"})
 
 
+class FloorCorridorTests(unittest.TestCase):
+    def test_tw_p05_p95_on_synthetic_in_bar_samples(self) -> None:
+        """Known hold pattern: low then high → TW p05 near low, p95 near high."""
+        t0 = (1_725_000_000_000 // BAR_MS) * BAR_MS
+        bar_end = t0 + BAR_MS
+        # 4 minutes at 0.10, then 1 minute at 0.50 (equal spacing 1s for first block).
+        ts: list[int] = []
+        vals: list[float] = []
+        for i in range(240):  # 0..239s
+            ts.append(t0 + i * 1000)
+            vals.append(0.10)
+        ts.append(t0 + 240_000)
+        vals.append(0.50)
+        p05, p95 = tw_p05_p95_from_samples(ts, vals, bar_end_ms=bar_end)
+        self.assertAlmostEqual(p05, 0.10, places=6)
+        self.assertAlmostEqual(p95, 0.50, places=6)
+
+    def test_observer_journals_tw_and_discards_open_bar_samples(self) -> None:
+        obs = LiveFloorObserver(["ETH"], sample_cap=DEFAULT_BAR_SAMPLE_CAP, rng=__import__("random").Random(0))
+        t0 = (1_725_000_000_000 // BAR_MS) * BAR_MS
+        # Several in-bar samples.
+        for i in range(20):
+            obs.note_spreads("ETH", t0 + 5_000 + i * 1_000, 0.1 + i * 0.01, 0.2)
+        st = obs._states[("ETH", "long")]  # noqa: SLF001
+        self.assertEqual(len(st.sample_vals), 20)
+        rows = obs.note_spreads("ETH", t0 + BAR_MS + 1_000, 0.99, 0.88)
+        long_row = next(r for r in rows if r["side"] == "long")
+        self.assertIsNotNone(long_row["tw_p05"])
+        self.assertIsNotNone(long_row["tw_p95"])
+        self.assertLessEqual(float(long_row["tw_p05"]), float(long_row["tw_p95"]))
+        self.assertEqual(long_row["samples_kept"], 20)
+        self.assertEqual(long_row["samples_seen"], 20)
+        # Open-bar samples discarded after close; new bar has only the roll tick.
+        st = obs._states[("ETH", "long")]  # noqa: SLF001
+        self.assertEqual(len(st.sample_vals), 1)
+        self.assertTrue(obs.memory_bound_ok())
+
+    def test_sample_cap_reservoir(self) -> None:
+        obs = LiveFloorObserver(["XRP"], sample_cap=32, rng=__import__("random").Random(1))
+        t0 = (1_725_000_000_000 // BAR_MS) * BAR_MS
+        for i in range(100):
+            obs.note_spreads("XRP", t0 + 1_000 + i * 100, 0.05, 0.06)
+        st = obs._states[("XRP", "long")]  # noqa: SLF001
+        self.assertEqual(len(st.sample_vals), 32)
+        self.assertEqual(st.samples_seen, 100)
+        rows = obs.note_spreads("XRP", t0 + BAR_MS + 500, 0.07, 0.08)
+        long_row = next(r for r in rows if r["side"] == "long")
+        self.assertEqual(long_row["samples_kept"], 32)
+        self.assertEqual(long_row["samples_seen"], 100)
+        self.assertIsNotNone(long_row["tw_p05"])
+        self.assertIsNotNone(long_row["tw_p95"])
+
+
+class FloorPlotTests(unittest.TestCase):
+    def test_plot_html_from_journal_no_tick_files(self) -> None:
+        tmp = Path(tempfile.mkdtemp())
+        writer = FloorJournalWriter(tmp)
+        obs = LiveFloorObserver(["SOL"])
+        t0 = (1_725_000_000_000 // BAR_MS) * BAR_MS
+        for i in range(5):
+            obs.note_spreads("SOL", t0 + 10_000 + i * 2_000, 0.12 + i * 0.01, 0.22)
+        rows = obs.note_spreads("SOL", t0 + BAR_MS + 10_000, 0.15, 0.25)
+        writer.append_rows(rows)
+        out = tmp / "plots"
+        written = write_coin_plots(coin="SOL", rows=rows, out_dir=out, write_png=False)
+        html = written["html"].read_text(encoding="utf-8")
+        self.assertIn("tw_p05", html)
+        self.assertIn("tw_p95", html)
+        self.assertIn("SMA-3", html)
+        self.assertIn("tf-select", html)
+        loaded = load_floor_rows([floor_metrics_jsonl_path(tmp, rows[0]["event_date"])])
+        self.assertEqual(len(loaded), 2)
+        # Still no tick artifacts under data root.
+        self.assertFalse(any("tick" in p.name.lower() for p in tmp.rglob("*") if p.is_file()))
+        self.assertIn("floor canary", render_coin_html(coin="SOL", long_rows=rows, short_rows=rows))
+
+
 class FloorIsolationTests(unittest.TestCase):
     def test_module_has_no_private_imports(self) -> None:
-        path = (
-            Path(__file__).resolve().parents[1] / "app" / "bot" / "floor_watcher.py"
-        )
-        tree = ast.parse(path.read_text(encoding="utf-8"))
-        for node in ast.walk(tree):
-            if isinstance(node, ast.Import):
-                for alias in node.names:
-                    self.assertNotIn("private", alias.name)
-            elif isinstance(node, ast.ImportFrom):
-                mod = node.module or ""
-                self.assertNotIn("private", mod)
-                self.assertFalse(mod.startswith("app.bot.private"))
+        for rel in ("floor_watcher.py", "floor_plot.py"):
+            path = Path(__file__).resolve().parents[1] / "app" / "bot" / rel
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            for node in ast.walk(tree):
+                if isinstance(node, ast.Import):
+                    for alias in node.names:
+                        self.assertNotIn("private", alias.name)
+                elif isinstance(node, ast.ImportFrom):
+                    mod = node.module or ""
+                    self.assertNotIn("private", mod)
+                    self.assertFalse(mod.startswith("app.bot.private"))
 
 
 try:
@@ -263,6 +344,9 @@ class FloorRuntimeWireTests(unittest.TestCase):
         self.assertEqual(len(rt._floor_pending), 2)  # noqa: SLF001
         sides = {r["side"] for r in rt._floor_pending}  # noqa: SLF001
         self.assertEqual(sides, {"long", "short"})
+        for rec in rt._floor_pending:  # noqa: SLF001
+            self.assertIn("tw_p05", rec)
+            self.assertIn("tw_p95", rec)
 
         import asyncio
 

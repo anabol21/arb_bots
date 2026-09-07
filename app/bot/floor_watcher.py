@@ -1,14 +1,22 @@
 """Live gear-2.2 floor observer for BotRuntime (public books only).
 
 In-memory 5m bar aggregation → causal SMA-3 / SMA-12 → locked floor
-``compute_chosen_floor`` (tf-select α25 of SMA-12). Persists metric rows on
-bar close only — never ticks or full books.
+``compute_chosen_floor`` (tf-select α25 of SMA-12), plus in-bar TW
+``tw_p05`` / ``tw_p95`` corridor edges. Persists metric rows on bar close
+only — never ticks or full books.
 
-No private broker imports. Hot path: update last spread + tick count only;
-numpy / floor work runs on bar close, journal I/O is scheduled off the lock.
+No private broker imports. Hot path: update last spread + open-bar sample
+lists only; numpy / floor / TW work runs on bar close; journal I/O is
+scheduled off the lock.
 
 Formula import: load ``floors.py`` by path so we do not pull the research
 package ``__init__`` (pandas/plotly) into the live bot process.
+
+In-bar corridor: time-weighted p05/p95 with the same hold→next /
+last→bar_end convention as gear22 ``quantiles.tick_hold_weights_ms``.
+Open-bar samples are discarded after close. Cap via
+``BBOT_FLOOR_BAR_SAMPLE_CAP`` (default 4096); over cap uses reservoir
+sampling (TW then approximate).
 """
 
 from __future__ import annotations
@@ -17,6 +25,7 @@ import importlib.util
 import json
 import math
 import os
+import random
 import time
 from collections import deque
 from dataclasses import dataclass, field
@@ -38,6 +47,9 @@ SMA12_BARS = 12
 # Bounded memory: closes for SMA-12; SMA-12 history for 12h trim warm-up.
 CLOSE_HISTORY = SMA12_BARS
 SMA12_HISTORY = 144  # W2_TRIM12_BARS in floors.py (asserted on load)
+# Open-bar sample cap (per coin/side). Prefer all samples when under cap.
+DEFAULT_BAR_SAMPLE_CAP = 4096
+ENV_BAR_SAMPLE_CAP = "BBOT_FLOOR_BAR_SAMPLE_CAP"
 SIDES: tuple[str, ...] = ("long", "short")
 
 _GEAR2_FLOOR_PROFILES = frozenset(
@@ -108,6 +120,19 @@ def floor_watch_enabled(
     return str(profile).strip().lower() in _GEAR2_FLOOR_PROFILES
 
 
+def bar_sample_cap(env: Optional[Mapping[str, str]] = None) -> int:
+    """Max in-bar (ts, spread) samples retained per coin/side."""
+    e = env if env is not None else os.environ
+    raw = str(e.get(ENV_BAR_SAMPLE_CAP) or "").strip()
+    if not raw:
+        return DEFAULT_BAR_SAMPLE_CAP
+    try:
+        n = int(raw)
+    except ValueError:
+        return DEFAULT_BAR_SAMPLE_CAP
+    return max(16, n)
+
+
 def _finite(value: Any) -> Optional[float]:
     if value is None or isinstance(value, bool):
         return None
@@ -142,6 +167,69 @@ def _causal_sma_tip(closes: Sequence[float], window: int) -> float:
     return float(series[-1])
 
 
+def tick_hold_weights_ms(ts_ms: np.ndarray, *, last_end_ms: int) -> np.ndarray:
+    """Holding time (ms) until next tick; last → ``last_end_ms`` (gear22 convention)."""
+    ts = np.asarray(ts_ms, dtype="int64")
+    n = int(ts.size)
+    if n == 0:
+        return np.asarray([], dtype="float64")
+    w = np.empty(n, dtype="float64")
+    if n >= 2:
+        w[:-1] = (ts[1:] - ts[:-1]).astype("float64")
+    w[-1] = float(max(0, int(last_end_ms) - int(ts[-1])))
+    w[w < 0] = 0.0
+    return w
+
+
+def time_weighted_quantile(
+    values: np.ndarray,
+    weights_ms: np.ndarray,
+    level: float,
+) -> float:
+    """Single TW quantile (Hyndman-Fan type-7 analogue on weight CDF)."""
+    y = np.asarray(values, dtype="float64")
+    w = np.asarray(weights_ms, dtype="float64")
+    if y.size == 0 or w.size != y.size:
+        return float("nan")
+    finite = np.isfinite(y) & np.isfinite(w) & (w > 0)
+    if not np.any(finite):
+        return float("nan")
+    y = y[finite]
+    w = w[finite]
+    order = np.argsort(y, kind="mergesort")
+    y = y[order]
+    w = w[order]
+    cw = np.cumsum(w)
+    total = float(cw[-1])
+    if total <= 0:
+        return float("nan")
+    target = float(level) * total
+    j = int(np.searchsorted(cw, target, side="left"))
+    j = min(max(j, 0), y.size - 1)
+    return float(y[j])
+
+
+def tw_p05_p95_from_samples(
+    sample_ts: Sequence[int],
+    sample_vals: Sequence[float],
+    *,
+    bar_end_ms: int,
+) -> tuple[float, float]:
+    """TW p05 / p95 for one closed bar. Empty → (nan, nan)."""
+    if not sample_vals or len(sample_ts) != len(sample_vals):
+        return float("nan"), float("nan")
+    ts = np.asarray(sample_ts, dtype="int64")
+    y = np.asarray(sample_vals, dtype="float64")
+    order = np.argsort(ts, kind="mergesort")
+    ts = ts[order]
+    y = y[order]
+    weights = tick_hold_weights_ms(ts, last_end_ms=int(bar_end_ms))
+    return (
+        time_weighted_quantile(y, weights, 0.05),
+        time_weighted_quantile(y, weights, 0.95),
+    )
+
+
 @dataclass
 class _SideBarState:
     bar_start_ms: Optional[int] = None
@@ -151,6 +239,38 @@ class _SideBarState:
     sma12_hist: deque[float] = field(
         default_factory=lambda: deque(maxlen=SMA12_HISTORY)
     )
+    # Open-bar only; cleared on close. Parallel ts/value lists.
+    sample_ts: list[int] = field(default_factory=list)
+    sample_vals: list[float] = field(default_factory=list)
+    samples_seen: int = 0  # includes discarded (for reservoir)
+
+
+def _clear_open_bar_samples(state: _SideBarState) -> None:
+    state.sample_ts.clear()
+    state.sample_vals.clear()
+    state.samples_seen = 0
+
+
+def _append_open_bar_sample(
+    state: _SideBarState,
+    ts_ms: int,
+    value: float,
+    *,
+    cap: int,
+    rng: random.Random,
+) -> None:
+    """Retain all samples under ``cap``; reservoir thereafter."""
+    state.samples_seen += 1
+    n = state.samples_seen
+    if len(state.sample_vals) < cap:
+        state.sample_ts.append(int(ts_ms))
+        state.sample_vals.append(float(value))
+        return
+    # Algorithm R: replace index j with probability cap/n.
+    j = rng.randrange(n)
+    if j < cap:
+        state.sample_ts[j] = int(ts_ms)
+        state.sample_vals[j] = float(value)
 
 
 def _close_side_bar(
@@ -180,7 +300,16 @@ def _close_side_bar(
         edge = close_f - floor
     bar_start = int(state.bar_start_ms)
     bar_end = bar_start + BAR_MS
-    event_date = datetime.fromtimestamp(bar_end / 1000.0, tz=timezone.utc).date().isoformat()
+    tw_p05, tw_p95 = tw_p05_p95_from_samples(
+        state.sample_ts, state.sample_vals, bar_end_ms=bar_end
+    )
+    samples_kept = len(state.sample_vals)
+    samples_seen = int(state.samples_seen)
+    # Discard open-bar ticks immediately — no tick WAL.
+    _clear_open_bar_samples(state)
+    event_date = datetime.fromtimestamp(
+        bar_end / 1000.0, tz=timezone.utc
+    ).date().isoformat()
     return {
         "schema_version": SCHEMA_VERSION,
         "formula_id": FORMULA_ID,
@@ -193,8 +322,12 @@ def _close_side_bar(
         "sma3": _json_float(sma3),
         "sma12": _json_float(sma12),
         "floor_tf_select_a25": _json_float(floor),
+        "tw_p05": _json_float(tw_p05),
+        "tw_p95": _json_float(tw_p95),
         "edge": _json_float(edge),
         "tick_count": int(state.tick_count),
+        "samples_kept": samples_kept,
+        "samples_seen": samples_seen,
         "computed_at_ms": int(computed_at_ms),
     }
 
@@ -202,10 +335,22 @@ def _close_side_bar(
 class LiveFloorObserver:
     """Per-coin / per-side in-memory 5m aggregator for live BotRuntime."""
 
-    def __init__(self, coins: Sequence[str]) -> None:
+    def __init__(
+        self,
+        coins: Sequence[str],
+        *,
+        sample_cap: Optional[int] = None,
+        rng: Optional[random.Random] = None,
+    ) -> None:
         # Ensure formula module loads once; history maxlen matches W2_TRIM12_BARS.
         floors = _floors()
         hist_max = int(floors.W2_TRIM12_BARS)
+        self.sample_cap = (
+            int(sample_cap) if sample_cap is not None else bar_sample_cap()
+        )
+        if self.sample_cap < 16:
+            self.sample_cap = 16
+        self._rng = rng if rng is not None else random.Random()
         self._states: dict[tuple[str, str], _SideBarState] = {}
         for coin in coins:
             c = str(coin).upper()
@@ -216,7 +361,7 @@ class LiveFloorObserver:
                 )
 
     def memory_bound_ok(self) -> bool:
-        """True when every deque respects MemoryMax caps."""
+        """True when every deque / open-bar list respects MemoryMax caps."""
         floors = _floors()
         hist_max = int(floors.W2_TRIM12_BARS)
         for state in self._states.values():
@@ -227,6 +372,10 @@ class LiveFloorObserver:
             if len(state.closes) > CLOSE_HISTORY:
                 return False
             if len(state.sma12_hist) > hist_max:
+                return False
+            if len(state.sample_vals) > self.sample_cap:
+                return False
+            if len(state.sample_ts) != len(state.sample_vals):
                 return False
         return True
 
@@ -279,6 +428,11 @@ class LiveFloorObserver:
             state.bar_start_ms = bar_start
             state.last_close = finite
             state.tick_count = 1 if finite is not None else 0
+            _clear_open_bar_samples(state)
+            if finite is not None:
+                _append_open_bar_sample(
+                    state, ts_ms, finite, cap=self.sample_cap, rng=self._rng
+                )
             return None
         if bar_start < state.bar_start_ms:
             # Out-of-order / clock skew: ignore for bar roll.
@@ -287,6 +441,9 @@ class LiveFloorObserver:
             if finite is not None:
                 state.last_close = finite
                 state.tick_count += 1
+                _append_open_bar_sample(
+                    state, ts_ms, finite, cap=self.sample_cap, rng=self._rng
+                )
             return None
         # New bar → close previous (only if it had ticks).
         closed: Optional[dict[str, Any]] = None
@@ -297,6 +454,11 @@ class LiveFloorObserver:
         state.bar_start_ms = bar_start
         state.last_close = finite
         state.tick_count = 1 if finite is not None else 0
+        _clear_open_bar_samples(state)
+        if finite is not None:
+            _append_open_bar_sample(
+                state, ts_ms, finite, cap=self.sample_cap, rng=self._rng
+            )
         return closed
 
 
