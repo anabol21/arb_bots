@@ -1,0 +1,6 @@
+base_coin,std_spread,status,take
+XRP,0.42,ok,yes
+SOL,0.11,ok,yes
+AAA,0.99,skip,yes
+BTC,0.05,ok,no
+XRP,0.01,bad,yes

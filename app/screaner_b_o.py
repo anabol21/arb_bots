@@ -4,7 +4,6 @@ import json
 import os
 import time
 import logging
-import csv
 import signal
 import sys
 from pathlib import Path
@@ -39,6 +38,7 @@ from utils.tick_validity import (  # noqa: E402
     TickValidityGate,
     book_l1_complete,
 )
+from utils.universe_csv import load_take_yes_pairs  # noqa: E402
 from utils.ws_gap_journal import WsGapJournal  # noqa: E402
 from utils.ws_reconnect import (  # noqa: E402
     BOOK_CONNECT_PRIORITY,
@@ -108,6 +108,7 @@ if not failed_batches_logger.handlers:
 ws_gap_journal = WsGapJournal(GAPS_ROOT, logger=runtime_logger)
 
 UNIVERSE_PATH = os.environ.get("SPREAD_UNIVERSE", "bybit_okx_universe.csv")
+# ROW_START/ROW_END are indices over take=yes coins, not raw CSV row numbers.
 ROW_START = int(os.environ.get("SPREAD_ROW_START", "0"))
 ROW_END = int(os.environ.get("SPREAD_ROW_END", "337"))
 
@@ -138,25 +139,8 @@ def _ms_int(value: Any) -> int:
 
 
 def load_pairs_from_csv(path, row_start=0, row_end=10):
-    pairs = []
-    with open(path, "r", encoding="utf-8", newline="") as f:
-        reader = csv.DictReader(f)
-        rows = list(reader)
-
-    subset = rows[row_start:row_end]
-
-    for row in subset:
-        base_coin = row["base_coin"].strip()
-        okx_symbol = row["okx_symbol"].strip()
-        bybit_symbol = row["bybit_symbol"].strip()
-
-        pairs.append({
-            "base_coin": base_coin,
-            "okx_symbol": okx_symbol,
-            "bybit_symbol": bybit_symbol,
-        })
-
-    return pairs
+    """Load collector pairs. Live screen is take=yes; ROW_START/ROW_END slice that list."""
+    return load_take_yes_pairs(path, row_start, row_end)
 
 
 pairs = load_pairs_from_csv(UNIVERSE_PATH, ROW_START, ROW_END)

@@ -77,6 +77,8 @@ Env overrides (local script only):
 | `SPREAD_LEAN_RUNTIME_LOG` | `output/lean_runtime.log` |
 | `SPREAD_LEAN_UNIVERSE` | `bybit_okx_universe.csv` |
 
+Live pair screen is `take=yes`; `ROW_START`/`ROW_END` indices are over that filtered list.
+
 Layout (local script):
 
 ```text
@@ -143,7 +145,7 @@ No OHLC, no unit metadata columns.
 
 ## Units note (do not put in parquet)
 
-Lot / tick / min-size metadata lives in [`bybit_okx_universe.csv`](../bybit_okx_universe.csv). Join at analysis by `base_coin`.
+Lot / tick / min-size metadata lives in [`bybit_okx_universe.csv`](../bybit_okx_universe.csv). Join at analysis by `base_coin`. Live pair screen is `take=yes`.
 
 ---
 
