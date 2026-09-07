@@ -6,8 +6,9 @@ causal MAs, sparse ticks, red gap regions, and click-to-inspect in-bar
 panels (spread TW-mass hist + TW p50/p95/p99 + equal-time temporal
 means; latency of the triggering venue only, equal-weight ticks).
 
-This module does **not** invent quiet-regime floors or change live bot params.
-Extension hooks for future integral metrics live in ``metrics_ext``.
+One corridor panel per side (p1–p99 dashed, p5–p95 fill, SMA-3,
+tf-select α25 of SMA-12) is plotted for observation only; it does not change live
+bot params. See ``floors`` / ``metrics_ext``.
 """
 
 from __future__ import annotations

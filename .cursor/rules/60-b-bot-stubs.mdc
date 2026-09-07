@@ -19,3 +19,5 @@ Isolation:
 Policy is a pure function. Stub broker logs dual-leg `would_send` with place/ack/fill. No private sockets, no keys, no send. No profitability claims.
 
 Handoff: Model Simulator owns policy; B Stub Runtime owns `app/bot/**`; Runtime Storage may add only the bot unit/paths; Validator + Validation prove D trees are untouched.
+
+Current canary: `spread-bbot-gear2` / `/data/bbot-gear2`; GREEN closed 2026-08-30. Next is live via the B-private orchestrator, not testnet. This rule still describes the historical stub chat (`/data/bbot`, no send).
