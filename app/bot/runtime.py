@@ -11,6 +11,11 @@ from pathlib import Path
 from typing import Any, Optional
 
 from app.bot.broker import make_broker
+from app.bot.floor_watcher import (
+    FloorJournalWriter,
+    LiveFloorObserver,
+    floor_watch_enabled,
+)
 from app.bot.journal import JournalWriter
 from app.bot.paths import (
     ensure_repo_on_syspath,
@@ -275,6 +280,15 @@ class BotRuntime:
         }
         self._private_warm: Any = None
         self._l1_ring_warned = False
+        # Gear 2.2 floor observer (5m bar metrics). Off critical decide/send path.
+        self.floor_enabled = floor_watch_enabled(self.profile)
+        self.floor_observer: LiveFloorObserver | None = None
+        self.floor_journal: FloorJournalWriter | None = None
+        self._floor_pending: list[dict[str, Any]] = []
+        self._floor_flush_warned = False
+        if self.floor_enabled:
+            self.floor_observer = LiveFloorObserver(self.coins)
+            self.floor_journal = FloorJournalWriter(self.data_root)
 
     def _uses_market_manager(self) -> bool:
         if self.policy is not None:
@@ -353,6 +367,7 @@ class BotRuntime:
         try:
             while True:
                 exchange = self._book_last_exchange.get(base_coin, "okx")
+                pending_floor: list[dict[str, Any]] = []
                 async with self._lock:
                     # Refresh gate for the other exchange (book may have updated while coalesced).
                     other = "bybit" if exchange == "okx" else "okx"
@@ -363,6 +378,15 @@ class BotRuntime:
                         complete_l1=book_l1_complete(other_book),
                     )
                     self._handle_book_sync(base_coin, exchange)
+                    # Drain bar-close rows inside the lock; flush I/O after release.
+                    if self._floor_pending:
+                        pending_floor = self._floor_pending
+                        self._floor_pending = []
+                if pending_floor:
+                    asyncio.create_task(
+                        self._flush_floor_rows(pending_floor),
+                        name=f"floor-{base_coin}",
+                    )
                 if not self._book_dirty.get(base_coin):
                     break
                 self._book_dirty[base_coin] = False
@@ -376,9 +400,30 @@ class BotRuntime:
                     self._coalesced_handle_book(base_coin), name=f"tick-{base_coin}"
                 )
 
+    async def _flush_floor_rows(self, rows: list[dict[str, Any]]) -> None:
+        """Persist floor metric rows off the book/decide lock."""
+        if not rows or self.floor_journal is None:
+            return
+        try:
+            await asyncio.to_thread(self.floor_journal.append_rows, rows)
+        except Exception as exc:  # noqa: BLE001 — never stall the public book path
+            if not self._floor_flush_warned:
+                self._floor_flush_warned = True
+                self.log.warning(
+                    "floor_journal_flush_failed | err=%s | n=%s",
+                    type(exc).__name__,
+                    len(rows),
+                )
+
     async def _handle_book(self, base_coin: str, exchange: str) -> None:
+        pending_floor: list[dict[str, Any]] = []
         async with self._lock:
             self._handle_book_sync(base_coin, exchange)
+            if self._floor_pending:
+                pending_floor = self._floor_pending
+                self._floor_pending = []
+        if pending_floor:
+            await self._flush_floor_rows(pending_floor)
 
     def _handle_book_sync(self, base_coin: str, exchange: str) -> None:
         book = self.quotes[base_coin][exchange]
@@ -401,6 +446,12 @@ class BotRuntime:
             spread_long, spread_short = compute_spreads(okx, bybit)
         except (TypeError, ZeroDivisionError, KeyError):
             return
+
+        # Gear 2.2 floor: cheap in-memory note on the same valid spread stream.
+        # Bar-close rows are queued; journal flush runs after the lock (async).
+        self._floor_note_spreads(
+            base_coin, event_local_ts_ms, spread_long, spread_short
+        )
 
         # Fill pending on next live VALID tick after Trade_Lat (no asyncio.sleep).
         if self.broker.has_pending():
@@ -533,6 +584,35 @@ class BotRuntime:
         self.market_state.pending_coin = (
             self.broker.pending.base_coin if self.broker.pending is not None else None
         )
+
+    def _floor_note_spreads(
+        self,
+        base_coin: str,
+        event_local_ts_ms: int,
+        spread_long: float,
+        spread_short: float,
+    ) -> None:
+        """In-memory floor bar update; queue closed rows for async flush."""
+        if self.floor_observer is None:
+            return
+        try:
+            rows = self.floor_observer.note_spreads(
+                base_coin,
+                event_local_ts_ms,
+                spread_long,
+                spread_short,
+            )
+        except Exception as exc:  # noqa: BLE001 — observer must not break decide
+            if not self._floor_flush_warned:
+                self._floor_flush_warned = True
+                self.log.warning(
+                    "floor_note_failed | coin=%s | err=%s",
+                    base_coin,
+                    type(exc).__name__,
+                )
+            return
+        if rows:
+            self._floor_pending.extend(rows)
 
     def _policy_maybe_act(
         self,
@@ -847,7 +927,8 @@ class BotRuntime:
             f"coins={','.join(self.coins)} | thresh_open={thresh} | "
             f"thresh={thresh_cs} | avg_window_sec={avg_sec} | "
             f"data_root={self.data_root} | log={self.log_path} | "
-            f"notional={self.notional} | trade_lat_ms={self.trade_lat_ms}"
+            f"notional={self.notional} | trade_lat_ms={self.trade_lat_ms} | "
+            f"floor_watch={'on' if self.floor_enabled else 'off'}"
         )
         if self.mode == "policy" and self.policy is None:
             self.log.error(
