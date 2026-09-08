@@ -3346,7 +3346,9 @@ class W2PrivateWsTests(unittest.TestCase):
         sub = build_okx_private_subscribe(symbol="BTC-USDT-SWAP")
         sub_obj = json.loads(sub.text)
         self.assertEqual(sub_obj["op"], "subscribe")
-        self.assertEqual(len(sub_obj["args"]), 2)
+        self.assertEqual(len(sub_obj["args"]), 3)
+        channels = [a["channel"] for a in sub_obj["args"]]
+        self.assertEqual(channels, ["orders", "fills", "positions"])
 
         plan = R3OrdersTests()._plan()
         place = build_bybit_trade_place(plan, bybit, req_id="req1", timestamp_ms=1)

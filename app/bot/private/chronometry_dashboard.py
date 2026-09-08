@@ -178,6 +178,7 @@ def _latency_rows(latency: Mapping[str, Any]) -> str:
     rows = [
         ("signal→send", "signal_to_send"),
         ("send→ack", "send_to_ack"),
+        ("send→fill", "send_to_fill"),
         ("signal→fill", "signal_to_fill"),
         ("fill_delivery", "fill_delivery"),
     ]

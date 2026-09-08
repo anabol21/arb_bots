@@ -232,7 +232,12 @@ def _safe_log(event: str, **fields: object) -> None:
 
 @dataclass
 class PrivateStreamRuntime:
-    """One-symbol private stream + optional trade socket (both injected)."""
+    """Private stream + optional trade socket (both injected).
+
+    ``symbol_alias`` is the primary native (W6 single-symbol / first of the
+    live unit pool). ``subscribe_symbols`` is the full private-feed allowlist
+    and must match public L1 coins for the running profile.
+    """
 
     exchange: str  # bybit | okx
     environment: str  # live | testnet | demo
@@ -247,6 +252,9 @@ class PrivateStreamRuntime:
     gate_env: Optional[Mapping[str, str]] = None
     # Default W3 read-only gate; W4 runner injects assert_ws_w4_send_gates.
     profile_gate: Any = None
+    # Full native allowlist for private subscribe / inbound filter. Empty →
+    # ``(symbol_alias,)`` so W3–W6 single-symbol runtimes stay unchanged.
+    subscribe_symbols: tuple[str, ...] = ()
     stream_operation_id: str = field(default_factory=lambda: new_opaque_id("op_stream"))
     reconnect_generation: int = 0
     sequence_state: SequenceHealth = SequenceHealth.RESEED_REQUIRED
@@ -275,6 +283,20 @@ class PrivateStreamRuntime:
             SequenceHealth.GAP,
             SequenceHealth.RESEED_REQUIRED,
         }
+
+    @property
+    def subscribed_natives(self) -> tuple[str, ...]:
+        extra = tuple(s for s in self.subscribe_symbols if s)
+        if extra:
+            return extra
+        if self.symbol_alias:
+            return (self.symbol_alias,)
+        return ()
+
+    def _symbol_in_pool(self, symbol: str) -> bool:
+        if not symbol:
+            return True
+        return symbol in self.subscribed_natives
 
     def assert_live_profile_allows_ws(self, env: Optional[Mapping[str, str]] = None) -> None:
         """Use profile gate; do not connect on wrong profile."""
@@ -340,6 +362,7 @@ class PrivateStreamRuntime:
         env: Mapping[str, str],
         rest_reseed: Optional[RestReseedPort] = None,
         profile_gate: Any = None,
+        subscribe_symbols: Optional[Sequence[str]] = None,
     ) -> "PrivateStreamRuntime":
         """Construct a live WS runtime only when profile gate passes (no socket yet)."""
         gate = profile_gate or assert_ws_runtime_profile_gate
@@ -347,6 +370,13 @@ class PrivateStreamRuntime:
             gate(env)
         else:
             gate(env, environment="live")
+        natives = tuple(
+            str(s).strip()
+            for s in (subscribe_symbols if subscribe_symbols is not None else (symbol_alias,))
+            if str(s).strip()
+        )
+        if not natives:
+            natives = (symbol_alias,) if symbol_alias else ()
         return cls(
             exchange=exchange,
             environment="live",
@@ -357,6 +387,7 @@ class PrivateStreamRuntime:
             rest_reseed=rest_reseed,
             gate_env=dict(env),
             profile_gate=gate,
+            subscribe_symbols=natives,
         )
     def mark_reconnect(self) -> None:
         self.reconnect_generation += 1
@@ -383,9 +414,10 @@ class PrivateStreamRuntime:
 
     def build_subscribe_message(self) -> WsOutboundMessage:
         if self.exchange == "bybit":
+            # Bybit private topics are account-wide; coin pool is client-side.
             return build_bybit_private_subscribe()
         if self.exchange == "okx":
-            return build_okx_private_subscribe(symbol=self.symbol_alias)
+            return build_okx_private_subscribe(symbols=self.subscribed_natives)
         raise ValueError(f"unsupported exchange {self.exchange!r}")
 
     def build_heartbeat(self) -> WsOutboundMessage:
@@ -529,6 +561,12 @@ class PrivateStreamRuntime:
             outcome = "success"
             readiness = "ready"
             ack_state = "received"
+        elif self.subscription_readiness == SubscriptionReadiness.READY:
+            # Extra channel/inst ack (e.g. OKX fills) must not tear down a
+            # ready orders subscription for the live coin pool.
+            outcome = "failure"
+            readiness = "ready"
+            ack_state = "received"
         else:
             self.subscription_readiness = SubscriptionReadiness.NOT_READY
             outcome = "failure"
@@ -552,6 +590,9 @@ class PrivateStreamRuntime:
         self.journal.append(body)
         if already_reseed_cleared:
             # Preserve healthy/ready/unblocked after matched reseed.
+            return
+        if not ok and self.subscription_readiness == SubscriptionReadiness.READY:
+            # Supplemental channel/inst nack after orders ACK: keep the pool feed.
             return
         # First subscribe / reconnect / failed ACK: fail-closed until REST reseed.
         self._sends_blocked = True
@@ -623,13 +664,22 @@ class PrivateStreamRuntime:
     def run_rest_reseed(self) -> dict[str, Any]:
         if self.rest_reseed is None:
             raise RuntimeError("REST reseed port unbound")
-        result = self.rest_reseed.reseed(
-            venue=self.exchange,
-            environment=self.environment,
-            reconnect_generation=self.reconnect_generation,
-            symbol_alias=self.symbol_alias,
+        last: Optional[RestReseedResult] = None
+        natives = self.subscribed_natives or (self.symbol_alias,)
+        for native in natives:
+            last = self.rest_reseed.reseed(
+                venue=self.exchange,
+                environment=self.environment,
+                reconnect_generation=self.reconnect_generation,
+                symbol_alias=native,
+            )
+            if last is None or not last.matched:
+                return self.confirm_rest_reseed(
+                    last if last is not None else RestReseedResult(matched=False, inconclusive=True)
+                )
+        return self.confirm_rest_reseed(
+            last if last is not None else RestReseedResult(matched=False, inconclusive=True)
         )
-        return self.confirm_rest_reseed(result)
 
     def register_plan_fingerprint(self, plan: OrderPlan) -> None:
         self._fingerprint_by_attempt[plan.order_attempt_id] = plan.request_fingerprint
@@ -654,7 +704,7 @@ class PrivateStreamRuntime:
         # in-flight plans still accept working/terminal observations.
         if self.reseed_required and not registered:
             return
-        if parsed.symbol_alias and parsed.symbol_alias != self.symbol_alias:
+        if parsed.symbol_alias and not self._symbol_in_pool(parsed.symbol_alias):
             return
 
         dedupe = parsed.dedupe_key
@@ -1007,7 +1057,7 @@ class PrivateStreamRuntime:
                 return ParsedStreamEvent(kind="ignored")
             row = rows[0] if isinstance(rows[0], Mapping) else {}
             symbol = str(row.get("symbol") or "")
-            if symbol and symbol != self.symbol_alias:
+            if symbol and not self._symbol_in_pool(symbol):
                 return ParsedStreamEvent(kind="ignored", symbol_alias=symbol)
             link = str(row.get("orderLinkId") or "")
             corr = self._fingerprint_by_attempt.get(link) if link else None
@@ -1063,17 +1113,19 @@ class PrivateStreamRuntime:
             return ParsedStreamEvent(kind="sub_ack", ack_ok=False)
         arg = data.get("arg") if isinstance(data.get("arg"), Mapping) else {}
         channel = str(arg.get("channel") or "")
-        if channel in {"orders", "positions"}:
+        if channel in {"orders", "positions", "fills"}:
             rows = data.get("data")
             if not isinstance(rows, list) or not rows:
                 return ParsedStreamEvent(kind="ignored")
             row = rows[0] if isinstance(rows[0], Mapping) else {}
             inst = str(row.get("instId") or arg.get("instId") or "")
-            if inst and inst != self.symbol_alias:
+            if inst and not self._symbol_in_pool(inst):
                 return ParsedStreamEvent(kind="ignored", symbol_alias=inst)
             cl = str(row.get("clOrdId") or "")
             corr = self._fingerprint_by_attempt.get(cl) if cl else None
             state = str(row.get("state") or "").lower()
+            if channel == "fills" and not state:
+                state = "filled"
             # uTime / timestamps must never drive +1 gap; seqId alone is unused
             # here because venue counters are not trusted on these topics.
             time_hint = row.get("uTime")

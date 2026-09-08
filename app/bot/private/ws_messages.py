@@ -295,14 +295,30 @@ def build_okx_private_login(
 
 def build_okx_private_subscribe(
     *,
-    symbol: str,
+    symbol: Optional[str] = None,
+    symbols: Optional[Sequence[str]] = None,
     inst_type: str = "SWAP",
 ) -> WsOutboundMessage:
-    """One-symbol orders + positions subscription on OKX private channel."""
-    args = [
-        {"channel": "orders", "instType": inst_type, "instId": symbol},
-        {"channel": "positions", "instType": inst_type, "instId": symbol},
-    ]
+    """Orders + fills + positions for each active OKX SWAP instId.
+
+    ``fills`` carries ``fillPx`` / ``fillTime`` for chronometry. ``orders``
+    still receives filled-state updates. Never subscribe a leftover experiment
+    symbol as the only inst when ``symbols`` is the live unit's coin pool.
+    """
+    insts = [str(s).strip() for s in (symbols or ()) if str(s).strip()]
+    if not insts and symbol is not None and str(symbol).strip():
+        insts = [str(symbol).strip()]
+    if not insts:
+        raise ValueError("okx private subscribe requires at least one instId")
+    args: list[dict[str, str]] = []
+    for inst in insts:
+        args.extend(
+            [
+                {"channel": "orders", "instType": inst_type, "instId": inst},
+                {"channel": "fills", "instType": inst_type, "instId": inst},
+                {"channel": "positions", "instType": inst_type, "instId": inst},
+            ]
+        )
     body = {"op": "subscribe", "args": args}
     return WsOutboundMessage(
         venue="okx_live",

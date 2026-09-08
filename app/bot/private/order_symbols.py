@@ -7,11 +7,13 @@ BTC remains the W3/W4/W5 default. W6 adds one extra matched pair (TRUMP).
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Mapping, Optional
+from typing import Mapping, Optional, Sequence
 
 from app.policy.trade_manager import (
     CANARY_WAL_EDEN_COINS as CANARY_WAL_EDEN_COINS,
+    GEAR2_WOULD_SEND_COINS as GEAR2_WOULD_SEND_COINS,
     LIVE_SIZE_COINS as LIVE_SIZE_COINS,
+    SIGNAL_TEST_COINS as SIGNAL_TEST_COINS,
     live_size_coin_allowed,
     live_size_coins_for_profile,
 )
@@ -164,3 +166,172 @@ def resolve_live_size_futures_symbol(
             f"(coins={live_size_coins_for_profile(profile)})"
         )
     return found
+
+
+# Public L1 and private WS share this pool. W6 TRUMP is harness-only when no
+# profile/runtime coins are set — never a silent leftover on canary/live-size.
+_PROFILE_DEFAULT_COINS: Mapping[str, tuple[str, ...]] = {
+    "canary_wal_eden": CANARY_WAL_EDEN_COINS,
+    "gear2_would_send": GEAR2_WOULD_SEND_COINS,
+    "signal_test": SIGNAL_TEST_COINS,
+}
+
+
+@dataclass(frozen=True)
+class PrivateSubscribePool:
+    """Native Bybit/OKX instruments for one live unit's coin allowlist."""
+
+    coins: tuple[str, ...]
+    bybit_symbols: tuple[str, ...]
+    okx_symbols: tuple[str, ...]
+
+    @property
+    def bybit_symbol(self) -> str:
+        return self.bybit_symbols[0]
+
+    @property
+    def okx_symbol(self) -> str:
+        return self.okx_symbols[0]
+
+
+def normalize_bbot_profile(raw: object) -> str:
+    name = str(raw or "").strip().lower()
+    if name in {"", "default"}:
+        return "gear1"
+    if name == "gear2":
+        return "gear2_would_send"
+    if name == "canary":
+        return "canary_wal_eden"
+    return name
+
+
+def native_bybit_linear(coin: str) -> str:
+    return f"{str(coin).strip().upper()}USDT"
+
+
+def native_okx_swap(coin: str) -> str:
+    return f"{str(coin).strip().upper()}-USDT-SWAP"
+
+
+def parse_runtime_coins(raw: object) -> tuple[str, ...]:
+    text = str(raw or "").strip()
+    if not text:
+        return ()
+    return tuple(part.strip().upper() for part in text.split(",") if part.strip())
+
+
+def coins_from_runtime_env(
+    env: Optional[Mapping[str, str]] = None,
+    *,
+    coins: Optional[Sequence[str]] = None,
+) -> tuple[str, ...]:
+    """Same coin allowlist as public L1 books for the running profile.
+
+    ``BBOT_COINS`` wins when set. Otherwise the policy-mode profile default
+    (canary → WAL+EDEN, gear2 → BTC/ETH/SOL/XRP, live-size contour via
+    ``BBOT_COINS=SOL,XRP``). Empty when no profile pool is configured (W6
+    harness may then pass TRUMP natives explicitly).
+    """
+    if coins is not None:
+        parsed = tuple(str(c).strip().upper() for c in coins if str(c).strip())
+        return _assert_profile_coins(parsed, env)
+    e = dict(env or {})
+    from_env = parse_runtime_coins(e.get("BBOT_COINS"))
+    if from_env:
+        return _assert_profile_coins(from_env, e)
+    profile = normalize_bbot_profile(e.get("BBOT_PROFILE"))
+    mode = str(e.get("BBOT_MODE") or "policy").strip().lower()
+    if mode != "policy":
+        return ()
+    defaults = _PROFILE_DEFAULT_COINS.get(profile)
+    if not defaults:
+        return ()
+    return defaults
+
+
+def _assert_profile_coins(
+    coins: tuple[str, ...],
+    env: Optional[Mapping[str, str]],
+) -> tuple[str, ...]:
+    profile = normalize_bbot_profile((env or {}).get("BBOT_PROFILE"))
+    if profile == "canary_wal_eden":
+        bad = [c for c in coins if not live_size_coin_allowed(c, profile)]
+        if bad:
+            raise SymbolGateError(
+                f"canary_wal_eden refuses coins {bad}; allowed WAL,EDEN"
+            )
+    return coins
+
+
+def resolve_private_subscribe_pool(
+    env: Optional[Mapping[str, str]] = None,
+    *,
+    coins: Optional[Sequence[str]] = None,
+    bybit_symbol: Optional[str] = None,
+    okx_symbol: Optional[str] = None,
+    bybit_symbols: Optional[Sequence[str]] = None,
+    okx_symbols: Optional[Sequence[str]] = None,
+) -> PrivateSubscribePool:
+    """Instrument set for private orders/fills/positions.
+
+    Profile/runtime coins are the source of truth. Explicit TRUMP (or any
+    other native) is rejected when it is not in that pool. Harness paths
+    without a profile pool still accept explicit W6 natives.
+    """
+    e = dict(env or {})
+    pool_coins = coins_from_runtime_env(e, coins=coins)
+    if pool_coins:
+        bybit = tuple(native_bybit_linear(c) for c in pool_coins)
+        okx = tuple(native_okx_swap(c) for c in pool_coins)
+        stray: list[str] = []
+        for raw, allowed in (
+            (bybit_symbol, bybit),
+            (okx_symbol, okx),
+        ):
+            if raw and str(raw).strip() not in allowed:
+                stray.append(str(raw).strip())
+        for seq, allowed in (
+            (bybit_symbols, bybit),
+            (okx_symbols, okx),
+        ):
+            if seq is None:
+                continue
+            for raw in seq:
+                if str(raw).strip() not in allowed:
+                    stray.append(str(raw).strip())
+        if stray:
+            raise SymbolGateError(
+                "private subscribe symbols "
+                f"{tuple(stray)} are not in the profile/runtime coin pool "
+                f"{pool_coins} (public L1 and private WS share one allowlist)"
+            )
+        return PrivateSubscribePool(
+            coins=pool_coins,
+            bybit_symbols=bybit,
+            okx_symbols=okx,
+        )
+
+    if bybit_symbols is not None or okx_symbols is not None:
+        bybit = tuple(
+            str(s).strip() for s in (bybit_symbols or ()) if str(s).strip()
+        )
+        okx = tuple(str(s).strip() for s in (okx_symbols or ()) if str(s).strip())
+        if not bybit or not okx:
+            raise SymbolGateError(
+                "harness private subscribe requires both bybit_symbols and okx_symbols"
+            )
+    else:
+        bybit_one = str(bybit_symbol or "").strip() or "TRUMPUSDT"
+        okx_one = str(okx_symbol or "").strip() or "TRUMP-USDT-SWAP"
+        bybit = (bybit_one,)
+        okx = (okx_one,)
+    inferred = []
+    for native in bybit:
+        inferred.append(
+            native[:-4] if native.endswith("USDT") and "-" not in native else native
+        )
+    return PrivateSubscribePool(
+        coins=tuple(inferred),
+        bybit_symbols=bybit,
+        okx_symbols=okx,
+    )

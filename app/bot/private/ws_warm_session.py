@@ -6,6 +6,10 @@ Public L1 sockets already stay up for the life of the bot process
 holds one warm private session per process so a signal does not pay that
 round-trip.
 
+Private subscribe instruments are the **same coin pool** as public L1 for the
+running profile (``BBOT_COINS`` / canary WAL+EDEN / gear2 live-size SOL+XRP).
+W6 TRUMP is harness-only when no profile pool is set — never a silent leftover.
+
 Policy (same as public reconnect):
 - connect and handshake at private-live / bot startup;
 - background keep-alive: venue heartbeat/ping, detect drop while idle;
@@ -39,6 +43,10 @@ from app.bot.private.journal_v1 import (
     scan_all_journal_events,
 )
 from app.bot.private.order_sign import LiveCredentials
+from app.bot.private.order_symbols import (
+    PrivateSubscribePool,
+    resolve_private_subscribe_pool,
+)
 from app.bot.private.paths import resolve_data_root
 from app.bot.private.venue import endpoints_for_venue, live_orders_enabled, resolve_venue
 from app.bot.private.ws_gates import (
@@ -64,9 +72,8 @@ from app.bot.private.ws_w4_postonly import _handshake_private_and_trade
 
 LOG = logging.getLogger("bbot.private.ws_warm")
 
-# Default symbols match the immutable W6 dual-leg harness; callers may override.
-_DEFAULT_BYBIT_SYMBOL = "TRUMPUSDT"
-_DEFAULT_OKX_SYMBOL = "TRUMP-USDT-SWAP"
+# Harness-only fallback (W6) when no profile/runtime coin pool is set.
+# Production canary / gear2 must resolve from BBOT_COINS / BBOT_PROFILE instead.
 
 # Public-style bounded exponential backoff (see app/bot/ws_books.py).
 _RECONNECT_BASE_SEC = 5.0
@@ -114,8 +121,11 @@ class PrivateWarmSession:
     socket_provider: WarmSocketProvider
     rest_probe_fn: Optional[Any] = None
     ack_timeout_sec: float = 5.0
-    bybit_symbol: str = _DEFAULT_BYBIT_SYMBOL
-    okx_symbol: str = _DEFAULT_OKX_SYMBOL
+    bybit_symbol: str = "TRUMPUSDT"
+    okx_symbol: str = "TRUMP-USDT-SWAP"
+    bybit_symbols: tuple[str, ...] = ()
+    okx_symbols: tuple[str, ...] = ()
+    coins: tuple[str, ...] = ()
     heartbeat_every_sec: float = _DEFAULT_HEARTBEAT_EVERY_SEC
     poll_sec: float = _DEFAULT_POLL_SEC
     silence_timeout_sec: float = _DEFAULT_SILENCE_TIMEOUT_SEC
@@ -168,6 +178,12 @@ class PrivateWarmSession:
         finally:
             with self._lock:
                 self._place_inflight = max(0, int(self._place_inflight) - 1)
+
+    def subscribed_bybit(self) -> tuple[str, ...]:
+        return self.bybit_symbols or ((self.bybit_symbol,) if self.bybit_symbol else ())
+
+    def subscribed_okx(self) -> tuple[str, ...]:
+        return self.okx_symbols or ((self.okx_symbol,) if self.okx_symbol else ())
 
     def is_ready(self) -> bool:
         if self._stopped or not self._started:
@@ -256,10 +272,14 @@ class PrivateWarmSession:
             self._started = True
             self._last_hb_mono = time.monotonic()
             LOG.info(
-                "warm_started run_id=%s handshake_count=%s ready=%s",
+                "warm_started run_id=%s handshake_count=%s ready=%s "
+                "coins=%s bybit=%s okx=%s",
                 self.run_id,
                 self._handshake_count,
                 self.is_ready(),
+                ",".join(self.coins) or "-",
+                ",".join(self.subscribed_bybit()) or self.bybit_symbol,
+                ",".join(self.subscribed_okx()) or self.okx_symbol,
             )
 
     def ensure_ready(self) -> None:
@@ -660,6 +680,7 @@ def _build_runtime(
     *,
     exchange: str,
     symbol: str,
+    subscribe_symbols: Sequence[str],
     journal: PrivateJournalWriter,
     credentials: LiveCredentials,
     env: Mapping[str, str],
@@ -675,11 +696,31 @@ def _build_runtime(
     return PrivateStreamRuntime.create_gated(
         exchange=exchange,
         symbol_alias=symbol,
+        subscribe_symbols=tuple(subscribe_symbols),
         journal=journal,
         credentials=credentials,
         env=env,
         rest_reseed=reseed,
         profile_gate=profile_gate,
+    )
+
+
+def _pool_for_warm_start(
+    env: Mapping[str, str],
+    *,
+    coins: Optional[Sequence[str]] = None,
+    bybit_symbol: Optional[str] = None,
+    okx_symbol: Optional[str] = None,
+    bybit_symbols: Optional[Sequence[str]] = None,
+    okx_symbols: Optional[Sequence[str]] = None,
+) -> PrivateSubscribePool:
+    return resolve_private_subscribe_pool(
+        env,
+        coins=coins,
+        bybit_symbol=bybit_symbol,
+        okx_symbol=okx_symbol,
+        bybit_symbols=bybit_symbols,
+        okx_symbols=okx_symbols,
     )
 
 
@@ -693,8 +734,11 @@ def start_warm_private_session(
     data_root: Optional[Path] = None,
     rest_probe_fn: Optional[Any] = None,
     ack_timeout_sec: float = 5.0,
-    bybit_symbol: str = _DEFAULT_BYBIT_SYMBOL,
-    okx_symbol: str = _DEFAULT_OKX_SYMBOL,
+    bybit_symbol: Optional[str] = None,
+    okx_symbol: Optional[str] = None,
+    coins: Optional[Sequence[str]] = None,
+    bybit_symbols: Optional[Sequence[str]] = None,
+    okx_symbols: Optional[Sequence[str]] = None,
     profile_gate: Any = None,
     attach: bool = True,
     keepalive: bool = False,
@@ -711,6 +755,10 @@ def start_warm_private_session(
     Private sockets are enabled by default once this runs; there is no
     default-off warm flag. Set ``keepalive=True`` for background
     heartbeat/reconnect (production bot path).
+
+    Subscribe instruments come from the same coin pool as public L1
+    (``BBOT_COINS`` / profile default). Explicit TRUMP is only used when
+    no profile pool is set (W6 harness).
     """
     e = dict(env if env is not None else os.environ)
     gate = profile_gate if profile_gate is not None else assert_ws_warm_private_gates
@@ -719,12 +767,23 @@ def start_warm_private_session(
     except WsProfileGateError:
         raise
 
+    pool = _pool_for_warm_start(
+        e,
+        coins=coins,
+        bybit_symbol=bybit_symbol,
+        okx_symbol=okx_symbol,
+        bybit_symbols=bybit_symbols,
+        okx_symbols=okx_symbols,
+    )
+    bybit_symbol = pool.bybit_symbol
+    okx_symbol = pool.okx_symbol
+
     existing = get_process_warm_session()
     if (
         existing is not None
         and not existing._stopped  # noqa: SLF001
-        and existing.bybit_symbol == bybit_symbol
-        and existing.okx_symbol == okx_symbol
+        and existing.subscribed_bybit() == pool.bybit_symbols
+        and existing.subscribed_okx() == pool.okx_symbols
     ):
         existing.ensure_ready()
         if existing.wire is not None:
@@ -740,6 +799,7 @@ def start_warm_private_session(
     bybit_rt = _build_runtime(
         exchange="bybit",
         symbol=bybit_symbol,
+        subscribe_symbols=pool.bybit_symbols,
         journal=j,
         credentials=bybit_credentials,
         env=e,
@@ -749,6 +809,7 @@ def start_warm_private_session(
     okx_rt = _build_runtime(
         exchange="okx",
         symbol=okx_symbol,
+        subscribe_symbols=pool.okx_symbols,
         journal=j,
         credentials=okx_credentials,
         env=e,
@@ -769,6 +830,9 @@ def start_warm_private_session(
         ack_timeout_sec=float(ack_timeout_sec),
         bybit_symbol=bybit_symbol,
         okx_symbol=okx_symbol,
+        bybit_symbols=pool.bybit_symbols,
+        okx_symbols=pool.okx_symbols,
+        coins=pool.coins,
         heartbeat_every_sec=float(heartbeat_every_sec),
         poll_sec=float(poll_sec),
         silence_timeout_sec=float(silence_timeout_sec),
@@ -801,8 +865,11 @@ def start_warm_private_for_bot_process(
     data_root: Optional[Path] = None,
     journal: Optional[PrivateJournalWriter] = None,
     ack_timeout_sec: float = 5.0,
-    bybit_symbol: str = _DEFAULT_BYBIT_SYMBOL,
-    okx_symbol: str = _DEFAULT_OKX_SYMBOL,
+    bybit_symbol: Optional[str] = None,
+    okx_symbol: Optional[str] = None,
+    coins: Optional[Sequence[str]] = None,
+    bybit_symbols: Optional[Sequence[str]] = None,
+    okx_symbols: Optional[Sequence[str]] = None,
     attach: bool = True,
     stop_event: Any = None,
     heartbeat_every_sec: float = _DEFAULT_HEARTBEAT_EVERY_SEC,
@@ -817,7 +884,7 @@ def start_warm_private_for_bot_process(
     (stub / would_send). When armed, starts private sockets + background
     keep-alive by default before the signal loop — no opt-in warm flag.
     Fail-closed on handshake/secret errors so the process does not enter the
-    signal loop cold.
+    signal loop cold. Subscribe pool is the same coin allowlist as public L1.
     """
     e = dict(env if env is not None else os.environ)
     if not live_private_send_enabled(e):
@@ -848,6 +915,9 @@ def start_warm_private_for_bot_process(
         ack_timeout_sec=float(ack_timeout_sec),
         bybit_symbol=bybit_symbol,
         okx_symbol=okx_symbol,
+        coins=coins,
+        bybit_symbols=bybit_symbols,
+        okx_symbols=okx_symbols,
         profile_gate=assert_ws_warm_private_gates,
         attach=attach,
         keepalive=True,

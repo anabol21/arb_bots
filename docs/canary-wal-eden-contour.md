@@ -13,6 +13,16 @@ hot path.
 
 This is not a profitability claim and not a Gear-2 close stamp.
 
+## Public and private share one coin pool
+
+Public L1 books (`run_okx_books5` / `run_bybit_orderbook1`) and private
+OKX/Bybit orders/fills/positions subscribe the **same** runtime coin
+allowlist: `BBOT_COINS` if set, otherwise the profile default (canary →
+WAL+EDEN; gear2 would_send → BTC/ETH/SOL/XRP; live-size units pass
+`BBOT_COINS=SOL,XRP`). Warm private session start, reconnect, and reseed
+use those natives — not a leftover W6 TRUMP subscribe. Passing TRUMP-only
+while the profile coins are WAL/EDEN is rejected.
+
 ## Profile contract
 
 | Field | Canary | Gear2 would_send (unchanged) |

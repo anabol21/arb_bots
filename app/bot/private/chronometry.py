@@ -27,6 +27,7 @@ from app.bot.private.l1_tick_ring import (
 from app.bot.private.paths import trade_report_dir
 from app.bot.private.ws_messages import okx_ws_id_is_legal
 from app.bot.private.wire_transcript import (
+    extract_venue_ts_ms,
     iter_wire_files,
     read_wire_jsonl,
     scan_all_wire_events,
@@ -369,12 +370,18 @@ def markers_from_send_ack(
         elif direction == "in":
             px = extract_fill_price(ev.get("payload"))
             if px is not None:
+                venue_ts = ev.get("venue_ts_ms")
+                if venue_ts is None:
+                    venue_ts = extract_venue_ts_ms(ev.get("payload"))
+                fill_wall = int(venue_ts) if venue_ts is not None else wall
                 _put(
                     "fill",
                     venue,
-                    wall,
+                    fill_wall,
                     price=px,
                     fill_delivery_ms=ev.get("fill_delivery_ms"),
+                    venue_ts_ms=venue_ts,
+                    local_wall_ms=wall,
                     source="wire",
                 )
             elif ev.get("socket") == "trade" or ev.get("op") in {
@@ -395,6 +402,7 @@ def latency_table(markers: Sequence[Mapping[str, Any]]) -> dict[str, dict[str, O
     out: dict[str, dict[str, Optional[int]]] = {
         "signal_to_send": {"bybit": None, "okx": None},
         "send_to_ack": {"bybit": None, "okx": None},
+        "send_to_fill": {"bybit": None, "okx": None},
         "signal_to_fill": {"bybit": None, "okx": None},
         "fill_delivery": {"bybit": None, "okx": None},
     }
@@ -415,6 +423,8 @@ def latency_table(markers: Sequence[Mapping[str, Any]]) -> dict[str, dict[str, O
             out["signal_to_send"][venue] = int(send["wall_ms"]) - signal_ms
         if send is not None and ack is not None:
             out["send_to_ack"][venue] = int(ack["wall_ms"]) - int(send["wall_ms"])
+        if send is not None and fill is not None:
+            out["send_to_fill"][venue] = int(fill["wall_ms"]) - int(send["wall_ms"])
         if signal_ms is not None and fill is not None:
             out["signal_to_fill"][venue] = int(fill["wall_ms"]) - signal_ms
         if fill is not None and fill.get("fill_delivery_ms") is not None:
