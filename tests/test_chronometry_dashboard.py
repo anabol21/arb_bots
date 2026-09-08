@@ -11,9 +11,12 @@ from unittest.mock import patch
 
 from app.bot.journal import JournalWriter
 from app.bot.private.chronometry import (
+    CLIENT_ID_MIN_PREFIX,
     ChronometryContext,
     build_chronometry_artifact,
+    client_ids_overlap,
     chronometry_enabled,
+    collect_wire_events,
     persist_signal_book_on_place,
     spread_kind_for_side,
     write_chronometry_files,
@@ -304,6 +307,156 @@ class OkxOrdersChannelFillTests(unittest.TestCase):
         fill = next(m for m in art["markers"] if m["kind"] == "fill" and m["venue"] == "okx")
         self.assertEqual(fill["wall_ms"], signal_ts + 75)
         self.assertNotEqual(fill["wall_ms"], signal_ts + 10)
+
+
+class OkxTruncatedClOrdIdMatchTests(unittest.TestCase):
+    """Live canary 2026-09-08: OKX clOrdId is o + 31 hex, not the full dual id."""
+
+    INTENT_ID = "95790b7c-8b21-4e82-bae2-1832ddc5bee1"
+    DUAL_LEG_ID = INTENT_ID.replace("-", "")[:32]
+    CL_ORD_ID = "o" + DUAL_LEG_ID[:31]
+
+    def test_client_ids_overlap_okx_truncated_and_bybit(self) -> None:
+        self.assertEqual(self.DUAL_LEG_ID, "95790b7c8b214e82bae21832ddc5bee1")
+        self.assertEqual(self.CL_ORD_ID, "o95790b7c8b214e82bae21832ddc5bee")
+        self.assertEqual(len(self.CL_ORD_ID), 32)
+        self.assertNotIn(self.DUAL_LEG_ID, self.CL_ORD_ID)
+        self.assertFalse(self.DUAL_LEG_ID in self.CL_ORD_ID)
+        self.assertTrue(client_ids_overlap(self.DUAL_LEG_ID, self.CL_ORD_ID))
+        self.assertTrue(client_ids_overlap(self.INTENT_ID, self.CL_ORD_ID))
+        self.assertTrue(client_ids_overlap(self.DUAL_LEG_ID, "b" + self.DUAL_LEG_ID))
+        self.assertTrue(client_ids_overlap(self.DUAL_LEG_ID, ("fo" + self.DUAL_LEG_ID)[:32]))
+        self.assertFalse(client_ids_overlap(self.DUAL_LEG_ID, "o" + "ab" * 16))
+        self.assertFalse(client_ids_overlap(self.DUAL_LEG_ID, "okx"))
+        self.assertFalse(client_ids_overlap(self.DUAL_LEG_ID, "o95790b7c"))
+        self.assertGreaterEqual(CLIENT_ID_MIN_PREFIX, 12)
+
+    def test_collect_truncated_clordid_marks_venue_fill(self) -> None:
+        signal_ts = 1_757_000_000_000
+        send_wall = signal_ts + 3
+        ack_wall = signal_ts + 33
+        fill_time = send_wall + 30
+        live_wall = send_wall + 2_000
+        partial_wall = send_wall + 4_000
+        filled_wall = send_wall + 6_000
+        snap = capture_signal_book(
+            {"bid_price": 0.05340, "ask_price": 0.05350, "bid_size": 10, "ask_size": 10},
+            {"bid_price": 0.05370, "ask_price": 0.05380, "bid_size": 10, "ask_size": 10},
+            event_local_ts_ms=signal_ts,
+            wall_ms=signal_ts,
+        )
+        okx_req = new_okx_ws_id(prefix="o")
+
+        def _orders(*, state: str, fill_px: str, fill_ms: str, wall_ms: int) -> dict:
+            return {
+                "dir": "in",
+                "venue": "okx",
+                "socket": "private",
+                "wall_ms": wall_ms,
+                "payload": {
+                    "arg": {
+                        "channel": "orders",
+                        "instId": "EDEN-USDT-SWAP",
+                        "instType": "SWAP",
+                    },
+                    "data": [
+                        {
+                            "instId": "EDEN-USDT-SWAP",
+                            "clOrdId": self.CL_ORD_ID,
+                            "state": state,
+                            "fillPx": fill_px,
+                            "avgPx": fill_px,
+                            "cTime": str(send_wall),
+                            "uTime": fill_ms,
+                            "fillTime": fill_ms,
+                        }
+                    ],
+                },
+            }
+
+        extra = [
+            {
+                "dir": "out",
+                "venue": "okx",
+                "socket": "trade",
+                "wall_ms": send_wall,
+                "req_id": okx_req,
+                "intent_id": self.INTENT_ID,
+                "dual_leg_id": self.DUAL_LEG_ID,
+            },
+            {
+                "dir": "in",
+                "venue": "okx",
+                "socket": "trade",
+                "wall_ms": ack_wall,
+                "req_id": okx_req,
+                "op": "order",
+                "intent_id": self.INTENT_ID,
+            },
+            _orders(state="live", fill_px="", fill_ms=str(send_wall), wall_ms=live_wall),
+            _orders(
+                state="partially_filled",
+                fill_px="0.05353",
+                fill_ms=str(fill_time),
+                wall_ms=partial_wall,
+            ),
+            _orders(
+                state="filled",
+                fill_px="0.05353",
+                fill_ms=str(fill_time),
+                wall_ms=filled_wall,
+            ),
+        ]
+        # Private orders frames carry only truncated clOrdId — no intent / req_id.
+        for ev in extra[2:]:
+            self.assertNotIn("intent_id", ev)
+            self.assertNotIn("req_id", ev)
+            self.assertFalse(self.DUAL_LEG_ID in str(ev["payload"]))
+
+        collected = collect_wire_events(
+            data_root=Path("/tmp/unused-okx-clordid-match"),
+            intent_id=self.INTENT_ID,
+            dual_leg_id=self.DUAL_LEG_ID,
+            req_ids=(okx_req,),
+            extra_events=extra,
+        )
+        self.assertGreaterEqual(len(collected), 5)
+        private = [ev for ev in collected if ev.get("socket") == "private"]
+        self.assertEqual(len(private), 3)
+        other = collect_wire_events(
+            data_root=Path("/tmp/unused-okx-clordid-match"),
+            intent_id="aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+            dual_leg_id="aaaaaaaabbbb4ccc8dddeeeeeeeeeeee",
+            extra_events=extra[2:],
+        )
+        self.assertEqual(other, [])
+
+        ctx = ChronometryContext(
+            intent_id=self.INTENT_ID,
+            base_coin="EDEN",
+            spread_side="open_long",
+            phase="open",
+            signal_ts_ms=signal_ts,
+            data_root=Path("/tmp/unused-okx-clordid-match"),
+            dual_leg_id=self.DUAL_LEG_ID,
+            req_ids=(okx_req,),
+            signal_book=snap,
+            wire_events=collected,
+            ticks=_fixture_ticks(),
+            lookback_ms=30_000,
+            lookahead_ms=15_000,
+        )
+        art = build_chronometry_artifact(ctx)
+        self.assertEqual(art["fill_prices"]["okx"], 0.05353)
+        self.assertEqual(art["latency_ms"]["send_to_fill"]["okx"], 30)
+        self.assertIsNotNone(art["latency_ms"]["send_to_fill"]["okx"])
+        fills = [m for m in art["markers"] if m["kind"] == "fill" and m["venue"] == "okx"]
+        self.assertEqual(len(fills), 1)
+        self.assertEqual(fills[0]["wall_ms"], fill_time)
+        self.assertNotEqual(fills[0]["wall_ms"], live_wall)
+        self.assertNotEqual(fills[0]["wall_ms"], partial_wall)
+        self.assertNotEqual(fills[0]["wall_ms"], filled_wall)
+        self.assertNotEqual(fills[0]["wall_ms"], send_wall)
 
 
 class FillVsSignalMathTests(unittest.TestCase):
