@@ -39,7 +39,8 @@ No fill-wait is added to the Contour B send hot path.
 - Matching **spread** series (long or short)
 - Table: signal→send, send→ack, send→fill, signal→fill per venue, `fill_delivery`
   when the wire has venue_ts. Fill markers prefer venue `execTime` / `fillTime`
-  over local recv when present.
+  / OKX orders `uTime` over local recv when present. OKX does **not** subscribe
+  the VIP `fills` channel; `orders` already carries `fillPx` / `avgPx` + `uTime`.
 - **Signal spread** (book at signal) vs **fill spread** (exec/avg prices,
   same policy formula)
 

@@ -232,6 +232,80 @@ class DashboardGeneratorTests(unittest.TestCase):
         self.assertEqual(spread_kind_for_side("open_long"), "long")
 
 
+class OkxOrdersChannelFillTests(unittest.TestCase):
+    def test_orders_fillpx_utime_marks_send_to_fill(self) -> None:
+        """VIP fills channel is not required; orders fillPx/uTime is enough."""
+        signal_ts = 1_000_000
+        snap = capture_signal_book(
+            {"bid_price": 9.94, "ask_price": 9.96, "bid_size": 10, "ask_size": 10},
+            {"bid_price": 10.10, "ask_price": 10.12, "bid_size": 10, "ask_size": 10},
+            event_local_ts_ms=signal_ts,
+            wall_ms=signal_ts,
+        )
+        okx_req = new_okx_ws_id(prefix="o")
+        wire = [
+            {
+                "dir": "out",
+                "venue": "okx",
+                "socket": "trade",
+                "wall_ms": signal_ts + 3,
+                "req_id": okx_req,
+                "intent_id": "intent-orders",
+            },
+            {
+                "dir": "in",
+                "venue": "okx",
+                "socket": "trade",
+                "wall_ms": signal_ts + 45,
+                "req_id": okx_req,
+                "op": "order",
+                "intent_id": "intent-orders",
+            },
+            {
+                "dir": "in",
+                "venue": "okx",
+                "socket": "private",
+                "wall_ms": signal_ts + 90,
+                "payload": {
+                    "arg": {
+                        "channel": "orders",
+                        "instId": "EDEN-USDT-SWAP",
+                    },
+                    "data": [
+                        {
+                            "instId": "EDEN-USDT-SWAP",
+                            "state": "filled",
+                            "fillPx": "9.97",
+                            "avgPx": "9.97",
+                            "cTime": str(signal_ts + 10),
+                            "uTime": str(signal_ts + 75),
+                        }
+                    ],
+                },
+                "intent_id": "intent-orders",
+            },
+        ]
+        ctx = ChronometryContext(
+            intent_id="intent-orders",
+            base_coin="EDEN",
+            spread_side="open_long",
+            phase="open",
+            signal_ts_ms=signal_ts,
+            data_root=Path("/tmp/unused-chronometry-orders"),
+            signal_book=snap,
+            wire_events=wire,
+            ticks=_fixture_ticks(),
+            lookback_ms=30_000,
+            lookahead_ms=15_000,
+        )
+        art = build_chronometry_artifact(ctx)
+        self.assertEqual(art["fill_prices"]["okx"], 9.97)
+        self.assertEqual(art["latency_ms"]["send_to_fill"]["okx"], 72)
+        fill = next(m for m in art["markers"] if m["kind"] == "fill" and m["venue"] == "okx")
+        self.assertEqual(fill["wall_ms"], signal_ts + 75)
+        self.assertNotEqual(fill["wall_ms"], signal_ts + 10)
+
+
 class FillVsSignalMathTests(unittest.TestCase):
     def test_fill_worse_than_signal_long(self) -> None:
         signal = (100.0 - 99.50) / 100.0 * 100.0

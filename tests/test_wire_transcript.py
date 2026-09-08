@@ -219,6 +219,20 @@ class TranscriptAppendTests(unittest.TestCase):
         self.assertIsNone(derive_fill_delivery_ms(local_recv_ms=1005, venue_ts_ms=None))
         self.assertEqual(extract_venue_ts_ms({"data": [{"fillTime": "1700000001000"}]}), 1_700_000_001_000)
         self.assertEqual(extract_venue_ts_ms({"data": [{"uTime": "1700000002"}]}), 1_700_000_002_000)
+        self.assertEqual(
+            extract_venue_ts_ms(
+                {
+                    "data": [
+                        {
+                            "cTime": "1700000000000",
+                            "uTime": "1700000005000",
+                            "fillPx": "1.2",
+                        }
+                    ]
+                }
+            ),
+            1_700_000_005_000,
+        )
 
     def test_timeout_recv_does_not_write(self) -> None:
         with tempfile.TemporaryDirectory() as td:

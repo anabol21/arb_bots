@@ -59,17 +59,19 @@ _SECRET_KEYS = frozenset(
 )
 
 # Venue timestamps used for fill_delivery = local_recv_ms − venue_ts.
-_VENUE_TS_KEYS = (
-    "exectime",
-    "filltime",
-    "utime",
-    "ctime",
-    "updatedtime",
-    "createdtime",
-    "creationtime",
-    "ts",
-    "e",  # some Bybit private payloads use ``E``/``e`` as event ms
-)
+# Lower rank wins when an OKX orders row has both cTime and uTime.
+_VENUE_TS_PRIORITY = {
+    "exectime": 0,
+    "filltime": 0,
+    "utime": 1,
+    "updatedtime": 1,
+    "ctime": 2,
+    "createdtime": 2,
+    "creationtime": 2,
+    "ts": 3,
+    "e": 3,  # some Bybit private payloads use ``E``/``e`` as event ms
+}
+_VENUE_TS_KEYS = frozenset(_VENUE_TS_PRIORITY)
 
 _REQ_ID_KEYS = ("reqid", "req_id", "id")
 
@@ -168,17 +170,22 @@ def extract_req_id(obj: Optional[Mapping[str, Any]]) -> Optional[str]:
 
 
 def extract_venue_ts_ms(obj: Any) -> Optional[int]:
-    """First recognizable venue timestamp (ms) in a parsed frame."""
-    found: list[int] = []
+    """Best venue timestamp (ms) in a parsed frame.
+
+    Prefer ``fillTime`` / ``execTime``, then ``uTime``, then create-time.
+    OKX ``orders`` rows carry both ``cTime`` and ``uTime``; fill chronometry
+    must use the fill/update time, not order creation.
+    """
+    found: list[tuple[int, int]] = []
 
     def _walk(node: Any) -> None:
         if isinstance(node, Mapping):
             for key, value in node.items():
                 nk = _norm_key(key)
-                if nk in _VENUE_TS_KEYS:
+                if nk in _VENUE_TS_PRIORITY:
                     ms = _as_epoch_ms(value)
                     if ms is not None:
-                        found.append(ms)
+                        found.append((_VENUE_TS_PRIORITY[nk], ms))
                 _walk(value)
             return
         if isinstance(node, list):
@@ -186,7 +193,10 @@ def extract_venue_ts_ms(obj: Any) -> Optional[int]:
                 _walk(item)
 
     _walk(obj)
-    return found[0] if found else None
+    if not found:
+        return None
+    found.sort(key=lambda item: item[0])
+    return found[0][1]
 
 
 def _as_epoch_ms(value: Any) -> Optional[int]:
