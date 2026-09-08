@@ -235,7 +235,7 @@ class DashboardGeneratorTests(unittest.TestCase):
 class OkxOrdersChannelFillTests(unittest.TestCase):
     def test_orders_fillpx_utime_marks_send_to_fill(self) -> None:
         """VIP fills channel is not required; orders fillPx/uTime is enough."""
-        signal_ts = 1_000_000
+        signal_ts = 1_700_000_000_000
         snap = capture_signal_book(
             {"bid_price": 9.94, "ask_price": 9.96, "bid_size": 10, "ask_size": 10},
             {"bid_price": 10.10, "ask_price": 10.12, "bid_size": 10, "ask_size": 10},
