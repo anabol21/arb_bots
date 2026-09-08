@@ -851,7 +851,8 @@ class BotRuntime:
         # Private WS: process-lifetime like public L1 when live private send is on.
         try:
             self._private_warm = self.start_private_warm_if_live_send(
-                stop_event=self.stop_event
+                stop_event=self.stop_event,
+                coins=self.coins,
             )
         except Exception as exc:
             self.log.error(

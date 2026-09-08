@@ -133,6 +133,7 @@ def _artifact(**overrides: object) -> dict:
             "socket": "private",
             "wall_ms": signal_ts + 80,
             "payload": {"data": [{"execPrice": "10.08", "execTime": str(signal_ts + 70)}]},
+            "venue_ts_ms": signal_ts + 70,
             "fill_delivery_ms": 10,
             "intent_id": "intent-1",
         },
@@ -142,6 +143,7 @@ def _artifact(**overrides: object) -> dict:
             "socket": "private",
             "wall_ms": signal_ts + 90,
             "payload": {"data": [{"fillPx": "9.97", "fillTime": str(signal_ts + 75)}]},
+            "venue_ts_ms": signal_ts + 75,
             "fill_delivery_ms": 15,
             "intent_id": "intent-1",
         },
@@ -196,8 +198,10 @@ class DashboardGeneratorTests(unittest.TestCase):
         lat = art["latency_ms"]
         self.assertEqual(lat["signal_to_send"]["bybit"], 2)
         self.assertEqual(lat["send_to_ack"]["bybit"], 38)
-        self.assertEqual(lat["signal_to_fill"]["okx"], 90)
+        self.assertEqual(lat["signal_to_fill"]["okx"], 75)
+        self.assertEqual(lat["send_to_fill"]["okx"], 72)
         self.assertEqual(lat["fill_delivery"]["bybit"], 10)
+        self.assertIn("send→fill", html)
 
     def test_empty_ring_does_not_invent_ticks(self) -> None:
         art = _artifact()

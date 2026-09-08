@@ -37,8 +37,9 @@ No fill-wait is added to the Contour B send hot path.
 - Sell-venue **bid** tape (open_long: Bybit bid) with signal / ack / fill
 - Buy-venue **ask** tape (open_long: OKX ask) with the same markers
 - Matching **spread** series (long or short)
-- Table: signal→send, send→ack, signal→fill per venue, `fill_delivery`
-  when the wire has venue_ts
+- Table: signal→send, send→ack, send→fill, signal→fill per venue, `fill_delivery`
+  when the wire has venue_ts. Fill markers prefer venue `execTime` / `fillTime`
+  over local recv when present.
 - **Signal spread** (book at signal) vs **fill spread** (exec/avg prices,
   same policy formula)
 

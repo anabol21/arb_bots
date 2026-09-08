@@ -217,7 +217,11 @@ class LiveBroker(StubBroker):
         session = self._warm_session_or_none()
         if session is None:
             return None
-        if getattr(session, "okx_symbol", None) != symbol:
+        okx_syms = tuple(getattr(session, "okx_symbols", ()) or ())
+        if okx_syms:
+            if symbol not in okx_syms:
+                return None
+        elif getattr(session, "okx_symbol", None) != symbol:
             return None
         runtime = getattr(session, "okx_runtime", None)
         code = getattr(runtime, "okx_inst_id_code", None) if runtime is not None else None
