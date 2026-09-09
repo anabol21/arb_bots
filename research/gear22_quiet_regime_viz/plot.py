@@ -273,8 +273,8 @@ def build_spread_block_figure(
             x=buckets["bar_start_dt"],
             y=buckets["tick_count"],
             name=f"{side} tick_count",
-            marker_color="#4c78a8",
-            opacity=0.85,
+            marker_color="#1f77b4",
+            opacity=1.0,
             customdata=buckets["update_rate_hz"],
             hovertemplate=(
                 "%{x}<br>tick_count=%{y}"
