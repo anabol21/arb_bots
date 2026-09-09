@@ -107,6 +107,8 @@ HTML). A rolling public L1 ring (default 60s) feeds the tape; the
 signal-time book is snapshotted at `place` so signal spread survives
 ring wrap. See [`canary-trade-chronometry.md`](canary-trade-chronometry.md).
 The 2026-09-06 EDEN open cannot be reconstructed: no ring existed then.
+Latency from the 2026-09-08 overnight 10-sample EDEN stop:
+[`canary-wal-eden-latency-results-2026-09-08.md`](canary-wal-eden-latency-results-2026-09-08.md).
 
 OKX trade WS `id` must be alphanumeric ≤32. Canary 2026-09-05 EDEN
 rejected `60033` / `Parameter id error` because Contour B sent

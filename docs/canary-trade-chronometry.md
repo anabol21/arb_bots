@@ -18,6 +18,10 @@ did not keep an L1 ring, and `/data/live` EDEN parquet that day starts
 ~10 minutes after the open. Wire + fills still exist; this change does
 **not** invent ticks for that trade.
 
+Overnight 2026-09-08 EDEN dual-leg send→ack / send→fill numbers (live
+table plus offline rebuild after the `clOrdId` match fix):
+[`canary-wal-eden-latency-results-2026-09-08.md`](canary-wal-eden-latency-results-2026-09-08.md).
+
 ## What is recorded
 
 1. **Rolling public L1 ring** (canary coins, default 60s / 16384 ticks).
