@@ -29,6 +29,11 @@ from app.bot.tw_p50_watcher import (
     TwP50JournalWriter,
     tw_p50_watch_enabled,
 )
+from app.bot.theta_screener import (
+    LiveThetaScreener,
+    ThetaJournalWriter,
+    theta_watch_enabled,
+)
 from app.bot.stub_broker import InstrumentMeta
 from app.bot.ws_books import (
     books_ready,
@@ -303,6 +308,18 @@ class BotRuntime:
         if self.tw_p50_enabled:
             self.tw_p50_observer = LiveTwP50Observer(self.coins)
             self.tw_p50_journal = TwP50JournalWriter(self.data_root)
+        # Theta = p50 − floor; ~1 Hz follow-on to tw_p50 emit (never ticks).
+        self.theta_enabled = theta_watch_enabled(self.profile)
+        self.theta_screener: LiveThetaScreener | None = None
+        self.theta_journal: ThetaJournalWriter | None = None
+        self._theta_flush_warned = False
+        if self.theta_enabled:
+            self.theta_screener = LiveThetaScreener(
+                self.coins,
+                floor_observer=self.floor_observer,
+                tw_p50_observer=self.tw_p50_observer,
+            )
+            self.theta_journal = ThetaJournalWriter(self.data_root)
 
     def _uses_market_manager(self) -> bool:
         if self.policy is not None:
@@ -674,7 +691,10 @@ class BotRuntime:
                 )
 
     async def _tw_p50_emit_loop(self) -> None:
-        """~1 Hz: compute TW p50 snapshots, journal under tw_p50/ (never ticks)."""
+        """~1 Hz: compute TW p50 snapshots, journal under tw_p50/ (never ticks).
+
+        When theta is enabled, emit theta rows immediately after (same cadence).
+        """
         while not self.stop_event.is_set():
             try:
                 await asyncio.wait_for(
@@ -705,6 +725,78 @@ class BotRuntime:
             ]
             if rows:
                 await self._flush_tw_p50_rows(rows)
+            if self.theta_enabled and self.theta_screener is not None:
+                await self._emit_theta_from_tw(snapshots)
+
+    async def _theta_emit_loop(self) -> None:
+        """~1 Hz theta when TW p50 watch is off but theta is on."""
+        while not self.stop_event.is_set():
+            try:
+                await asyncio.wait_for(
+                    self.stop_event.wait(), timeout=EMIT_INTERVAL_SEC
+                )
+                break
+            except asyncio.TimeoutError:
+                pass
+            if self.theta_screener is None:
+                continue
+            try:
+                snaps = await asyncio.to_thread(self.theta_screener.compute_snapshots)
+            except Exception as exc:  # noqa: BLE001
+                if not self._theta_flush_warned:
+                    self._theta_flush_warned = True
+                    self.log.warning(
+                        "theta_compute_failed | err=%s",
+                        type(exc).__name__,
+                    )
+                continue
+            if snaps:
+                await self._flush_theta_rows([s.as_row() for s in snaps])
+
+    async def _emit_theta_from_tw(self, tw_snapshots: list[Any]) -> None:
+        """Follow-on: theta from TW snapshots + last floor (never ticks)."""
+        if self.theta_screener is None:
+            return
+        try:
+            theta_snaps = await asyncio.to_thread(
+                self.theta_screener.compute_from_tw_snapshots, tw_snapshots
+            )
+        except Exception as exc:  # noqa: BLE001
+            if not self._theta_flush_warned:
+                self._theta_flush_warned = True
+                self.log.warning(
+                    "theta_compute_failed | err=%s",
+                    type(exc).__name__,
+                )
+            return
+        # Only journal sides that had some TW activity (same filter as tw_p50).
+        active_keys = {
+            (s.base_coin, s.side)
+            for s in tw_snapshots
+            if s.n_5m > 0 or s.coverage_5m > 0.0 or s.n_1m > 0
+        }
+        rows = [
+            s.as_row()
+            for s in theta_snaps
+            if (s.base_coin, s.side) in active_keys
+        ]
+        if rows:
+            await self._flush_theta_rows(rows)
+
+    async def _flush_theta_rows(self, rows: list[dict[str, Any]]) -> None:
+        """Persist theta metric rows off the book/decide lock."""
+        if not rows or self.theta_journal is None:
+            return
+        try:
+            await asyncio.to_thread(self.theta_journal.append_rows, rows)
+        except Exception as exc:  # noqa: BLE001 — never stall the public book path
+            if not self._theta_flush_warned:
+                self._theta_flush_warned = True
+                self.log.warning(
+                    "theta_journal_flush_failed | err=%s | n=%s",
+                    type(exc).__name__,
+                    len(rows),
+                )
 
     def _policy_maybe_act(
         self,
@@ -1021,7 +1113,8 @@ class BotRuntime:
             f"data_root={self.data_root} | log={self.log_path} | "
             f"notional={self.notional} | trade_lat_ms={self.trade_lat_ms} | "
             f"floor_watch={'on' if self.floor_enabled else 'off'} | "
-            f"tw_p50_watch={'on' if self.tw_p50_enabled else 'off'}"
+            f"tw_p50_watch={'on' if self.tw_p50_enabled else 'off'} | "
+            f"theta_watch={'on' if self.theta_enabled else 'off'}"
         )
         if self.mode == "policy" and self.policy is None:
             self.log.error(
@@ -1054,6 +1147,11 @@ class BotRuntime:
         if self.tw_p50_enabled and self.tw_p50_observer is not None:
             tasks.append(
                 asyncio.create_task(self._tw_p50_emit_loop(), name="tw-p50-emit")
+            )
+        elif self.theta_enabled and self.theta_screener is not None:
+            # Theta alone (TW off): still emit ~1 Hz from last RAM snapshots.
+            tasks.append(
+                asyncio.create_task(self._theta_emit_loop(), name="theta-emit")
             )
         for coin in self.coins:
             meta = self._meta(coin)

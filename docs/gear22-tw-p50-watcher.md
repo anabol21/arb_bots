@@ -3,7 +3,8 @@
 **Track:** 3 Glue / B-bot. **Gear:** 2.2 observation on the live public market watcher.  
 **Status:** async observer on `BotRuntime` — alongside the floor watcher, not instead of it. Not a trading threshold, not private WS, not tick WAL.
 
-Code: [`app/bot/tw_p50_watcher.py`](../app/bot/tw_p50_watcher.py), wired from [`app/bot/runtime.py`](../app/bot/runtime.py) next to [`app/bot/floor_watcher.py`](../app/bot/floor_watcher.py).
+Code: [`app/bot/tw_p50_watcher.py`](../app/bot/tw_p50_watcher.py), wired from [`app/bot/runtime.py`](../app/bot/runtime.py) next to [`app/bot/floor_watcher.py`](../app/bot/floor_watcher.py).  
+Theta follow-on (`p50 − floor`): [`docs/gear22-theta-screener.md`](gear22-theta-screener.md).
 
 ## Process (words)
 

@@ -69,6 +69,7 @@ def resolve_data_root(env: Optional[dict] = None) -> Path:
     (root / "journal").mkdir(parents=True, exist_ok=True)
     (root / "floor").mkdir(parents=True, exist_ok=True)
     (root / "tw_p50").mkdir(parents=True, exist_ok=True)
+    (root / "theta").mkdir(parents=True, exist_ok=True)
     (root / "state").mkdir(parents=True, exist_ok=True)
     (root / ".tmp").mkdir(parents=True, exist_ok=True)
     return root.resolve()
@@ -119,6 +120,24 @@ def tw_p50_metrics_jsonl_path(data_root: Path, event_date: str) -> Path:
     if _is_under_denied(data_root):
         raise RuntimeError(f"refusing tw_p50 metrics under denied path: {data_root}")
     path = data_root / "tw_p50" / f"event_date={event_date}"
+    path.mkdir(parents=True, exist_ok=True)
+    return path / "metrics.jsonl"
+
+
+def theta_dir(data_root: Path) -> Path:
+    """Return ``{data_root}/theta`` (create if needed). Never under D trees."""
+    if _is_under_denied(data_root):
+        raise RuntimeError(f"refusing theta dir under denied path: {data_root}")
+    path = data_root / "theta"
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def theta_metrics_jsonl_path(data_root: Path, event_date: str) -> Path:
+    """``{data_root}/theta/event_date=YYYY-MM-DD/metrics.jsonl`` — 1 Hz theta only."""
+    if _is_under_denied(data_root):
+        raise RuntimeError(f"refusing theta metrics under denied path: {data_root}")
+    path = data_root / "theta" / f"event_date={event_date}"
     path.mkdir(parents=True, exist_ok=True)
     return path / "metrics.jsonl"
 

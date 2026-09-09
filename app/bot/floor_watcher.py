@@ -230,6 +230,17 @@ def tw_p05_p95_from_samples(
     )
 
 
+@dataclass(frozen=True)
+class FloorSnapshot:
+    """Latest closed-bar floor for one ``(base_coin, side)`` (RAM only)."""
+
+    base_coin: str
+    side: str
+    floor_tf_select_a25: float
+    bar_end_ms: int
+    computed_at_ms: int
+
+
 @dataclass
 class _SideBarState:
     bar_start_ms: Optional[int] = None
@@ -352,6 +363,8 @@ class LiveFloorObserver:
             self.sample_cap = 16
         self._rng = rng if rng is not None else random.Random()
         self._states: dict[tuple[str, str], _SideBarState] = {}
+        # Latest finite floor per coin/side — read-only for theta / consumers.
+        self._last_floors: dict[tuple[str, str], FloorSnapshot] = {}
         for coin in coins:
             c = str(coin).upper()
             for side in SIDES:
@@ -410,7 +423,38 @@ class LiveFloorObserver:
             )
             if row is not None:
                 rows.append(row)
+                self._maybe_store_last_floor(row)
         return rows
+
+    def _maybe_store_last_floor(self, row: Mapping[str, Any]) -> None:
+        """Keep latest finite ``floor_tf_select_a25`` (no formula change)."""
+        floor = _finite(row.get("floor_tf_select_a25"))
+        if floor is None:
+            return
+        coin = str(row.get("base_coin") or "").upper()
+        side = str(row.get("side") or "")
+        if not coin or side not in SIDES:
+            return
+        self._last_floors[(coin, side)] = FloorSnapshot(
+            base_coin=coin,
+            side=side,
+            floor_tf_select_a25=float(floor),
+            bar_end_ms=int(row.get("bar_end_ms") or 0),
+            computed_at_ms=int(row.get("computed_at_ms") or 0),
+        )
+
+    def last_floor_snapshot(
+        self, base_coin: str, side: str
+    ) -> Optional[FloorSnapshot]:
+        """Read-only: latest finite floor snapshot for ``(coin, side)``, else None."""
+        return self._last_floors.get((str(base_coin).upper(), str(side)))
+
+    def last_floor(self, base_coin: str, side: str) -> Optional[float]:
+        """Read-only: latest finite ``floor_tf_select_a25``, else None."""
+        snap = self.last_floor_snapshot(base_coin, side)
+        if snap is None:
+            return None
+        return float(snap.floor_tf_select_a25)
 
     def _note_side(
         self,
