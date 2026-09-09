@@ -320,7 +320,7 @@ class CanaryPrivateSubscribePoolTests(unittest.TestCase):
         self.assertEqual(pool.bybit_symbols, ("SOLUSDT", "XRPUSDT"))
         self.assertEqual(pool.okx_symbols, ("SOL-USDT-SWAP", "XRP-USDT-SWAP"))
 
-    def test_okx_subscribe_args_cover_pool_including_fills(self) -> None:
+    def test_okx_subscribe_args_cover_pool_without_vip_fills(self) -> None:
         from app.bot.private.ws_messages import build_okx_private_subscribe
 
         pool = resolve_private_subscribe_pool(
@@ -336,7 +336,8 @@ class CanaryPrivateSubscribePoolTests(unittest.TestCase):
         insts = {a["instId"] for a in sub["args"]}
         channels = {a["channel"] for a in sub["args"]}
         self.assertEqual(insts, {"WAL-USDT-SWAP", "EDEN-USDT-SWAP"})
-        self.assertEqual(channels, {"orders", "fills", "positions"})
+        self.assertEqual(channels, {"orders", "positions"})
+        self.assertNotIn("fills", channels)
         self.assertNotIn("TRUMP-USDT-SWAP", insts)
 
 
@@ -439,7 +440,8 @@ class CanaryWarmSubscribeTests(unittest.TestCase):
             insts = {a["instId"] for a in sub_frames[0]["args"]}
             channels = {a["channel"] for a in sub_frames[0]["args"]}
             self.assertEqual(insts, {"WAL-USDT-SWAP", "EDEN-USDT-SWAP"})
-            self.assertEqual(channels, {"orders", "fills", "positions"})
+            self.assertEqual(channels, {"orders", "positions"})
+            self.assertNotIn("fills", channels)
             self.assertNotIn("TRUMP-USDT-SWAP", insts)
 
     def test_warm_replaces_stale_trump_session_with_canary_pool(self) -> None:

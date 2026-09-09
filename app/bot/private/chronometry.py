@@ -8,6 +8,7 @@ and off the place return unless ``BBOT_CHRONOMETRY_SYNC=1``.
 from __future__ import annotations
 
 import os
+import re
 import threading
 import time
 from dataclasses import dataclass
@@ -64,6 +65,11 @@ _ORDER_ID_KEYS = frozenset(
         "sorderid",
     }
 )
+# Venue client-id caps: OKX clOrdId ≤32 (``o`` + 31 hex), Bybit orderLinkId ≤36,
+# flatten ``f{venue[0]}{dual}`` then the same caps. 12 hex chars is 48 bits —
+# long enough to reject short tokens, short enough for those truncations.
+CLIENT_ID_MIN_PREFIX = 12
+_VENUE_HEX_ID_RE = re.compile(r"^[a-z]{1,2}([0-9a-f]{12,})$")
 
 LogFn = Callable[[str], None]
 
@@ -214,6 +220,49 @@ def _payload_ids(payload: Any) -> set[str]:
     return out
 
 
+def _normalize_client_id(value: str) -> str:
+    return str(value).strip().lower().replace("-", "").replace("_", "")
+
+
+def _client_id_forms(value: str) -> tuple[str, ...]:
+    """Compact id plus optional hex tail after a 1–2 letter venue prefix."""
+    compact = _normalize_client_id(value)
+    if not compact:
+        return ()
+    forms = [compact]
+    matched = _VENUE_HEX_ID_RE.match(compact)
+    if matched:
+        forms.append(matched.group(1))
+    return tuple(dict.fromkeys(forms))
+
+
+def client_ids_overlap(
+    left: str,
+    right: str,
+    *,
+    min_prefix: int = CLIENT_ID_MIN_PREFIX,
+) -> bool:
+    """True if venue-capped client ids refer to the same intent.
+
+    Containment is checked both ways on the compact forms and on the hex
+    tail after ``o`` / ``b`` / ``fo`` / ``fb``. The shorter token must be
+    at least ``min_prefix`` characters so a lone ``o`` or ``okx`` cannot
+    match. Prefix/suffix containment is the truncation case: OKX
+    ``clOrdId`` drops the last hex of ``dual_leg_id`` to stay ≤32.
+    """
+    if min_prefix < 1:
+        raise ValueError("min_prefix must be >= 1")
+    for left_form in _client_id_forms(left):
+        for right_form in _client_id_forms(right):
+            if left_form == right_form:
+                return True
+            if len(left_form) >= min_prefix and left_form in right_form:
+                return True
+            if len(right_form) >= min_prefix and right_form in left_form:
+                return True
+    return False
+
+
 def _event_matches_intent(
     event: Mapping[str, Any],
     *,
@@ -229,9 +278,12 @@ def _event_matches_intent(
     if rid and str(rid) in req_ids:
         return True
     ids = _payload_ids(event.get("payload"))
+    needles = [str(intent_id)]
     if dual_leg_id:
-        for item in ids:
-            if dual_leg_id in item:
+        needles.append(str(dual_leg_id))
+    for item in ids:
+        for needle in needles:
+            if client_ids_overlap(item, needle):
                 return True
     return bool(ids & req_ids)
 
@@ -244,7 +296,12 @@ def collect_wire_events(
     req_ids: Optional[Sequence[str]] = None,
     extra_events: Optional[Sequence[Mapping[str, Any]]] = None,
 ) -> list[dict[str, Any]]:
-    """Wire rows for this intent. Process transcript first, then disk."""
+    """Wire rows for this intent. Process transcript first, then disk.
+
+    Private OKX ``orders`` frames usually have no trade ``req_id`` and a
+    truncated ``clOrdId`` (``o`` + 31 hex). Matching uses
+    :func:`client_ids_overlap`, not only ``dual_leg_id in item``.
+    """
     wanted = {str(r) for r in (req_ids or ()) if r}
     found: list[dict[str, Any]] = []
     seen: set[tuple[Any, Any, Any, Any]] = set()

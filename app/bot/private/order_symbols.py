@@ -272,7 +272,7 @@ def resolve_private_subscribe_pool(
     bybit_symbols: Optional[Sequence[str]] = None,
     okx_symbols: Optional[Sequence[str]] = None,
 ) -> PrivateSubscribePool:
-    """Instrument set for private orders/fills/positions.
+    """Instrument set for private orders/positions (same coins as public L1).
 
     Profile/runtime coins are the source of truth. Explicit TRUMP (or any
     other native) is rejected when it is not in that pool. Harness paths

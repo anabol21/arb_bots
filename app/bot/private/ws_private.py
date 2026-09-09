@@ -52,6 +52,8 @@ LOG = logging.getLogger("bbot.private.ws")
 
 # Digits-only venue reject codes for public/report surfaces (never sMsg / frames).
 _VENUE_CODE_RE = re.compile(r"^[0-9]{1,8}$")
+# OKX VIP/fee-tier channel refusal (e.g. leftover ``fills``). Not an auth failure.
+OKX_FEE_TIER_CHANNEL_CODE = "64003"
 
 
 def sanitize_venue_code(raw: object) -> Optional[str]:
@@ -69,6 +71,18 @@ def sanitize_venue_code(raw: object) -> Optional[str]:
     if _VENUE_CODE_RE.fullmatch(s):
         return s
     return None
+
+
+def is_okx_fee_tier_channel_error(data: Mapping[str, Any]) -> bool:
+    """True for OKX 64003 / fee-tier channel refusals — never auth.
+
+    Live ``fills`` subscribe (VIP-gated) returns ``64003`` and often omits
+    ``arg``. That must stay a subscribe nack, not ``auth_reject``.
+    """
+    if sanitize_venue_code(data.get("code")) == OKX_FEE_TIER_CHANNEL_CODE:
+        return True
+    msg = str(data.get("msg") or data.get("message") or "").lower()
+    return "fee tier" in msg and "channel" in msg
 
 
 def new_trade_req_id(*, exchange: str) -> str:
@@ -562,8 +576,8 @@ class PrivateStreamRuntime:
             readiness = "ready"
             ack_state = "received"
         elif self.subscription_readiness == SubscriptionReadiness.READY:
-            # Extra channel/inst ack (e.g. OKX fills) must not tear down a
-            # ready orders subscription for the live coin pool.
+            # Extra channel/inst nack (e.g. leftover OKX fills / 64003)
+            # must not tear down a ready orders subscription.
             outcome = "failure"
             readiness = "ready"
             ack_state = "received"
@@ -1106,6 +1120,11 @@ class PrivateStreamRuntime:
             ok = str(data.get("code", "0")) == "0"
             return ParsedStreamEvent(kind="sub_ack", ack_ok=ok)
         if event == "error":
+            # 64003 / fee-tier is a channel subscribe nack (often ``arg: null``).
+            # Never treat that as auth_reject — that un-auths the warm session
+            # and starts the ~10s private login reconnect storm.
+            if is_okx_fee_tier_channel_error(data):
+                return ParsedStreamEvent(kind="sub_ack", ack_ok=False)
             # Distinguish auth vs sub via arg channel when present.
             arg = data.get("arg") if isinstance(data.get("arg"), Mapping) else {}
             if not arg:
