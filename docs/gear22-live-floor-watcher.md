@@ -5,7 +5,8 @@
 
 Canonical formula: [`docs/gear22-floor-metric.md`](gear22-floor-metric.md) → [`floors.compute_chosen_floor`](../research/gear22_quiet_regime_viz/floors.py).  
 Code: [`app/bot/floor_watcher.py`](../app/bot/floor_watcher.py), wired from [`app/bot/runtime.py`](../app/bot/runtime.py).  
-Canary plots: [`app/bot/floor_plot.py`](../app/bot/floor_plot.py).
+Canary plots: [`app/bot/floor_plot.py`](../app/bot/floor_plot.py).  
+Sibling observer (rolling TW p50 1m/5m): [`docs/gear22-tw-p50-watcher.md`](gear22-tw-p50-watcher.md).
 
 ## Process (words)
 

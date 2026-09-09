@@ -68,6 +68,7 @@ def resolve_data_root(env: Optional[dict] = None) -> Path:
     root.mkdir(parents=True, exist_ok=True)
     (root / "journal").mkdir(parents=True, exist_ok=True)
     (root / "floor").mkdir(parents=True, exist_ok=True)
+    (root / "tw_p50").mkdir(parents=True, exist_ok=True)
     (root / "state").mkdir(parents=True, exist_ok=True)
     (root / ".tmp").mkdir(parents=True, exist_ok=True)
     return root.resolve()
@@ -100,6 +101,24 @@ def floor_metrics_jsonl_path(data_root: Path, event_date: str) -> Path:
     if _is_under_denied(data_root):
         raise RuntimeError(f"refusing floor metrics under denied path: {data_root}")
     path = data_root / "floor" / f"event_date={event_date}"
+    path.mkdir(parents=True, exist_ok=True)
+    return path / "metrics.jsonl"
+
+
+def tw_p50_dir(data_root: Path) -> Path:
+    """Return ``{data_root}/tw_p50`` (create if needed). Never under D trees."""
+    if _is_under_denied(data_root):
+        raise RuntimeError(f"refusing tw_p50 dir under denied path: {data_root}")
+    path = data_root / "tw_p50"
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def tw_p50_metrics_jsonl_path(data_root: Path, event_date: str) -> Path:
+    """``{data_root}/tw_p50/event_date=YYYY-MM-DD/metrics.jsonl`` — 1 Hz TW p50 only."""
+    if _is_under_denied(data_root):
+        raise RuntimeError(f"refusing tw_p50 metrics under denied path: {data_root}")
+    path = data_root / "tw_p50" / f"event_date={event_date}"
     path.mkdir(parents=True, exist_ok=True)
     return path / "metrics.jsonl"
 

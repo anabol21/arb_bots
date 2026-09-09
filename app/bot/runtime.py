@@ -23,6 +23,12 @@ from app.bot.paths import (
     resolve_data_root,
     resolve_log_path,
 )
+from app.bot.tw_p50_watcher import (
+    EMIT_INTERVAL_SEC,
+    LiveTwP50Observer,
+    TwP50JournalWriter,
+    tw_p50_watch_enabled,
+)
 from app.bot.stub_broker import InstrumentMeta
 from app.bot.ws_books import (
     books_ready,
@@ -289,6 +295,14 @@ class BotRuntime:
         if self.floor_enabled:
             self.floor_observer = LiveFloorObserver(self.coins)
             self.floor_journal = FloorJournalWriter(self.data_root)
+        # Rolling TW p50 (1m/5m) observer — alongside floor, not instead of it.
+        self.tw_p50_enabled = tw_p50_watch_enabled(self.profile)
+        self.tw_p50_observer: LiveTwP50Observer | None = None
+        self.tw_p50_journal: TwP50JournalWriter | None = None
+        self._tw_p50_flush_warned = False
+        if self.tw_p50_enabled:
+            self.tw_p50_observer = LiveTwP50Observer(self.coins)
+            self.tw_p50_journal = TwP50JournalWriter(self.data_root)
 
     def _uses_market_manager(self) -> bool:
         if self.policy is not None:
@@ -452,6 +466,10 @@ class BotRuntime:
         self._floor_note_spreads(
             base_coin, event_local_ts_ms, spread_long, spread_short
         )
+        # Rolling TW p50: append-only on the same stream; 1 Hz task computes/journals.
+        self._tw_p50_note_spreads(
+            base_coin, event_local_ts_ms, spread_long, spread_short
+        )
 
         # Fill pending on next live VALID tick after Trade_Lat (no asyncio.sleep).
         if self.broker.has_pending():
@@ -613,6 +631,80 @@ class BotRuntime:
             return
         if rows:
             self._floor_pending.extend(rows)
+
+    def _tw_p50_note_spreads(
+        self,
+        base_coin: str,
+        event_local_ts_ms: int,
+        spread_long: float,
+        spread_short: float,
+    ) -> None:
+        """Cheap ring append for rolling TW p50 (no compute / I/O)."""
+        if self.tw_p50_observer is None:
+            return
+        try:
+            self.tw_p50_observer.note_spreads(
+                base_coin,
+                event_local_ts_ms,
+                spread_long,
+                spread_short,
+            )
+        except Exception as exc:  # noqa: BLE001 — observer must not break decide
+            if not self._tw_p50_flush_warned:
+                self._tw_p50_flush_warned = True
+                self.log.warning(
+                    "tw_p50_note_failed | coin=%s | err=%s",
+                    base_coin,
+                    type(exc).__name__,
+                )
+
+    async def _flush_tw_p50_rows(self, rows: list[dict[str, Any]]) -> None:
+        """Persist TW p50 metric rows off the book/decide lock."""
+        if not rows or self.tw_p50_journal is None:
+            return
+        try:
+            await asyncio.to_thread(self.tw_p50_journal.append_rows, rows)
+        except Exception as exc:  # noqa: BLE001 — never stall the public book path
+            if not self._tw_p50_flush_warned:
+                self._tw_p50_flush_warned = True
+                self.log.warning(
+                    "tw_p50_journal_flush_failed | err=%s | n=%s",
+                    type(exc).__name__,
+                    len(rows),
+                )
+
+    async def _tw_p50_emit_loop(self) -> None:
+        """~1 Hz: compute TW p50 snapshots, journal under tw_p50/ (never ticks)."""
+        while not self.stop_event.is_set():
+            try:
+                await asyncio.wait_for(
+                    self.stop_event.wait(), timeout=EMIT_INTERVAL_SEC
+                )
+                break
+            except asyncio.TimeoutError:
+                pass
+            if self.tw_p50_observer is None:
+                continue
+            try:
+                snapshots = await asyncio.to_thread(
+                    self.tw_p50_observer.compute_snapshots
+                )
+            except Exception as exc:  # noqa: BLE001
+                if not self._tw_p50_flush_warned:
+                    self._tw_p50_flush_warned = True
+                    self.log.warning(
+                        "tw_p50_compute_failed | err=%s",
+                        type(exc).__name__,
+                    )
+                continue
+            # Skip sides that have never received a tick (n_5m==0 and no coverage).
+            rows = [
+                s.as_row()
+                for s in snapshots
+                if s.n_5m > 0 or s.coverage_5m > 0.0 or s.n_1m > 0
+            ]
+            if rows:
+                await self._flush_tw_p50_rows(rows)
 
     def _policy_maybe_act(
         self,
@@ -928,7 +1020,8 @@ class BotRuntime:
             f"thresh={thresh_cs} | avg_window_sec={avg_sec} | "
             f"data_root={self.data_root} | log={self.log_path} | "
             f"notional={self.notional} | trade_lat_ms={self.trade_lat_ms} | "
-            f"floor_watch={'on' if self.floor_enabled else 'off'}"
+            f"floor_watch={'on' if self.floor_enabled else 'off'} | "
+            f"tw_p50_watch={'on' if self.tw_p50_enabled else 'off'}"
         )
         if self.mode == "policy" and self.policy is None:
             self.log.error(
@@ -958,6 +1051,10 @@ class BotRuntime:
             self.log.info("private_warm_skipped | live_private_send=false")
 
         tasks: list[asyncio.Task] = [asyncio.create_task(self._heartbeat())]
+        if self.tw_p50_enabled and self.tw_p50_observer is not None:
+            tasks.append(
+                asyncio.create_task(self._tw_p50_emit_loop(), name="tw-p50-emit")
+            )
         for coin in self.coins:
             meta = self._meta(coin)
             tasks.append(
