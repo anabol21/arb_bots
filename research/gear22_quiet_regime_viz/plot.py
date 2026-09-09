@@ -52,11 +52,11 @@ MID_BYBIT_NAME = "Bybit mid (bid+ask)/2"
 GAP_FILL = "rgba(220, 40, 40, 0.22)"
 TICK_COLOR = "rgba(40, 40, 40, 0.35)"
 # Default drag is pan so the shared UTC axis can be moved left/right.
-# Modebar still exposes box-zoom; scrollZoom enables wheel/trackpad zoom.
+# Modebar still exposes box-zoom; scrollZoom is off (no wheel/trackpad zoom).
 PLOTLY_CONFIG: dict[str, Any] = {
     "responsive": True,
     "displaylogo": False,
-    "scrollZoom": True,
+    "scrollZoom": False,
     "modeBarButtonsToRemove": ["select2d", "lasso2d"],
 }
 MA_COLORS = {3: "#1f77b4", 12: "#ff7f0e", 6: "#2ca02c", 24: "#9467bd"}
@@ -511,9 +511,9 @@ def _nav_html(coin: str, coins: Sequence[str]) -> str:
   <a class="nav-btn" href="{html.escape(coin_html_filename(next_c))}" title="Next coin (→)">{html.escape(next_c)} →</a>
 </nav>
 <p class="nav-hint">Keyboard ←/→ or swipe left/right cycles coins (wraps). Works with <code>file://</code>.</p>
-<p class="nav-hint">Time axis: <strong>drag to pan</strong> left/right (default). Scroll / trackpad zooms.
-Modebar <em>Zoom</em> is box-zoom; Shift+drag also box-zooms when pan is active. Double-click or
-modebar Reset restores the full window. Click (no drag) a 5m candle still opens inspect.</p>
+<p class="nav-hint">Time axis: <strong>drag to pan</strong> left/right (default). Wheel / trackpad zoom is off;
+←/→ switch coins. Modebar <em>Zoom</em> is box-zoom; Shift+drag also box-zooms when pan is active.
+Double-click or modebar Reset restores the full window. Click (no drag) a 5m candle still opens inspect.</p>
 """
 
 
