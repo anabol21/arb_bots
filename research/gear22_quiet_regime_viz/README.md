@@ -5,8 +5,9 @@ Offline Plotly HTML observer for **gear 2.2** quiet-regime / noisy-gappy L1 work
 One HTML page per coin. No VPS required — point `--data-root` at a local
 compacted tick dump (or the tiny fixture under `research/fixtures/…`).
 
-This tool **does not** set live bot thresholds and **does not** invent quiet-regime
-floor metrics. Extension hooks are empty stubs for later integral candidates.
+This tool **does not** set live bot thresholds. Per-coin pages now also draw
+one corridor + SMA-12 **floor** panel per side: p1–p99 / p5–p95,
+SMA-3 midline, tf-select α25 of SMA-12 (observation only).
 
 ## Quick start (fixture / CI smoke)
 
@@ -30,6 +31,18 @@ Regenerate the fixture:
 PYTHONPATH=. python -m research.gear22_quiet_regime_viz.build_fixture
 ```
 
+Floor-compare HTML from local lean ticks (gitignored `output/`; pick a window
+with ≥12h so the longest W2 can fill):
+
+```bash
+PYTHONPATH=. python -m research.gear22_quiet_regime_viz \
+  --data-root output/lean_ticks \
+  --coins SOL,XRP,BTC,ETH \
+  --since 2026-08-08T00:00:00Z \
+  --until 2026-08-09T00:00:00Z \
+  --out-dir output/gear22_floor_compare
+```
+
 ## CLI
 
 | Flag | Meaning |
@@ -47,6 +60,8 @@ PYTHONPATH=. python -m research.gear22_quiet_regime_viz.build_fixture
 | `--latency-bins` | In-bar **trigger-venue** latency hist bins, **equal-weight tick counts** (default `24`; `0` disables) |
 | `--latency-temporal-bins` | Equal-time mean slots for latency temporal view (default `12`) |
 | `--inline-plotly` | Embed plotly.js inside each HTML (large single-file). Default = sibling `plotly.min.js` |
+| `--no-floors` | Disable the corridor + SMA-12 tf-select α25 floor panel. Default = floors **on**. |
+| `--inject-html-dir` | Patch already-built 6-row pages in place from embedded SMA-3 / SMA-12 (no ticks). Leaves `index.html` / `coins.json`. |
 
 ### `--since` = last restart
 
@@ -78,10 +93,10 @@ Primaries match `app.policy.features` / gear2 `open_long` vs `open_short`
 | **long** `spread_long` | `(bybit_bid − okx_ask) / bybit_bid × 100` | `open_long` |
 | **short** `spread_short` | `(okx_bid − bybit_ask) / okx_bid × 100` | `open_short` |
 
-Each coin page stacks: shared mid context → **LONG** block (candles, MAs, sparse
-ticks, red gaps, intra-bucket stats, TW quantiles, window histogram) → **SHORT**
-block (same stack). Mid-edge `edge_pct` is still derived in the loader for
-context but is not the dual-stack primary.
+Each coin page stacks: shared mid context → **LONG** block (existing 6-row stack,
+then one floor/corridor graph, then window histogram) → **SHORT** block (same). Mid-edge
+`edge_pct` is still derived in the loader for context but is not the dual-stack
+primary.
 
 ## What each page shows
 
@@ -97,6 +112,10 @@ context but is not the dual-stack primary.
    - **gap_fraction** = extent uncovered to bucket edges / 300s (not inter-tick holes)
    - mean ± std; min / max / IQR (equal-weight ticks)
    - **Time-weighted p25 / p50 / p95 / p99** as chart series
+   - **Floor panel (one graph)**: dashed **p1–p99**, filled **p5–p95**
+     corridor (TW hold→next), **SMA-3** inside the inner band, and
+     **tf-select α25 = min(trim_3h_α25, trim_12h_α25)** of SMA-12.
+     Does not replace row-1 SMA-3 / SMA-12.
    - **Window histogram** of all ticks in `--since`/`--until` (equal weight)
 4. **Click-to-inspect (in-bar)** — click a 5m candlestick (or its MA / sparse-tick
    overlay in the candle row) → fixed bottom panel with
@@ -202,15 +221,71 @@ Defaults are **causal** (right-aligned) SMAs of 5m **closes**:
 
 Empty buckets (NaN close) break the MA until a full finite run rebuilds.
 
-## Adding a future integral metric
+Methodology (why this floor, what it is not): [`docs/gear22-floor-metric.md`](../../docs/gear22-floor-metric.md).
 
-Do **not** invent placeholder series. Implement real candidates in:
+## SMA-12 floor panel (corridor + tf-select α25)
 
-`research/gear22_quiet_regime_viz/metrics_ext.py` → `collect_extension_traces`
+Causal, bar-close, per side (long and short independently). One graph:
 
-Return `MetricTrace` with `panel` in
-`{candles, tick_count, gap_fraction, mean_std, range_iqr, tw_quantiles}`
-(optional `long_` / `short_` prefix).
+```
+s_t              = SMA_12(close)_t                       # W1 = 12 × 5m
+trim_3h_t(α=25)  = trim_mean_α of finite {s}_{t-35..t}   # 36 bars
+trim_12h_t(α=25) = trim_mean_α of finite {s}_{t-143..t}  # 144 bars
+tf_select_25_t   = min(trim_3h_t, trim_12h_t)            # both must be finite
+```
+
+The 3h/12h trims are **not** plotted. The graph shows:
+
+- filled inner corridor: time-weighted **p5–p95** of the intra-bar spread
+- dashed outer corridor: **p1–p99** (same hold→next convention)
+- **SMA-3** (orange) inside the inner band
+- **tf-select α25** (purple) — the chosen floor, still from SMA-12
+
+`tf-select α25` holds the 12h floor while the 3h series is above it and
+follows the 3h floor when the short TF is below. Non-finite `s` are dropped
+(no interpolation). Warm-up: NaN until finite count ≥
+`max(5, ceil(0.20 × W2))` — 8 bars for 3h, 29 for 12h.
+
+`--no-floors` restores the original 6-row stack. Implementation:
+`floors.compute_chosen_floor` → standalone `build_floor_only_figure`
+appended after each 6-row stack (same figure as the inject path).
+
+Inject of already-built VPS pages (no ticks on the Mac): extract `tw_p95`
+and `tw_p99` from the 6-row figure. For p5 / p1, try `tw_p05` / `tw_p01`
+if present; otherwise reconstruct from candle inspect hist (`c`, `lo`,
+`hi`, `nb`) or inspect `tw.p01`. Last resort for p5 is `tw_p25`, labeled
+honestly — never silent min/max.
+
+Already-built VPS pages (6-row, no floors) can be patched without ticks:
+
+```bash
+PYTHONPATH=. python -m research.gear22_quiet_regime_viz \
+  --inject-html-dir /Users/mishatrubik/Desktop/gear22_viz_sept
+```
+
+That extract-and-append path is `inject_floors.py`. It does **not** rewrite
+the candle/quantile stack, `index.html`, or `coins.json`.
+
+VPS regenerate (needs the September tick dump, not on a typical Mac):
+
+```bash
+PYTHONPATH=. python -m research.gear22_quiet_regime_viz \
+  --data-root /data/experiments/gear22_ticks_sept \
+  --coins KAITO,HOME,WAL \
+  --since 2026-09-01T00:00:00Z \
+  --until 2026-09-05T05:37:44Z \
+  --out-dir /path/to/gear22_viz_sept
+```
+
+Regenerate writes coin pages + `coins.json` but does **not** write the
+August-std `index.html`. Copy that index aside first if you must rebuild.
+
+## Adding another integral metric
+
+Return `MetricTrace` from `collect_extension_traces` with `panel` in
+`{candles, tick_count, gap_fraction, mean_std, range_iqr, tw_quantiles,
+floor}` (optional `long_` / `short_` prefix). The floor panel itself is a
+standalone appended figure, not extra rows on the 6-row stack.
 
 ## Dependencies
 
@@ -225,7 +300,9 @@ Return `MetricTrace` with `panel` in
 | `quantiles.py` | Hold weights + TW quantile / mean / hist helpers |
 | `gaps.py` | Inter-tick gap intervals |
 | `plot.py` | Plotly multi-block HTML writer + coin nav + candle click inspect |
-| `metrics_ext.py` | Empty extension hook |
+| `floors.py` | Causal SMA-12 trim floors + chosen tf-select α25 |
+| `metrics_ext.py` | Floor traces / help text for the corridor panel |
+| `inject_floors.py` | Append one corridor figure to existing 6-row HTML |
 | `cli.py` / `__main__.py` | CLI entry |
 
 ## Tests
@@ -233,3 +310,6 @@ Return `MetricTrace` with `panel` in
 ```bash
 PYTHONPATH=. python -m unittest tests.test_gear22_quiet_regime_viz -v
 ```
+
+Floor helpers (causal / trim10 / NaN policy / W2=36/72/144) live in
+`TestFloorEstimators` in that module.
