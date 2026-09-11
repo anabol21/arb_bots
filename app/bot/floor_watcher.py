@@ -53,7 +53,14 @@ ENV_BAR_SAMPLE_CAP = "BBOT_FLOOR_BAR_SAMPLE_CAP"
 SIDES: tuple[str, ...] = ("long", "short")
 
 _GEAR2_FLOOR_PROFILES = frozenset(
-    {"gear2_would_send", "canary_wal_eden", "gear2", "canary"}
+    {
+        "gear2_would_send",
+        "canary_wal_eden",
+        "gear2",
+        "canary",
+        "gear22_would_send",
+        "gear22",
+    }
 )
 
 _FLOORS: ModuleType | None = None
@@ -455,6 +462,133 @@ class LiveFloorObserver:
         if snap is None:
             return None
         return float(snap.floor_tf_select_a25)
+
+    def export_warm_state(self) -> dict[str, Any]:
+        """Serialize closes / sma12_hist / last floors for pickle warm-start."""
+        sides: dict[str, Any] = {}
+        for (coin, side), state in self._states.items():
+            key = f"{coin}|{side}"
+            sides[key] = {
+                "base_coin": coin,
+                "side": side,
+                "closes": [float(x) for x in state.closes],
+                "sma12_hist": [float(x) for x in state.sma12_hist],
+                "bar_start_ms": state.bar_start_ms,
+                "last_close": state.last_close,
+                "tick_count": int(state.tick_count),
+            }
+        floors: dict[str, Any] = {}
+        for (coin, side), snap in self._last_floors.items():
+            floors[f"{coin}|{side}"] = {
+                "base_coin": snap.base_coin,
+                "side": snap.side,
+                "floor_tf_select_a25": float(snap.floor_tf_select_a25),
+                "bar_end_ms": int(snap.bar_end_ms),
+                "computed_at_ms": int(snap.computed_at_ms),
+            }
+        return {
+            "schema_version": "bbot.floor_warm.v1",
+            "formula_id": FORMULA_ID,
+            "sides": sides,
+            "last_floors": floors,
+        }
+
+    def apply_warm_state(self, payload: Mapping[str, Any]) -> int:
+        """Hydrate deques + last floors from ``export_warm_state`` payload.
+
+        Returns the number of ``(coin, side)`` slots that received any data.
+        Open-bar sample lists are not restored (discarded on close anyway).
+        """
+        sides = payload.get("sides") or {}
+        floors = payload.get("last_floors") or {}
+        if not isinstance(sides, Mapping):
+            sides = {}
+        if not isinstance(floors, Mapping):
+            floors = {}
+        touched = 0
+        floors_mod = _floors()
+        hist_max = int(floors_mod.W2_TRIM12_BARS)
+        for raw in sides.values():
+            if not isinstance(raw, Mapping):
+                continue
+            coin = str(raw.get("base_coin") or "").upper()
+            side = str(raw.get("side") or "")
+            if not coin or side not in SIDES:
+                continue
+            key = (coin, side)
+            state = self._states.get(key)
+            if state is None:
+                state = _SideBarState(
+                    closes=deque(maxlen=CLOSE_HISTORY),
+                    sma12_hist=deque(maxlen=hist_max),
+                )
+                self._states[key] = state
+            closes = raw.get("closes") or []
+            sma_hist = raw.get("sma12_hist") or []
+            state.closes.clear()
+            for v in closes:
+                fv = _finite(v)
+                if fv is not None:
+                    state.closes.append(float(fv))
+                else:
+                    # Preserve NaN slots so SMA tip timing stays honest.
+                    try:
+                        state.closes.append(float(v))
+                    except (TypeError, ValueError):
+                        state.closes.append(float("nan"))
+            state.sma12_hist.clear()
+            for v in sma_hist:
+                try:
+                    state.sma12_hist.append(float(v))
+                except (TypeError, ValueError):
+                    state.sma12_hist.append(float("nan"))
+            if raw.get("bar_start_ms") is not None:
+                try:
+                    state.bar_start_ms = int(raw["bar_start_ms"])
+                except (TypeError, ValueError):
+                    state.bar_start_ms = None
+            lc = _finite(raw.get("last_close"))
+            state.last_close = lc
+            try:
+                state.tick_count = int(raw.get("tick_count") or 0)
+            except (TypeError, ValueError):
+                state.tick_count = 0
+            _clear_open_bar_samples(state)
+            touched += 1
+        for raw in floors.values():
+            if not isinstance(raw, Mapping):
+                continue
+            self._maybe_store_last_floor(raw)
+            coin = str(raw.get("base_coin") or "").upper()
+            side = str(raw.get("side") or "")
+            if coin and side in SIDES:
+                touched += 1
+        return touched
+
+    def seed_last_floor(
+        self,
+        base_coin: str,
+        side: str,
+        floor_tf_select_a25: float,
+        *,
+        bar_end_ms: int = 0,
+        computed_at_ms: Optional[int] = None,
+    ) -> None:
+        """Public inject of a finite last floor (theta warm without full SMA hist)."""
+        wall = (
+            int(computed_at_ms)
+            if computed_at_ms is not None
+            else int(time.time() * 1000)
+        )
+        self._maybe_store_last_floor(
+            {
+                "base_coin": str(base_coin).upper(),
+                "side": str(side),
+                "floor_tf_select_a25": float(floor_tf_select_a25),
+                "bar_end_ms": int(bar_end_ms),
+                "computed_at_ms": wall,
+            }
+        )
 
     def _note_side(
         self,

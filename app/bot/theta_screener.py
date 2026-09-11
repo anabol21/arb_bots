@@ -34,7 +34,14 @@ SIDES: tuple[str, ...] = ("long", "short")
 EMIT_INTERVAL_SEC = 1.0
 
 _GEAR2_THETA_PROFILES = frozenset(
-    {"gear2_would_send", "canary_wal_eden", "gear2", "canary"}
+    {
+        "gear2_would_send",
+        "canary_wal_eden",
+        "gear2",
+        "canary",
+        "gear22_would_send",
+        "gear22",
+    }
 )
 
 

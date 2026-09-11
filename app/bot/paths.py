@@ -70,6 +70,7 @@ def resolve_data_root(env: Optional[dict] = None) -> Path:
     (root / "floor").mkdir(parents=True, exist_ok=True)
     (root / "tw_p50").mkdir(parents=True, exist_ok=True)
     (root / "theta").mkdir(parents=True, exist_ok=True)
+    (root / "theta_trades").mkdir(parents=True, exist_ok=True)
     (root / "state").mkdir(parents=True, exist_ok=True)
     (root / ".tmp").mkdir(parents=True, exist_ok=True)
     return root.resolve()
@@ -140,6 +141,29 @@ def theta_metrics_jsonl_path(data_root: Path, event_date: str) -> Path:
     path = data_root / "theta" / f"event_date={event_date}"
     path.mkdir(parents=True, exist_ok=True)
     return path / "metrics.jsonl"
+
+
+def theta_trades_dir(data_root: Path) -> Path:
+    """Return ``{data_root}/theta_trades`` (create if needed). Never under D trees."""
+    if _is_under_denied(data_root):
+        raise RuntimeError(f"refusing theta_trades dir under denied path: {data_root}")
+    path = data_root / "theta_trades"
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def theta_trades_jsonl_path(data_root: Path, event_date: str) -> Path:
+    """``{data_root}/theta_trades/event_date=YYYY-MM-DD/trades.jsonl`` — would_send only."""
+    if _is_under_denied(data_root):
+        raise RuntimeError(f"refusing theta_trades under denied path: {data_root}")
+    path = data_root / "theta_trades" / f"event_date={event_date}"
+    path.mkdir(parents=True, exist_ok=True)
+    return path / "trades.jsonl"
+
+
+def floor_warm_pickle_path(data_root: Path) -> Path:
+    """Default warm pickle: ``{data_root}/state/floor_warm.pkl``."""
+    return state_dir(data_root) / "floor_warm.pkl"
 
 
 def state_dir(data_root: Path) -> Path:

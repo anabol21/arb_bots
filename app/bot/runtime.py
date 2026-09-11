@@ -34,6 +34,16 @@ from app.bot.theta_screener import (
     ThetaJournalWriter,
     theta_watch_enabled,
 )
+from app.bot.theta_trade_manager import (
+    ThetaTradeConfig,
+    ThetaTradeManager,
+    theta_trade_enabled,
+)
+from app.bot.floor_warm import (
+    apply_warm_pickle_to_observer,
+    export_observer_warm_pickle,
+    resolve_floor_warm_path,
+)
 from app.bot.stub_broker import InstrumentMeta
 from app.bot.ws_books import (
     books_ready,
@@ -188,10 +198,12 @@ class BotRuntime:
             "gear2",
             "canary_wal_eden",
             "canary",
+            "gear22_would_send",
+            "gear22",
         ):
             raise ValueError(
                 f"BBOT_PROFILE must be gear1|signal_test|gear2_would_send|"
-                f"canary_wal_eden, got {self.profile!r}"
+                f"canary_wal_eden|gear22_would_send, got {self.profile!r}"
             )
         if self.profile == "default":
             self.profile = "gear1"
@@ -199,6 +211,8 @@ class BotRuntime:
             self.profile = "gear2_would_send"
         if self.profile == "canary":
             self.profile = "canary_wal_eden"
+        if self.profile == "gear22":
+            self.profile = "gear22_would_send"
         coins_raw = (os.environ.get("BBOT_COINS") or "").strip()
         if not coins_raw:
             if self.mode == "policy" and self.profile == "signal_test":
@@ -207,6 +221,9 @@ class BotRuntime:
                 coins_raw = "BTC,ETH,SOL,XRP"
             elif self.mode == "policy" and self.profile == "canary_wal_eden":
                 coins_raw = "WAL,EDEN"
+            elif self.mode == "policy" and self.profile == "gear22_would_send":
+                # August-std HTML top30 — require explicit BBOT_COINS in canary.
+                coins_raw = "BTC,ETH,SOL,XRP"
             else:
                 coins_raw = "BTC,ETH"
         self.coins = parse_coins(coins_raw)
@@ -320,6 +337,47 @@ class BotRuntime:
                 tw_p50_observer=self.tw_p50_observer,
             )
             self.theta_journal = ThetaJournalWriter(self.data_root)
+        # Gear 2.2 θ K=1 would_send (separate journal; no StubBroker.place).
+        self.theta_trade_enabled = theta_trade_enabled(self.profile)
+        self.theta_trade: ThetaTradeManager | None = None
+        self._theta_trade_warned = False
+        if self.theta_trade_enabled:
+            self.theta_trade = ThetaTradeManager(
+                data_root=self.data_root,
+                config=ThetaTradeConfig.from_env(),
+                log=lambda m: self.log.info(m),
+            )
+        # Floor warm-start (standard for gear22 / when pickle present).
+        self._floor_warm_path = resolve_floor_warm_path(self.data_root)
+        self._floor_warm_loaded = False
+        if self.floor_observer is not None:
+            warm_path = self._floor_warm_path
+            force_warm = str(os.environ.get("BBOT_FLOOR_WARM") or "").strip().lower()
+            want_warm = force_warm in ("1", "true", "on", "yes") or (
+                self.profile == "gear22_would_send" and force_warm not in ("0", "false", "off", "no")
+            )
+            if want_warm or warm_path.is_file():
+                if warm_path.is_file():
+                    try:
+                        n = apply_warm_pickle_to_observer(self.floor_observer, warm_path)
+                        self._floor_warm_loaded = True
+                        self.log.info(
+                            "floor_warm_loaded | path=%s | touched=%s",
+                            warm_path,
+                            n,
+                        )
+                    except Exception as exc:  # noqa: BLE001
+                        self.log.warning(
+                            "floor_warm_load_failed | path=%s | err=%s",
+                            warm_path,
+                            type(exc).__name__,
+                        )
+                elif want_warm:
+                    self.log.warning(
+                        "floor_warm_missing | path=%s | theta may stay null until "
+                        "~12h SMA-12 history; build via python -m app.bot.floor_warm",
+                        warm_path,
+                    )
 
     def _uses_market_manager(self) -> bool:
         if self.policy is not None:
@@ -752,6 +810,8 @@ class BotRuntime:
                 continue
             if snaps:
                 await self._flush_theta_rows([s.as_row() for s in snaps])
+                if self.theta_trade_enabled and self.theta_trade is not None:
+                    await self._run_theta_trade(snaps)
 
     async def _emit_theta_from_tw(self, tw_snapshots: list[Any]) -> None:
         """Follow-on: theta from TW snapshots + last floor (never ticks)."""
@@ -782,6 +842,26 @@ class BotRuntime:
         ]
         if rows:
             await self._flush_theta_rows(rows)
+        if self.theta_trade_enabled and self.theta_trade is not None:
+            await self._run_theta_trade(theta_snaps)
+
+    async def _run_theta_trade(self, theta_snaps: list[Any]) -> None:
+        """K=1 would_send decide+fill off the theta emit (never tick WAL)."""
+        if self.theta_trade is None or not theta_snaps:
+            return
+        try:
+            await self.theta_trade.on_theta_snapshots_async(
+                theta_snaps,
+                quotes=self.quotes,
+                coin_order=self.coins,
+            )
+        except Exception as exc:  # noqa: BLE001 — never stall the public book path
+            if not self._theta_trade_warned:
+                self._theta_trade_warned = True
+                self.log.warning(
+                    "theta_trade_failed | err=%s",
+                    type(exc).__name__,
+                )
 
     async def _flush_theta_rows(self, rows: list[dict[str, Any]]) -> None:
         """Persist theta metric rows off the book/decide lock."""
@@ -808,6 +888,9 @@ class BotRuntime:
         spread_long: float,
         spread_short: float,
     ) -> None:
+        # Theta K=1 would_send owns the slot when enabled — no tick-path opens.
+        if self.theta_trade_enabled:
+            return
         if self.policy is None:
             # Refuse to open; keep WS heartbeat alive.
             if self._heartbeat_n % 100 == 0:
@@ -1114,7 +1197,9 @@ class BotRuntime:
             f"notional={self.notional} | trade_lat_ms={self.trade_lat_ms} | "
             f"floor_watch={'on' if self.floor_enabled else 'off'} | "
             f"tw_p50_watch={'on' if self.tw_p50_enabled else 'off'} | "
-            f"theta_watch={'on' if self.theta_enabled else 'off'}"
+            f"theta_watch={'on' if self.theta_enabled else 'off'} | "
+            f"theta_trade={'on' if self.theta_trade_enabled else 'off'} | "
+            f"floor_warm={'loaded' if self._floor_warm_loaded else 'off'}"
         )
         if self.mode == "policy" and self.policy is None:
             self.log.error(
@@ -1191,6 +1276,21 @@ class BotRuntime:
             self.stop_event.set()
             raise
         finally:
+            # Persist floor warm pickle for next start (B path only).
+            if self.floor_observer is not None and (
+                self.profile == "gear22_would_send" or self._floor_warm_loaded
+            ):
+                try:
+                    export_observer_warm_pickle(
+                        self.floor_observer, self._floor_warm_path
+                    )
+                    self.log.info(
+                        "floor_warm_saved | path=%s", self._floor_warm_path
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    self.log.warning(
+                        "floor_warm_save_failed | err=%s", type(exc).__name__
+                    )
             from app.bot.private.ws_warm_session import clear_process_warm_session
 
             clear_process_warm_session(stop=True)
