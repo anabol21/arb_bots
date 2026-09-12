@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Any, Callable, Mapping, Optional, Sequence
 
 from app.bot.paths import theta_trades_jsonl_path
+from app.bot.sentry_setup import capture_trade_event
 from app.bot.stub_broker import legs_for_spread_side, signal_price_for_leg
 from app.bot.theta_screener import ThetaSnapshot
 
@@ -688,6 +689,26 @@ class ThetaTradeManager:
                     "computed_at_ms": signal_ts,
                 }
                 self.journal.append_rows([row])
+                
+                # Emit reject to Sentry.
+                capture_trade_event(
+                    event="reject",
+                    trade_id="",
+                    coin=str(decision.base_coin),
+                    side=str(decision.side),
+                    extras={
+                        "reject_reason": "insufficient_size",
+                        "theta_1m": decision.theta_1m,
+                        "opposite_theta_1m": decision.opposite_theta_1m,
+                        "notional_usdt": size_info.get("notional_usdt"),
+                        "okx_available_size": size_info.get("okx_available_size"),
+                        "bybit_available_size": size_info.get("bybit_available_size"),
+                        "okx_planned_qty": size_info.get("okx_planned_qty"),
+                        "bybit_planned_qty": size_info.get("bybit_planned_qty"),
+                    },
+                    level="warning",
+                )
+                
                 return [row]
             if decision.reason == "slot_busy":
                 self.slot.skip_counts["slot_busy"] = (
@@ -827,6 +848,39 @@ class ThetaTradeManager:
                 f"fill_size_ok={row.get('fill_size_ok')} | "
                 f"slip_spread={row.get('slip_spread')}"
             )
+            
+            # Emit to Sentry (trade lifecycle events).
+            sentry_extras = {
+                "signal_ts_ms": row.get("signal_ts_ms"),
+                "fill_ts_ms": row.get("fill_ts_ms"),
+                "latency_ms": row.get("latency_ms"),
+                "spread_signal": row.get("spread_signal"),
+                "spread_fill": row.get("spread_fill"),
+                "slip_spread": row.get("slip_spread"),
+                "theta_1m": row.get("theta_1m"),
+                "theta_5m": row.get("theta_5m"),
+                "floor": row.get("floor"),
+                "p50_1m": row.get("p50_1m"),
+                "signal_size_ok": row.get("signal_size_ok"),
+                "fill_size_ok": row.get("fill_size_ok"),
+            }
+            if decision.action == "close":
+                sentry_extras.update({
+                    "pnl_spread": row.get("pnl_spread"),
+                    "pnl_usdt_approx": row.get("pnl_usdt_approx"),
+                    "open_fill_spread": row.get("open_fill_spread"),
+                    "close_fill_spread": row.get("close_fill_spread"),
+                })
+            
+            capture_trade_event(
+                event=decision.action,
+                trade_id=str(row["trade_id"]),
+                coin=str(row["base_coin"]),
+                side=str(row["side"]),
+                extras=sentry_extras,
+                level="warning",
+            )
+            
             return [row]
         finally:
             self.slot.pending = False

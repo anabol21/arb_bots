@@ -209,10 +209,14 @@ class BotRuntime:
             self.profile = "gear1"
         if self.profile == "gear2":
             self.profile = "gear2_would_send"
-        if self.profile == "canary":
-            self.profile = "canary_wal_eden"
         if self.profile == "gear22":
             self.profile = "gear22_would_send"
+        if self.profile == "canary":
+            self.profile = "canary_wal_eden"
+        
+        # Initialize Sentry early (requires profile).
+        from app.bot.sentry_setup import init_sentry
+        self.sentry_enabled = init_sentry(profile=self.profile)
         coins_raw = (os.environ.get("BBOT_COINS") or "").strip()
         if not coins_raw:
             if self.mode == "policy" and self.profile == "signal_test":
@@ -1025,6 +1029,8 @@ class BotRuntime:
             )
         except Exception as exc:
             self.log.error(f"policy_error | {exc}")
+            from app.bot.sentry_setup import capture_exception
+            capture_exception(exc, extras={"profile": self.profile, "coin": base_coin})
             return
 
         intent = _normalize_intent(raw)
@@ -1060,6 +1066,8 @@ class BotRuntime:
             )
         except Exception as exc:
             self.log.error(f"gear2_policy_error | {exc}")
+            from app.bot.sentry_setup import capture_exception
+            capture_exception(exc, extras={"profile": self.profile, "coin": base_coin})
             return
         extra["held_coin"] = self.market_state.held_coin
         extra["ordering_key"] = decision.ordering_key

@@ -141,6 +141,9 @@ Prefer **`BBOT_PROFILE=gear22_would_send`** (alias `gear22`).
 | `BBOT_THETA_WATCH` | on | keep on |
 | `BBOT_BROKER` | `stub` | stub only for canary |
 | `BBOT_COINS` | **set to August-std HTML top30** | same as prior canary |
+| `SENTRY_DSN` | *(unset)* | Sentry DSN; when set, emits trade events + errors |
+| `SENTRY_ENVIRONMENT` | `gear22-would-send-canary` | Sentry environment label |
+| `SENTRY_RELEASE` | *(unset)* | Optional release/version tag |
 
 ## Canary recipe (stub)
 
@@ -161,6 +164,10 @@ export BBOT_SLOT_K=1
 export BBOT_NOTIONAL_USDT=100
 # Warm (standard):
 # export BBOT_FLOOR_WARM_PATH=$BBOT_DATA_ROOT/state/floor_warm.pkl
+
+# Sentry (optional; set DSN from Cursor Dashboard or systemd EnvironmentFile):
+# export SENTRY_DSN=https://...@...sentry.io/...
+# export SENTRY_ENVIRONMENT=gear22-would-send-canary
 
 PYTHONPATH=. python -m app.bot
 # Expect under $BBOT_DATA_ROOT:
@@ -188,6 +195,30 @@ python -m unittest tests.test_bbot_theta_trade_k1 -v
 - Never `/data/live`, `/data/bars`, `/data/compacted`, D backup prefixes.
 - No private broker imports in theta trade / floor warm / plot modules.
 - No collector / Contour B / WAL-EDEN edits in this contour.
+
+## Sentry integration
+
+**Enabled when `SENTRY_DSN` is set.** Emits:
+
+- **Trade lifecycle events** (open, close, reject) as Sentry messages (level=warning).
+  - Stable fingerprint: `["theta_k1", trade_id, event]` → duplicates collapse per trade step.
+  - Tags: `contour=gear22_theta_k1`, `profile`, `event`, `coin`, `side`, `trade_id`.
+  - Extras: signal/fill timestamps, spreads, theta, floor, PnL (close only), slip, size check results.
+- **Uncaught exceptions** in policy / trade manager paths via `capture_exception`.
+
+**No secrets in git.** DSN, org, project stay in environment only (systemd `EnvironmentFile`, Cursor Dashboard secrets, or VPS-local `.env`).
+
+**Local/CI tests:** run with `SENTRY_DSN` unset (no network) or mock `sentry_sdk`.
+
+**Example canary unit snippet:**
+
+```ini
+[Service]
+Environment="SENTRY_DSN=https://...@...sentry.io/..."
+Environment="SENTRY_ENVIRONMENT=gear22-would-send-canary"
+```
+
+SDK: official Python `sentry-sdk` (added to `requirements.txt`).
 
 ## Out of scope
 
