@@ -251,6 +251,84 @@ class TestSentryIntegration(unittest.TestCase):
             level="warning",
         )
 
+    @patch("app.bot.sentry_setup._sentry_enabled", True)
+    @patch("app.bot.sentry_setup._init_attempted", True)
+    @patch("app.bot.sentry_setup._try_import_sentry")
+    def test_async_execution_path_emits_to_sentry(self, mock_import: Mock) -> None:
+        """Test that async execution path (_execute_decision_async) emits to Sentry."""
+        import asyncio
+        
+        mock_import.return_value = self.mock_sentry
+        
+        config = ThetaTradeConfig(
+            theta_thr=0.2,
+            fill_delay_ms=70,
+            slot_k=1,
+            notional_usdt=100.0,
+            book_depth=1,
+        )
+        
+        # Mock async sleep
+        async def mock_async_sleep(seconds: float) -> None:
+            pass
+        
+        manager = ThetaTradeManager(
+            data_root=self.test_data_root,
+            config=config,
+            log=lambda _: None,
+            sleep_fn=mock_async_sleep,
+        )
+
+        snapshots = [
+            ThetaSnapshot(
+                base_coin="BTC",
+                side="long",
+                theta_1m=0.25,
+                theta_5m=0.22,
+                floor_tf_select_a25=0.10,
+                p50_1m=0.15,
+                p50_5m=0.14,
+                ts_ms=1000,
+                computed_at_ms=1000,
+            )
+        ]
+        
+        quotes = {
+            "BTC": {
+                "okx": {
+                    "bid_price": 50000,
+                    "bid_size": 10,
+                    "ask_price": 50010,
+                    "ask_size": 10,
+                    "ts_exchange": 1000,
+                    "local_recv_ts_ms": 1000,
+                },
+                "bybit": {
+                    "bid_price": 50020,
+                    "bid_size": 10,
+                    "ask_price": 50030,
+                    "ask_size": 10,
+                    "ts_exchange": 1000,
+                    "local_recv_ts_ms": 1000,
+                },
+            }
+        }
+
+        # Run async path
+        rows = asyncio.run(
+            manager.on_theta_snapshots_async(snapshots, quotes=quotes, now_ms=1000)
+        )
+        
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["event"], "open")
+        
+        # Verify Sentry was called from async path
+        self.mock_sentry.capture_message.assert_called()
+        message = self.mock_sentry.capture_message.call_args[0][0]
+        self.assertIn("theta_k1 trade open", message)
+        self.mock_sentry.flush.assert_called_with(timeout=5)
+        self.mock_scope.set_tag.assert_any_call("kind", "trade")
+
 
 if __name__ == "__main__":
     unittest.main()
