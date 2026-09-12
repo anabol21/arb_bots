@@ -11,12 +11,38 @@ from pathlib import Path
 from typing import Any, Optional
 
 from app.bot.broker import make_broker
+from app.bot.floor_watcher import (
+    FloorJournalWriter,
+    LiveFloorObserver,
+    floor_watch_enabled,
+)
 from app.bot.journal import JournalWriter
 from app.bot.paths import (
     ensure_repo_on_syspath,
     repo_root,
     resolve_data_root,
     resolve_log_path,
+)
+from app.bot.tw_p50_watcher import (
+    EMIT_INTERVAL_SEC,
+    LiveTwP50Observer,
+    TwP50JournalWriter,
+    tw_p50_watch_enabled,
+)
+from app.bot.theta_screener import (
+    LiveThetaScreener,
+    ThetaJournalWriter,
+    theta_watch_enabled,
+)
+from app.bot.theta_trade_manager import (
+    ThetaTradeConfig,
+    ThetaTradeManager,
+    theta_trade_enabled,
+)
+from app.bot.floor_warm import (
+    apply_warm_pickle_to_observer,
+    export_observer_warm_pickle,
+    resolve_floor_warm_path,
 )
 from app.bot.stub_broker import InstrumentMeta
 from app.bot.ws_books import (
@@ -172,17 +198,25 @@ class BotRuntime:
             "gear2",
             "canary_wal_eden",
             "canary",
+            "gear22_would_send",
+            "gear22",
         ):
             raise ValueError(
                 f"BBOT_PROFILE must be gear1|signal_test|gear2_would_send|"
-                f"canary_wal_eden, got {self.profile!r}"
+                f"canary_wal_eden|gear22_would_send, got {self.profile!r}"
             )
         if self.profile == "default":
             self.profile = "gear1"
         if self.profile == "gear2":
             self.profile = "gear2_would_send"
+        if self.profile == "gear22":
+            self.profile = "gear22_would_send"
         if self.profile == "canary":
             self.profile = "canary_wal_eden"
+        
+        # Initialize Sentry early (requires profile).
+        from app.bot.sentry_setup import init_sentry
+        self.sentry_enabled = init_sentry(profile=self.profile)
         coins_raw = (os.environ.get("BBOT_COINS") or "").strip()
         if not coins_raw:
             if self.mode == "policy" and self.profile == "signal_test":
@@ -191,6 +225,9 @@ class BotRuntime:
                 coins_raw = "BTC,ETH,SOL,XRP"
             elif self.mode == "policy" and self.profile == "canary_wal_eden":
                 coins_raw = "WAL,EDEN"
+            elif self.mode == "policy" and self.profile == "gear22_would_send":
+                # August-std HTML top30 — require explicit BBOT_COINS in canary.
+                coins_raw = "BTC,ETH,SOL,XRP"
             else:
                 coins_raw = "BTC,ETH"
         self.coins = parse_coins(coins_raw)
@@ -275,6 +312,76 @@ class BotRuntime:
         }
         self._private_warm: Any = None
         self._l1_ring_warned = False
+        # Gear 2.2 floor observer (5m bar metrics). Off critical decide/send path.
+        self.floor_enabled = floor_watch_enabled(self.profile)
+        self.floor_observer: LiveFloorObserver | None = None
+        self.floor_journal: FloorJournalWriter | None = None
+        self._floor_pending: list[dict[str, Any]] = []
+        self._floor_flush_warned = False
+        if self.floor_enabled:
+            self.floor_observer = LiveFloorObserver(self.coins)
+            self.floor_journal = FloorJournalWriter(self.data_root)
+        # Rolling TW p50 (1m/5m) observer — alongside floor, not instead of it.
+        self.tw_p50_enabled = tw_p50_watch_enabled(self.profile)
+        self.tw_p50_observer: LiveTwP50Observer | None = None
+        self.tw_p50_journal: TwP50JournalWriter | None = None
+        self._tw_p50_flush_warned = False
+        if self.tw_p50_enabled:
+            self.tw_p50_observer = LiveTwP50Observer(self.coins)
+            self.tw_p50_journal = TwP50JournalWriter(self.data_root)
+        # Theta = p50 − floor; ~1 Hz follow-on to tw_p50 emit (never ticks).
+        self.theta_enabled = theta_watch_enabled(self.profile)
+        self.theta_screener: LiveThetaScreener | None = None
+        self.theta_journal: ThetaJournalWriter | None = None
+        self._theta_flush_warned = False
+        if self.theta_enabled:
+            self.theta_screener = LiveThetaScreener(
+                self.coins,
+                floor_observer=self.floor_observer,
+                tw_p50_observer=self.tw_p50_observer,
+            )
+            self.theta_journal = ThetaJournalWriter(self.data_root)
+        # Gear 2.2 θ K=1 would_send (separate journal; no StubBroker.place).
+        self.theta_trade_enabled = theta_trade_enabled(self.profile)
+        self.theta_trade: ThetaTradeManager | None = None
+        self._theta_trade_warned = False
+        if self.theta_trade_enabled:
+            self.theta_trade = ThetaTradeManager(
+                data_root=self.data_root,
+                config=ThetaTradeConfig.from_env(),
+                log=lambda m: self.log.info(m),
+            )
+        # Floor warm-start (standard for gear22 / when pickle present).
+        self._floor_warm_path = resolve_floor_warm_path(self.data_root)
+        self._floor_warm_loaded = False
+        if self.floor_observer is not None:
+            warm_path = self._floor_warm_path
+            force_warm = str(os.environ.get("BBOT_FLOOR_WARM") or "").strip().lower()
+            want_warm = force_warm in ("1", "true", "on", "yes") or (
+                self.profile == "gear22_would_send" and force_warm not in ("0", "false", "off", "no")
+            )
+            if want_warm or warm_path.is_file():
+                if warm_path.is_file():
+                    try:
+                        n = apply_warm_pickle_to_observer(self.floor_observer, warm_path)
+                        self._floor_warm_loaded = True
+                        self.log.info(
+                            "floor_warm_loaded | path=%s | touched=%s",
+                            warm_path,
+                            n,
+                        )
+                    except Exception as exc:  # noqa: BLE001
+                        self.log.warning(
+                            "floor_warm_load_failed | path=%s | err=%s",
+                            warm_path,
+                            type(exc).__name__,
+                        )
+                elif want_warm:
+                    self.log.warning(
+                        "floor_warm_missing | path=%s | theta may stay null until "
+                        "~12h SMA-12 history; build via python -m app.bot.floor_warm",
+                        warm_path,
+                    )
 
     def _uses_market_manager(self) -> bool:
         if self.policy is not None:
@@ -353,6 +460,7 @@ class BotRuntime:
         try:
             while True:
                 exchange = self._book_last_exchange.get(base_coin, "okx")
+                pending_floor: list[dict[str, Any]] = []
                 async with self._lock:
                     # Refresh gate for the other exchange (book may have updated while coalesced).
                     other = "bybit" if exchange == "okx" else "okx"
@@ -363,6 +471,15 @@ class BotRuntime:
                         complete_l1=book_l1_complete(other_book),
                     )
                     self._handle_book_sync(base_coin, exchange)
+                    # Drain bar-close rows inside the lock; flush I/O after release.
+                    if self._floor_pending:
+                        pending_floor = self._floor_pending
+                        self._floor_pending = []
+                if pending_floor:
+                    asyncio.create_task(
+                        self._flush_floor_rows(pending_floor),
+                        name=f"floor-{base_coin}",
+                    )
                 if not self._book_dirty.get(base_coin):
                     break
                 self._book_dirty[base_coin] = False
@@ -376,9 +493,30 @@ class BotRuntime:
                     self._coalesced_handle_book(base_coin), name=f"tick-{base_coin}"
                 )
 
+    async def _flush_floor_rows(self, rows: list[dict[str, Any]]) -> None:
+        """Persist floor metric rows off the book/decide lock."""
+        if not rows or self.floor_journal is None:
+            return
+        try:
+            await asyncio.to_thread(self.floor_journal.append_rows, rows)
+        except Exception as exc:  # noqa: BLE001 — never stall the public book path
+            if not self._floor_flush_warned:
+                self._floor_flush_warned = True
+                self.log.warning(
+                    "floor_journal_flush_failed | err=%s | n=%s",
+                    type(exc).__name__,
+                    len(rows),
+                )
+
     async def _handle_book(self, base_coin: str, exchange: str) -> None:
+        pending_floor: list[dict[str, Any]] = []
         async with self._lock:
             self._handle_book_sync(base_coin, exchange)
+            if self._floor_pending:
+                pending_floor = self._floor_pending
+                self._floor_pending = []
+        if pending_floor:
+            await self._flush_floor_rows(pending_floor)
 
     def _handle_book_sync(self, base_coin: str, exchange: str) -> None:
         book = self.quotes[base_coin][exchange]
@@ -401,6 +539,16 @@ class BotRuntime:
             spread_long, spread_short = compute_spreads(okx, bybit)
         except (TypeError, ZeroDivisionError, KeyError):
             return
+
+        # Gear 2.2 floor: cheap in-memory note on the same valid spread stream.
+        # Bar-close rows are queued; journal flush runs after the lock (async).
+        self._floor_note_spreads(
+            base_coin, event_local_ts_ms, spread_long, spread_short
+        )
+        # Rolling TW p50: append-only on the same stream; 1 Hz task computes/journals.
+        self._tw_p50_note_spreads(
+            base_coin, event_local_ts_ms, spread_long, spread_short
+        )
 
         # Fill pending on next live VALID tick after Trade_Lat (no asyncio.sleep).
         if self.broker.has_pending():
@@ -534,6 +682,206 @@ class BotRuntime:
             self.broker.pending.base_coin if self.broker.pending is not None else None
         )
 
+    def _floor_note_spreads(
+        self,
+        base_coin: str,
+        event_local_ts_ms: int,
+        spread_long: float,
+        spread_short: float,
+    ) -> None:
+        """In-memory floor bar update; queue closed rows for async flush."""
+        if self.floor_observer is None:
+            return
+        try:
+            rows = self.floor_observer.note_spreads(
+                base_coin,
+                event_local_ts_ms,
+                spread_long,
+                spread_short,
+            )
+        except Exception as exc:  # noqa: BLE001 — observer must not break decide
+            if not self._floor_flush_warned:
+                self._floor_flush_warned = True
+                self.log.warning(
+                    "floor_note_failed | coin=%s | err=%s",
+                    base_coin,
+                    type(exc).__name__,
+                )
+            return
+        if rows:
+            self._floor_pending.extend(rows)
+
+    def _tw_p50_note_spreads(
+        self,
+        base_coin: str,
+        event_local_ts_ms: int,
+        spread_long: float,
+        spread_short: float,
+    ) -> None:
+        """Cheap ring append for rolling TW p50 (no compute / I/O)."""
+        if self.tw_p50_observer is None:
+            return
+        try:
+            self.tw_p50_observer.note_spreads(
+                base_coin,
+                event_local_ts_ms,
+                spread_long,
+                spread_short,
+            )
+        except Exception as exc:  # noqa: BLE001 — observer must not break decide
+            if not self._tw_p50_flush_warned:
+                self._tw_p50_flush_warned = True
+                self.log.warning(
+                    "tw_p50_note_failed | coin=%s | err=%s",
+                    base_coin,
+                    type(exc).__name__,
+                )
+
+    async def _flush_tw_p50_rows(self, rows: list[dict[str, Any]]) -> None:
+        """Persist TW p50 metric rows off the book/decide lock."""
+        if not rows or self.tw_p50_journal is None:
+            return
+        try:
+            await asyncio.to_thread(self.tw_p50_journal.append_rows, rows)
+        except Exception as exc:  # noqa: BLE001 — never stall the public book path
+            if not self._tw_p50_flush_warned:
+                self._tw_p50_flush_warned = True
+                self.log.warning(
+                    "tw_p50_journal_flush_failed | err=%s | n=%s",
+                    type(exc).__name__,
+                    len(rows),
+                )
+
+    async def _tw_p50_emit_loop(self) -> None:
+        """~1 Hz: compute TW p50 snapshots, journal under tw_p50/ (never ticks).
+
+        When theta is enabled, emit theta rows immediately after (same cadence).
+        """
+        while not self.stop_event.is_set():
+            try:
+                await asyncio.wait_for(
+                    self.stop_event.wait(), timeout=EMIT_INTERVAL_SEC
+                )
+                break
+            except asyncio.TimeoutError:
+                pass
+            if self.tw_p50_observer is None:
+                continue
+            try:
+                snapshots = await asyncio.to_thread(
+                    self.tw_p50_observer.compute_snapshots
+                )
+            except Exception as exc:  # noqa: BLE001
+                if not self._tw_p50_flush_warned:
+                    self._tw_p50_flush_warned = True
+                    self.log.warning(
+                        "tw_p50_compute_failed | err=%s",
+                        type(exc).__name__,
+                    )
+                continue
+            # Skip sides that have never received a tick (n_5m==0 and no coverage).
+            rows = [
+                s.as_row()
+                for s in snapshots
+                if s.n_5m > 0 or s.coverage_5m > 0.0 or s.n_1m > 0
+            ]
+            if rows:
+                await self._flush_tw_p50_rows(rows)
+            if self.theta_enabled and self.theta_screener is not None:
+                await self._emit_theta_from_tw(snapshots)
+
+    async def _theta_emit_loop(self) -> None:
+        """~1 Hz theta when TW p50 watch is off but theta is on."""
+        while not self.stop_event.is_set():
+            try:
+                await asyncio.wait_for(
+                    self.stop_event.wait(), timeout=EMIT_INTERVAL_SEC
+                )
+                break
+            except asyncio.TimeoutError:
+                pass
+            if self.theta_screener is None:
+                continue
+            try:
+                snaps = await asyncio.to_thread(self.theta_screener.compute_snapshots)
+            except Exception as exc:  # noqa: BLE001
+                if not self._theta_flush_warned:
+                    self._theta_flush_warned = True
+                    self.log.warning(
+                        "theta_compute_failed | err=%s",
+                        type(exc).__name__,
+                    )
+                continue
+            if snaps:
+                await self._flush_theta_rows([s.as_row() for s in snaps])
+                if self.theta_trade_enabled and self.theta_trade is not None:
+                    await self._run_theta_trade(snaps)
+
+    async def _emit_theta_from_tw(self, tw_snapshots: list[Any]) -> None:
+        """Follow-on: theta from TW snapshots + last floor (never ticks)."""
+        if self.theta_screener is None:
+            return
+        try:
+            theta_snaps = await asyncio.to_thread(
+                self.theta_screener.compute_from_tw_snapshots, tw_snapshots
+            )
+        except Exception as exc:  # noqa: BLE001
+            if not self._theta_flush_warned:
+                self._theta_flush_warned = True
+                self.log.warning(
+                    "theta_compute_failed | err=%s",
+                    type(exc).__name__,
+                )
+            return
+        # Only journal sides that had some TW activity (same filter as tw_p50).
+        active_keys = {
+            (s.base_coin, s.side)
+            for s in tw_snapshots
+            if s.n_5m > 0 or s.coverage_5m > 0.0 or s.n_1m > 0
+        }
+        rows = [
+            s.as_row()
+            for s in theta_snaps
+            if (s.base_coin, s.side) in active_keys
+        ]
+        if rows:
+            await self._flush_theta_rows(rows)
+        if self.theta_trade_enabled and self.theta_trade is not None:
+            await self._run_theta_trade(theta_snaps)
+
+    async def _run_theta_trade(self, theta_snaps: list[Any]) -> None:
+        """K=1 would_send decide+fill off the theta emit (never tick WAL)."""
+        if self.theta_trade is None or not theta_snaps:
+            return
+        try:
+            await self.theta_trade.on_theta_snapshots_async(
+                theta_snaps,
+                quotes=self.quotes,
+                coin_order=self.coins,
+            )
+        except Exception as exc:  # noqa: BLE001 — never stall the public book path
+            if not self._theta_trade_warned:
+                self._theta_trade_warned = True
+                self.log.warning(
+                    "theta_trade_failed | err=%s",
+                    type(exc).__name__,
+                )
+
+    async def _flush_theta_rows(self, rows: list[dict[str, Any]]) -> None:
+        """Persist theta metric rows off the book/decide lock."""
+        if not rows or self.theta_journal is None:
+            return
+        try:
+            await asyncio.to_thread(self.theta_journal.append_rows, rows)
+        except Exception as exc:  # noqa: BLE001 — never stall the public book path
+            if not self._theta_flush_warned:
+                self._theta_flush_warned = True
+                self.log.warning(
+                    "theta_journal_flush_failed | err=%s | n=%s",
+                    type(exc).__name__,
+                    len(rows),
+                )
+
     def _policy_maybe_act(
         self,
         *,
@@ -544,6 +892,9 @@ class BotRuntime:
         spread_long: float,
         spread_short: float,
     ) -> None:
+        # Theta K=1 would_send owns the slot when enabled — no tick-path opens.
+        if self.theta_trade_enabled:
+            return
         if self.policy is None:
             # Refuse to open; keep WS heartbeat alive.
             if self._heartbeat_n % 100 == 0:
@@ -678,6 +1029,8 @@ class BotRuntime:
             )
         except Exception as exc:
             self.log.error(f"policy_error | {exc}")
+            from app.bot.sentry_setup import capture_exception
+            capture_exception(exc, extras={"profile": self.profile, "coin": base_coin})
             return
 
         intent = _normalize_intent(raw)
@@ -713,6 +1066,8 @@ class BotRuntime:
             )
         except Exception as exc:
             self.log.error(f"gear2_policy_error | {exc}")
+            from app.bot.sentry_setup import capture_exception
+            capture_exception(exc, extras={"profile": self.profile, "coin": base_coin})
             return
         extra["held_coin"] = self.market_state.held_coin
         extra["ordering_key"] = decision.ordering_key
@@ -847,7 +1202,12 @@ class BotRuntime:
             f"coins={','.join(self.coins)} | thresh_open={thresh} | "
             f"thresh={thresh_cs} | avg_window_sec={avg_sec} | "
             f"data_root={self.data_root} | log={self.log_path} | "
-            f"notional={self.notional} | trade_lat_ms={self.trade_lat_ms}"
+            f"notional={self.notional} | trade_lat_ms={self.trade_lat_ms} | "
+            f"floor_watch={'on' if self.floor_enabled else 'off'} | "
+            f"tw_p50_watch={'on' if self.tw_p50_enabled else 'off'} | "
+            f"theta_watch={'on' if self.theta_enabled else 'off'} | "
+            f"theta_trade={'on' if self.theta_trade_enabled else 'off'} | "
+            f"floor_warm={'loaded' if self._floor_warm_loaded else 'off'}"
         )
         if self.mode == "policy" and self.policy is None:
             self.log.error(
@@ -877,6 +1237,15 @@ class BotRuntime:
             self.log.info("private_warm_skipped | live_private_send=false")
 
         tasks: list[asyncio.Task] = [asyncio.create_task(self._heartbeat())]
+        if self.tw_p50_enabled and self.tw_p50_observer is not None:
+            tasks.append(
+                asyncio.create_task(self._tw_p50_emit_loop(), name="tw-p50-emit")
+            )
+        elif self.theta_enabled and self.theta_screener is not None:
+            # Theta alone (TW off): still emit ~1 Hz from last RAM snapshots.
+            tasks.append(
+                asyncio.create_task(self._theta_emit_loop(), name="theta-emit")
+            )
         for coin in self.coins:
             meta = self._meta(coin)
             tasks.append(
@@ -915,6 +1284,21 @@ class BotRuntime:
             self.stop_event.set()
             raise
         finally:
+            # Persist floor warm pickle for next start (B path only).
+            if self.floor_observer is not None and (
+                self.profile == "gear22_would_send" or self._floor_warm_loaded
+            ):
+                try:
+                    export_observer_warm_pickle(
+                        self.floor_observer, self._floor_warm_path
+                    )
+                    self.log.info(
+                        "floor_warm_saved | path=%s", self._floor_warm_path
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    self.log.warning(
+                        "floor_warm_save_failed | err=%s", type(exc).__name__
+                    )
             from app.bot.private.ws_warm_session import clear_process_warm_session
 
             clear_process_warm_session(stop=True)

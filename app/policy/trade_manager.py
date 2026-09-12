@@ -116,11 +116,16 @@ def _norm_profile(profile: str) -> str:
         return "gear2_would_send"
     if name == "canary":
         return "canary_wal_eden"
+    if name == "gear22":
+        return "gear22_would_send"
     return name
 
 
 def uses_gear2_market_manager(profile: str) -> bool:
-    """True for gear2_would_send and the WAL/EDEN canary (shared elif chain)."""
+    """True for gear2_would_send and the WAL/EDEN canary (shared elif chain).
+
+    ``gear22_would_send`` is theta K=1 would_send only — no tick-path opens.
+    """
     return _norm_profile(profile) in {"gear2_would_send", "canary_wal_eden"}
 
 
@@ -152,9 +157,12 @@ def variation_for_profile(profile: str) -> dict[str, float]:
         return dict(GEAR2_WOULD_SEND_VARIATION)
     if name == "canary_wal_eden":
         return dict(CANARY_WAL_EDEN_VARIATION)
+    if name == "gear22_would_send":
+        # Theta K=1 contour does not use tick thresholds; keep a benign copy.
+        return dict(GEAR2_WOULD_SEND_VARIATION)
     raise ValueError(
         f"unknown BBOT_PROFILE {profile!r}; expected "
-        "gear1|signal_test|gear2_would_send|canary_wal_eden"
+        "gear1|signal_test|gear2_would_send|canary_wal_eden|gear22_would_send"
     )
 
 
