@@ -116,28 +116,26 @@ class TestSentryIntegration(unittest.TestCase):
 
     @patch("app.bot.sentry_setup._sentry_enabled", True)
     @patch("app.bot.sentry_setup._try_import_sentry")
-    def test_capture_trade_reject(self, mock_import: Mock) -> None:
-        """Test Sentry capture on trade reject."""
+    def test_no_reject_emits(self, mock_import: Mock) -> None:
+        """Test that reject events do NOT emit to Sentry (journal only)."""
         mock_import.return_value = self.mock_sentry
+        
+        # Rejects are journaled but not sent to Sentry to avoid flooding.
+        # This test verifies the API works but should not be called for rejects.
         from app.bot.sentry_setup import capture_trade_event
 
+        # This would work if called, but should NOT be called for rejects.
         capture_trade_event(
-            event="reject",
-            trade_id="",
+            event="open",  # Only open/close emit
+            trade_id="test-123",
             coin="SOL",
             side="long",
-            extras={
-                "reject_reason": "insufficient_size",
-                "theta_1m": 0.21,
-                "okx_available_size": 5.0,
-                "bybit_available_size": 3.0,
-            },
+            extras={},
             level="warning",
         )
 
         self.mock_sentry.capture_message.assert_called_once()
-        self.mock_scope.set_tag.assert_any_call("event", "reject")
-        self.mock_scope.set_extra.assert_any_call("reject_reason", "insufficient_size")
+        self.mock_scope.set_tag.assert_any_call("event", "open")
 
     @patch("app.bot.sentry_setup._sentry_enabled", True)
     @patch("app.bot.sentry_setup._try_import_sentry")

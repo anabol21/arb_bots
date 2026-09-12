@@ -200,10 +200,11 @@ python -m unittest tests.test_bbot_theta_trade_k1 -v
 
 **Enabled when `SENTRY_DSN` is set.** Emits:
 
-- **Trade lifecycle events** (open, close, reject) as Sentry messages (level=warning).
+- **Trade lifecycle events** (open, close) as Sentry messages (level=warning).
   - Stable fingerprint: `["theta_k1", trade_id, event]` → duplicates collapse per trade step.
   - Tags: `contour=gear22_theta_k1`, `profile`, `event`, `coin`, `side`, `trade_id`.
   - Extras: signal/fill timestamps, spreads, theta, floor, PnL (close only), slip, size check results.
+  - **Rejects (insufficient_size) are NOT emitted to Sentry** to avoid flooding; they remain in journal skip rows only.
 - **Uncaught exceptions** in policy / trade manager paths via `capture_exception`.
 
 **No secrets in git.** DSN, org, project stay in environment only (systemd `EnvironmentFile`, Cursor Dashboard secrets, or VPS-local `.env`).

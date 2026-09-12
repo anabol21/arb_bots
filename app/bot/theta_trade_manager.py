@@ -689,26 +689,6 @@ class ThetaTradeManager:
                     "computed_at_ms": signal_ts,
                 }
                 self.journal.append_rows([row])
-                
-                # Emit reject to Sentry.
-                capture_trade_event(
-                    event="reject",
-                    trade_id="",
-                    coin=str(decision.base_coin),
-                    side=str(decision.side),
-                    extras={
-                        "reject_reason": "insufficient_size",
-                        "theta_1m": decision.theta_1m,
-                        "opposite_theta_1m": decision.opposite_theta_1m,
-                        "notional_usdt": size_info.get("notional_usdt"),
-                        "okx_available_size": size_info.get("okx_available_size"),
-                        "bybit_available_size": size_info.get("bybit_available_size"),
-                        "okx_planned_qty": size_info.get("okx_planned_qty"),
-                        "bybit_planned_qty": size_info.get("bybit_planned_qty"),
-                    },
-                    level="warning",
-                )
-                
                 return [row]
             if decision.reason == "slot_busy":
                 self.slot.skip_counts["slot_busy"] = (
