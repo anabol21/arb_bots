@@ -23,7 +23,12 @@ class TestSentryIntegration(unittest.TestCase):
         self.test_data_root.mkdir(parents=True, exist_ok=True)
         self.mock_sentry = MagicMock()
         self.mock_scope = MagicMock()
+        # Mock both push_scope and new_scope context managers
         self.mock_sentry.push_scope.return_value.__enter__.return_value = self.mock_scope
+        self.mock_sentry.push_scope.return_value.__exit__.return_value = None
+        self.mock_sentry.new_scope = MagicMock()
+        self.mock_sentry.new_scope.return_value.__enter__.return_value = self.mock_scope
+        self.mock_sentry.new_scope.return_value.__exit__.return_value = None
         self.capture_calls: list[tuple[str, dict[str, Any]]] = []
 
     def tearDown(self) -> None:
@@ -58,11 +63,13 @@ class TestSentryIntegration(unittest.TestCase):
         call_kwargs = self.mock_sentry.init.call_args[1]
         self.assertEqual(call_kwargs["dsn"], "https://fake@sentry.io/123")
         self.assertIn("environment", call_kwargs)
+        self.mock_sentry.flush.assert_not_called()
 
     @patch("app.bot.sentry_setup._sentry_enabled", True)
+    @patch("app.bot.sentry_setup._init_attempted", True)
     @patch("app.bot.sentry_setup._try_import_sentry")
     def test_capture_trade_open(self, mock_import: Mock) -> None:
-        """Test Sentry capture on trade open."""
+        """Test Sentry capture on trade open with default error level."""
         mock_import.return_value = self.mock_sentry
         from app.bot.sentry_setup import capture_trade_event
 
@@ -77,20 +84,26 @@ class TestSentryIntegration(unittest.TestCase):
                 "theta_1m": 0.25,
                 "spread_signal": 0.30,
             },
-            level="warning",
         )
 
         self.mock_sentry.capture_message.assert_called_once()
-        message = self.mock_sentry.capture_message.call_args[0][0]
+        call_args = self.mock_sentry.capture_message.call_args
+        message = call_args[0][0]
+        level = call_args[1].get("level", call_args[0][1] if len(call_args[0]) > 1 else None)
         self.assertIn("theta_k1 trade open", message)
         self.assertIn("BTC", message)
+        self.assertEqual(level, "error")
         
         self.mock_scope.set_tag.assert_any_call("event", "open")
         self.mock_scope.set_tag.assert_any_call("coin", "BTC")
         self.mock_scope.set_tag.assert_any_call("side", "long")
         self.mock_scope.set_tag.assert_any_call("trade_id", "test-uuid-123")
+        self.mock_scope.set_tag.assert_any_call("kind", "trade")
+        
+        self.mock_sentry.flush.assert_called_once_with(timeout=5)
 
     @patch("app.bot.sentry_setup._sentry_enabled", True)
+    @patch("app.bot.sentry_setup._init_attempted", True)
     @patch("app.bot.sentry_setup._try_import_sentry")
     def test_capture_trade_close_with_pnl(self, mock_import: Mock) -> None:
         """Test Sentry capture on trade close with PnL."""
@@ -107,14 +120,19 @@ class TestSentryIntegration(unittest.TestCase):
                 "pnl_usdt_approx": 0.15,
                 "slip_spread": 0.02,
             },
-            level="warning",
         )
 
         self.mock_sentry.capture_message.assert_called_once()
+        call_args = self.mock_sentry.capture_message.call_args
+        level = call_args[1].get("level", call_args[0][1] if len(call_args[0]) > 1 else None)
+        self.assertEqual(level, "error")
         self.mock_scope.set_tag.assert_any_call("event", "close")
+        self.mock_scope.set_tag.assert_any_call("kind", "trade")
         self.mock_scope.set_extra.assert_any_call("pnl_spread", 0.15)
+        self.mock_sentry.flush.assert_called_once_with(timeout=5)
 
     @patch("app.bot.sentry_setup._sentry_enabled", True)
+    @patch("app.bot.sentry_setup._init_attempted", True)
     @patch("app.bot.sentry_setup._try_import_sentry")
     def test_no_reject_emits(self, mock_import: Mock) -> None:
         """Test that reject events do NOT emit to Sentry (journal only)."""
@@ -131,16 +149,20 @@ class TestSentryIntegration(unittest.TestCase):
             coin="SOL",
             side="long",
             extras={},
-            level="warning",
         )
 
         self.mock_sentry.capture_message.assert_called_once()
+        call_args = self.mock_sentry.capture_message.call_args
+        level = call_args[1].get("level", call_args[0][1] if len(call_args[0]) > 1 else None)
+        self.assertEqual(level, "error")
         self.mock_scope.set_tag.assert_any_call("event", "open")
+        self.mock_sentry.flush.assert_called_once_with(timeout=5)
 
     @patch("app.bot.sentry_setup._sentry_enabled", True)
+    @patch("app.bot.sentry_setup._init_attempted", True)
     @patch("app.bot.sentry_setup._try_import_sentry")
     def test_capture_exception(self, mock_import: Mock) -> None:
-        """Test Sentry exception capture."""
+        """Test Sentry exception capture with flush."""
         mock_import.return_value = self.mock_sentry
         from app.bot.sentry_setup import capture_exception
 
@@ -149,8 +171,10 @@ class TestSentryIntegration(unittest.TestCase):
 
         self.mock_sentry.capture_exception.assert_called_once_with(test_exc)
         self.mock_scope.set_extra.assert_called_with("profile", "gear22_would_send")
+        self.mock_sentry.flush.assert_called_once_with(timeout=5)
 
     @patch("app.bot.sentry_setup._sentry_enabled", True)
+    @patch("app.bot.sentry_setup._init_attempted", True)
     @patch("app.bot.sentry_setup._try_import_sentry")
     def test_theta_manager_emits_on_open(self, mock_import: Mock) -> None:
         """Test that ThetaTradeManager emits to Sentry on successful open."""

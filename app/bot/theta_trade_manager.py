@@ -858,7 +858,6 @@ class ThetaTradeManager:
                 coin=str(row["base_coin"]),
                 side=str(row["side"]),
                 extras=sentry_extras,
-                level="warning",
             )
             
             return [row]
