@@ -13,5 +13,6 @@ ccxt
 ccxtpro
 typing
 argparse
+sentry-sdk
 
 
