@@ -1215,6 +1215,9 @@ class BotRuntime:
         
         def _signal_handler(signame: str) -> None:
             self.log.info(f"bbot_signal_received | signal={signame}")
+            # Save floor warm pickle immediately (synchronously) before stop_event.
+            # WS tasks may not unwind to finally before systemd timeout.
+            self._save_floor_warm_pickle()
             self.stop_event.set()
         
         for sig in (signal.SIGTERM, signal.SIGHUP):

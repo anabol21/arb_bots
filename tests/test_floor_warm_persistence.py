@@ -152,10 +152,18 @@ class FloorWarmRuntimePersistenceTests(unittest.TestCase):
         self.assertTrue(pickle_path.exists())
     
     def test_signal_handler_sets_stop_event(self) -> None:
-        """SIGTERM/SIGHUP signal handlers set stop_event."""
+        """SIGTERM/SIGHUP signal handlers save immediately then set stop_event."""
         with patch.dict(os.environ, self.env, clear=False):
             from app.bot.runtime import BotRuntime
             rt = BotRuntime()
+        
+        rt._floor_warm_loaded = True
+        pickle_path = rt._floor_warm_path
+        
+        # Feed some data to floor observer
+        t0 = (1_725_000_000_000 // BAR_MS) * BAR_MS
+        rt.floor_observer.note_spreads("BTC", t0 + 10_000, 0.1, 0.2)
+        rt.floor_observer.note_spreads("BTC", t0 + BAR_MS + 1_000, 0.3, 0.4)
         
         async def _test_signal():
             # Start the run method in the background
@@ -163,6 +171,9 @@ class FloorWarmRuntimePersistenceTests(unittest.TestCase):
             
             # Give it a moment to set up signal handlers
             await asyncio.sleep(0.1)
+            
+            # Verify pickle doesn't exist yet
+            self.assertFalse(pickle_path.exists())
             
             # Verify stop_event is not set initially
             self.assertFalse(rt.stop_event.is_set())
@@ -172,6 +183,10 @@ class FloorWarmRuntimePersistenceTests(unittest.TestCase):
             
             # Wait for signal to be processed
             await asyncio.sleep(0.1)
+            
+            # Verify pickle was saved immediately by signal handler
+            self.assertTrue(pickle_path.exists(), 
+                          "Signal handler should save pickle immediately before stop_event")
             
             # Verify stop_event was set
             self.assertTrue(rt.stop_event.is_set())
