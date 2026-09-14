@@ -168,7 +168,9 @@ Unlock 2026-08-18: testnet/demo сначала; live — после журнал
 
 Private top-10 vs all; несколько частичных позиций (гир 2); политика размера
 (гир 2.5); сторож и vacation-hardening D; прибыльность; внедрение `L1-crypto`
-в collector. Live send — чат B-private после testnet, не этот документ.
+в collector. Гир **2.2 существует** в треке модели как закрытое наблюдение
+(упрощённый прогон 1 Гц, не живая политика) — [`strategy-gears.md`](strategy-gears.md).
+Live send — чат B-private после testnet, не этот документ.
 Host Ops — только с первой live (не testnet) заявкой.
 
 ---

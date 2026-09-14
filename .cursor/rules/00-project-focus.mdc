@@ -8,7 +8,7 @@ alwaysApply: true
 Work belongs to one functional track:
 
 1. **Collection and storage** — `app/screaner_b_o.py`, schema, persistence, VPS, mount, compaction, backup. Current priority.
-2. **Historical model** — `model.ipynb` and `docs/strategy-gears.md`. Simulation only.
+2. **Historical model** — `model.ipynb` and `docs/strategy-gears.md`. Simulation only. Gear **2.2 exists and is closed** as an observation contour (dummy replay + frozen knobs; not 2.5, not 3, not live-ready).
 3. **Glue** — architecture joining collection, model, and trades. Spec: `docs/b-v0-block-diagram.md`. Unlocked: live VPS stub bot in `app/bot/**` (no D paths); B-private in `app/bot/private/**` (testnet first, live orders after an explicit live gate). Private APIs stay out of `app/screaner_b_o.py`.
 
 Before acting:

@@ -12,8 +12,8 @@ Use `.cursor/agents/model-simulator-agent.md` for implementation and `.cursor/ag
 - 1.0: closed fixed-vector simulator for one coin.
 - 1.5: closed; fixed expert volatility screener (Top-N / cluster); no PnL optimization; `regime_on` is not a close criterion.
 - 2: closed (contour; 2.2 out of scope); multi-coin simulation using 1.0 + optional 1.5 Top-N on open, limit `K`, equal capital per slot.
-- 2.2: **next allowed**; stricter statistical analysis / C/D / occupancy / rates — not 2.5, not 3.
-- 2.5: separate position-size policy (blocked until 2.2 done or unlocked).
+- 2.2: **closed** as observation contour — `research/gear22_backtest/` (`policy.decide`, `replay.py` 1 Hz, `K=1`, `SLOT_MODE=global`, knobs in `params_frozen.py`), features `gear22_bt_features_v1`; fill = `spread_last` not `Trade_Lat`; ridge not 20–30% plateau; `combined_mark` is observation mark not PnL. Not 1.0 simulator gate, not 2.5, not 3, not live-ready. See `docs/strategy-gears.md`.
+- 2.5: separate position-size policy (blocked until explicit unlock; 2.2 observation close is not an unlock).
 - 3: parameter search after 2–2.5 and an anomaly-episode catalog.
 
 Do not skip gears or implement live trading in this workflow.

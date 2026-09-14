@@ -34,7 +34,8 @@ AGENTS.md, docs/b-v0-block-diagram.md, .cursor/rules/30-agent-ownership.mdc,
 Не стартовать второй N=337 и не подписывать private на весь рынок.
 Первый harness — 1 символ, минимальный лот.
 
-Заморожено: гиры 2/2.5/3 как live-политика; прибыль; production-ready;
+Заморожено: гиры 2/2.5/3 как live-политика; гир 2.2 закрыт в M как
+наблюдение (не live); прибыль; production-ready;
 Host Ops-агент на testnet (его завести только перед первой live-заявкой:
 нагрузка VPS, процессы, логи бота).
 

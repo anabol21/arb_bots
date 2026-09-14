@@ -13,8 +13,8 @@ Gear order:
 1. Gear 1.0 is closed: one coin, fixed vector, explicit execution approximations.
 2. Gear 1.5 is closed: fixed expert volatility screener (Top-N / cluster); no PnL optimization; `regime_on` is not a close criterion.
 3. Gear 2 is closed (contour; 2.2 out of scope): multi-coin simulation using 1.0 + optional 1.5 Top-N on open, limit `K`, equal capital per slot. Stamp must keep the parenthetical.
-4. **Next allowed stage = Gear 2.2:** stricter statistical analysis / hypothesis experiments (C = `regime_on`, D = random entry at B’s rate, occupancy, signal rates, honest holes). Explicitly **not** 2.5 and **not** 3.
-5. Gear 2.5: separate position-size policy — blocked until 2.2 is done or explicitly unlocked. Entry is an available cluster flag, not “cluster as default universe”.
+4. Gear **2.2 is closed** as an observation contour: 1 Hz feature table `gear22_bt_features_v1` plus dummy replay in `research/gear22_backtest/` (`policy.decide`, `replay.py` 1 Hz clock, `K=1`, `SLOT_MODE=global`, frozen knobs in `params_frozen.py`). Fill = 1 Hz `spread_last`, not `Trade_Lat`. Ridge, not a 20–30% plateau. `combined_mark` is an observation mark, not PnL. Not the 1.0 simulator gate, not 2.5, not 3, not live-ready. Details: `docs/strategy-gears.md`.
+5. Gear 2.5: separate position-size policy — blocked until an explicit unlock. Closing 2.2 as observation is **not** that unlock. Entry is an available cluster flag, not “cluster as default universe”.
 6. Gear 3: parameter search only after 2–2.5 and a catalog of independent anomaly episodes.
 
 For each change:
