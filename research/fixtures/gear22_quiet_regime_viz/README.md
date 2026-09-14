@@ -9,3 +9,6 @@ Rebuild:
 ```bash
 PYTHONPATH=. python -m research.gear22_quiet_regime_viz.build_fixture
 ```
+
+`universe_spread_std_august.csv` is a tiny sort fixture (XRP СКО > SOL). It is
+not the production August table (`research/data/universe_spread_std_august.csv`).

@@ -28,10 +28,11 @@ from research.gear22_quiet_regime_viz.load import (
     load_ticks,
     parse_since_ms,
 )
+from research.gear22_quiet_regime_viz.coin_order import DEFAULT_AUGUST_STD_CSV
 from research.gear22_quiet_regime_viz.plot import (
     coin_html_filename,
     write_coin_html,
-    write_coins_json,
+    write_nav_artifacts,
 )
 
 DEFAULT_COINS = ("SOL", "XRP")
@@ -154,6 +155,24 @@ def build_arg_parser() -> argparse.ArgumentParser:
             "Default: copy sibling plotly.min.js next to the HTML (file://-friendly)."
         ),
     )
+    p.add_argument(
+        "--std-csv",
+        type=Path,
+        default=DEFAULT_AUGUST_STD_CSV,
+        help=(
+            "August std_spread table used to sort index.html / coins.json / nav "
+            f"(default: {DEFAULT_AUGUST_STD_CSV}). Missing file → A–Z."
+        ),
+    )
+    p.add_argument(
+        "--take-yes-only",
+        action="store_true",
+        help=(
+            "If the std CSV has a take column, keep take=yes coins in the "
+            "multi-coin index (coins missing from the table stay). Optional "
+            "when --coins / out_dir are already filtered."
+        ),
+    )
     return p
 
 
@@ -172,6 +191,8 @@ def run_viz(
     candle_temporal_bins: int = DEFAULT_CANDLE_TEMPORAL_BINS,
     latency_bins: int = DEFAULT_LATENCY_BINS,
     latency_temporal_bins: int = DEFAULT_LATENCY_TEMPORAL_BINS,
+    std_csv: Path | None = DEFAULT_AUGUST_STD_CSV,
+    take_yes_only: bool = False,
 ) -> list[Path]:
     since_ms = parse_since_ms(since)
     until_ms = parse_since_ms(until) if until else int(
@@ -197,7 +218,12 @@ def run_viz(
             print(f"skip {c}: no ticks in window")
     if not present:
         raise SystemExit("no HTML written — check coins / window / data-root")
-    write_coins_json(out_dir, present)
+    present = write_nav_artifacts(
+        out_dir,
+        present,
+        std_csv=std_csv,
+        take_yes_only=take_yes_only,
+    )
 
     until_label = (
         until
@@ -292,6 +318,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         candle_temporal_bins=args.candle_temporal_bins,
         latency_bins=args.latency_bins,
         latency_temporal_bins=args.latency_temporal_bins,
+        std_csv=args.std_csv,
+        take_yes_only=args.take_yes_only,
     )
     return 0
 

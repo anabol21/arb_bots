@@ -21,6 +21,10 @@ from research.gear22_quiet_regime_viz.candles import (
     causal_sma,
 )
 from research.gear22_quiet_regime_viz.cli import run_viz
+from research.gear22_quiet_regime_viz.coin_order import (
+    load_august_std_table,
+    sort_coins_by_august_std,
+)
 from research.gear22_quiet_regime_viz.gaps import detect_gap_intervals
 from research.gear22_quiet_regime_viz.load import (
     DEFAULT_SINCE_UTC,
@@ -36,13 +40,14 @@ from research.gear22_quiet_regime_viz.quantiles import (
     time_weighted_quantiles,
 )
 
-FIXTURE_TICKS = (
+FIXTURE_ROOT = (
     Path(__file__).resolve().parents[1]
     / "research"
     / "fixtures"
     / "gear22_quiet_regime_viz"
-    / "ticks"
 )
+FIXTURE_TICKS = FIXTURE_ROOT / "ticks"
+FIXTURE_STD_CSV = FIXTURE_ROOT / "universe_spread_std_august.csv"
 SINCE = DEFAULT_SINCE_UTC
 UNTIL = "2026-09-03T08:40:00Z"
 
@@ -434,6 +439,84 @@ class TestBarInspectPayloads(unittest.TestCase):
         )
 
 
+class TestAugustStdCoinOrder(unittest.TestCase):
+    def test_sort_desc_missing_last_ok_row_preferred(self) -> None:
+        table = load_august_std_table(FIXTURE_STD_CSV)
+        # Duplicate XRP: keep status=ok (0.42), not the later bad 0.01 row.
+        self.assertAlmostEqual(float(table.set_index("coin").loc["XRP", "std_spread"]), 0.42)
+        ordered = sort_coins_by_august_std(
+            ["SOL", "ZZZ", "XRP", "AAA", "BTC"],
+            table=table,
+        )
+        # AAA 0.99, XRP 0.42, SOL 0.11, BTC 0.05, ZZZ missing → alpha last.
+        self.assertEqual(ordered, ["AAA", "XRP", "SOL", "BTC", "ZZZ"])
+
+    def test_missing_csv_falls_back_to_alpha(self) -> None:
+        missing = FIXTURE_ROOT / "does_not_exist.csv"
+        self.assertEqual(
+            sort_coins_by_august_std(["XRP", "SOL"], std_csv=missing),
+            ["SOL", "XRP"],
+        )
+
+    def test_take_yes_only_drops_explicit_no(self) -> None:
+        ordered = sort_coins_by_august_std(
+            ["SOL", "XRP", "BTC", "ZZZ"],
+            std_csv=FIXTURE_STD_CSV,
+            take_yes_only=True,
+        )
+        self.assertEqual(ordered, ["XRP", "SOL", "ZZZ"])
+        self.assertNotIn("BTC", ordered)
+
+
+class TestPlotPanLayout(unittest.TestCase):
+    def test_time_figures_default_to_pan(self) -> None:
+        from research.gear22_quiet_regime_viz.plot import (
+            PLOTLY_CONFIG,
+            build_mid_figure,
+            build_spread_block_figure,
+        )
+
+        self.assertTrue(PLOTLY_CONFIG["scrollZoom"])
+        empty = pd.DataFrame(columns=["event_dt", "okx_mid", "bybit_mid"])
+        mid = build_mid_figure(coin="SOL", ticks=empty, gaps=[])
+        self.assertEqual(mid.layout.dragmode, "pan")
+        self.assertFalse(bool(mid.layout.xaxis.fixedrange))
+        self.assertFalse(bool(mid.layout.xaxis.rangeslider.visible))
+
+        df = load_ticks(
+            FIXTURE_TICKS,
+            coins=["SOL"],
+            since_ms=parse_since_ms(SINCE),
+            until_ms=parse_since_ms(UNTIL),
+        )
+        buckets = build_5m_bucket_stats(
+            df,
+            value_col=SPREAD_LONG_COL,
+            start_ms=parse_since_ms(SINCE),
+            end_ms=parse_since_ms(UNTIL),
+        )
+        fig = build_spread_block_figure(
+            coin="SOL",
+            side="long",
+            value_col=SPREAD_LONG_COL,
+            side_label="long",
+            ticks=df,
+            buckets=buckets,
+            gaps=[],
+        )
+        self.assertEqual(fig.layout.dragmode, "pan")
+        xaxes = [
+            fig.layout[k]
+            for k in fig.layout
+            if str(k).startswith("xaxis")
+        ]
+        self.assertGreaterEqual(len(xaxes), 2)
+        for ax in xaxes:
+            self.assertFalse(bool(ax.fixedrange))
+            if ax.rangeslider is not None and ax.rangeslider.visible is not None:
+                self.assertFalse(bool(ax.rangeslider.visible))
+
+
 class TestSmokeHtml(unittest.TestCase):
     def test_cli_writes_html_nav_and_plotly(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -444,11 +527,18 @@ class TestSmokeHtml(unittest.TestCase):
                 since=SINCE,
                 until=UNTIL,
                 out_dir=out,
+                std_csv=FIXTURE_STD_CSV,
             )
             self.assertEqual(len(paths), 2)
             self.assertTrue((out / "plotly.min.js").is_file())
+            self.assertTrue((out / "index.html").is_file())
             coins_json = json.loads((out / "coins.json").read_text(encoding="utf-8"))
-            self.assertEqual(coins_json["coins"], ["SOL", "XRP"])
+            # Fixture August std: XRP 0.42 > SOL 0.11.
+            self.assertEqual(coins_json["coins"], ["XRP", "SOL"])
+            self.assertEqual(coins_json["order"], "august_std_spread_desc")
+            index_html = (out / "index.html").read_text(encoding="utf-8")
+            self.assertLess(index_html.find("XRP"), index_html.find("SOL"))
+            self.assertIn("gear22_quiet_regime_XRP.html", index_html)
             for p in paths:
                 self.assertTrue(p.is_file())
                 text = p.read_text(encoding="utf-8")
@@ -460,7 +550,14 @@ class TestSmokeHtml(unittest.TestCase):
                 self.assertIn("histogram", text.lower())
                 self.assertIn("ArrowLeft", text)
                 self.assertIn("gear22_quiet_regime_XRP.html", text)
+                self.assertIn("index.html", text)
                 self.assertIn("plotly.min.js", text)
+                # Horizontal pan / scroll-zoom (not box-zoom-only).
+                self.assertIn("dragmode", text)
+                self.assertIn('"pan"', text)
+                self.assertIn("scrollZoom", text)
+                self.assertIn("fixedrange", text)
+                self.assertIn("drag to pan", text)
                 self.assertIn("Extension point", text)
                 self.assertIn("gap_fraction", text)
                 # Click-to-inspect panel + compact customdata markers.
