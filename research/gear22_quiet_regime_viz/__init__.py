@@ -28,7 +28,11 @@ from research.gear22_quiet_regime_viz.load import (
     parse_since_ms,
 )
 from research.gear22_quiet_regime_viz.plot import write_coin_html
-from research.gear22_quiet_regime_viz.quantiles import time_weighted_quantiles
+from research.gear22_quiet_regime_viz.quantiles import (
+    rolling_tw_p50,
+    time_weighted_quantiles,
+    tw_p50,
+)
 
 __all__ = [
     "BAR_MS",
@@ -42,6 +46,8 @@ __all__ = [
     "derive_research_series",
     "load_ticks",
     "parse_since_ms",
+    "rolling_tw_p50",
     "time_weighted_quantiles",
+    "tw_p50",
     "write_coin_html",
 ]

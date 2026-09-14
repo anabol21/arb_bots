@@ -259,15 +259,33 @@ Return `MetricTrace` with `panel` in
 |--------|------|
 | `load.py` | Discover / read parquet\|CSV, derive mid + spreads, keep `trigger` |
 | `candles.py` | 5m OHLC + intra-stats + causal SMA + TW quantile columns + click-inspect payloads |
-| `quantiles.py` | Hold weights + TW quantile / mean / hist helpers |
+| `quantiles.py` | Hold weights + TW quantile / mean / hist helpers + rolling p50 |
 | `gaps.py` | Inter-tick gap intervals |
 | `plot.py` | Plotly multi-block HTML writer + coin nav + candle click inspect |
+| `floors.py` | Causal SMA-12 trim floors + chosen tf-select α25 |
 | `coin_order.py` | August `std_spread` load / sort for index + nav |
+| `state_p50.py` | Closed + rolling TW-p50 series + sample HTML (not viz_sept) |
 | `metrics_ext.py` | Empty extension hook |
 | `cli.py` / `__main__.py` | CLI entry |
+
+## State p50 (current-spread trackers)
+
+Locked observation metrics (not a simulator gate): closed-bar `p50_bar5m`
+plus rolling `p50_roll_1m` / `p50_roll_5m`. Definitions:
+[`docs/gear22-state-p50.md`](../../docs/gear22-state-p50.md). Helper:
+`quantiles.rolling_tw_p50`. Sample HTML (does **not** rewrite viz_sept):
+
+```bash
+PYTHONPATH=. python -m research.gear22_quiet_regime_viz.state_p50 \
+  --data-root output/lean_ticks \
+  --coins SOL \
+  --since 2026-08-18T00:00:00Z \
+  --until 2026-08-18T03:00:00Z \
+  --out-dir output/gear22_state_p50
+```
 
 ## Tests
 
 ```bash
-PYTHONPATH=. python -m unittest tests.test_gear22_quiet_regime_viz -v
+PYTHONPATH=. python -m unittest tests.test_gear22_quiet_regime_viz tests.test_gear22_state_p50 -v
 ```
