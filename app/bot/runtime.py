@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import signal
 import sys
 import time
 from pathlib import Path
@@ -57,6 +58,9 @@ from app.utils.universe_csv import load_take_yes_base_coins, read_universe_dicts
 
 ensure_repo_on_syspath()
 from research.is_crypto import is_crypto  # noqa: E402
+
+# Floor warm pickle periodic save interval (seconds)
+FLOOR_WARM_SAVE_INTERVAL_SEC = 600  # 10 minutes
 
 
 def _setup_logger(log_path: Path) -> logging.Logger:
@@ -389,6 +393,24 @@ class BotRuntime:
             if fn is not None:
                 return bool(fn(self.profile))
         return self.profile in ("gear2_would_send", "canary_wal_eden")
+
+    def _save_floor_warm_pickle(self) -> None:
+        """Save floor observer state to pickle (idempotent, safe to call repeatedly)."""
+        if self.floor_observer is None:
+            return
+        if not (self.profile == "gear22_would_send" or self._floor_warm_loaded):
+            return
+        try:
+            export_observer_warm_pickle(
+                self.floor_observer, self._floor_warm_path
+            )
+            self.log.info(
+                "floor_warm_saved | path=%s", self._floor_warm_path
+            )
+        except Exception as exc:  # noqa: BLE001
+            self.log.warning(
+                "floor_warm_save_failed | err=%s", type(exc).__name__
+            )
 
     def start_private_warm_if_live_send(self, **overrides: Any) -> Any:
         """Warm private WS before the signal loop when live private send is armed.
@@ -1183,7 +1205,35 @@ class BotRuntime:
             except asyncio.TimeoutError:
                 pass
 
+    async def _floor_warm_periodic_save(self) -> None:
+        """Periodic floor warm pickle save (every ~10 minutes)."""
+        while not self.stop_event.is_set():
+            try:
+                await asyncio.wait_for(
+                    self.stop_event.wait(), timeout=FLOOR_WARM_SAVE_INTERVAL_SEC
+                )
+            except asyncio.TimeoutError:
+                pass
+            if not self.stop_event.is_set():
+                self._save_floor_warm_pickle()
+
     async def run(self) -> None:
+        # Register signal handlers for graceful shutdown
+        loop = asyncio.get_running_loop()
+        
+        def _signal_handler(signame: str) -> None:
+            self.log.info(f"bbot_signal_received | signal={signame}")
+            # Save floor warm pickle immediately (synchronously) before stop_event.
+            # WS tasks may not unwind to finally before systemd timeout.
+            self._save_floor_warm_pickle()
+            self.stop_event.set()
+        
+        for sig in (signal.SIGTERM, signal.SIGHUP):
+            loop.add_signal_handler(
+                sig,
+                lambda s=sig: _signal_handler(signal.Signals(s).name)
+            )
+        
         thresh = None
         thresh_cs = None
         avg_sec = None
@@ -1237,6 +1287,15 @@ class BotRuntime:
             self.log.info("private_warm_skipped | live_private_send=false")
 
         tasks: list[asyncio.Task] = [asyncio.create_task(self._heartbeat())]
+        # Periodic floor warm pickle save (if floor observer is enabled)
+        if self.floor_observer is not None and (
+            self.profile == "gear22_would_send" or self._floor_warm_loaded
+        ):
+            tasks.append(
+                asyncio.create_task(
+                    self._floor_warm_periodic_save(), name="floor-warm-save"
+                )
+            )
         if self.tw_p50_enabled and self.tw_p50_observer is not None:
             tasks.append(
                 asyncio.create_task(self._tw_p50_emit_loop(), name="tw-p50-emit")
@@ -1285,20 +1344,8 @@ class BotRuntime:
             raise
         finally:
             # Persist floor warm pickle for next start (B path only).
-            if self.floor_observer is not None and (
-                self.profile == "gear22_would_send" or self._floor_warm_loaded
-            ):
-                try:
-                    export_observer_warm_pickle(
-                        self.floor_observer, self._floor_warm_path
-                    )
-                    self.log.info(
-                        "floor_warm_saved | path=%s", self._floor_warm_path
-                    )
-                except Exception as exc:  # noqa: BLE001
-                    self.log.warning(
-                        "floor_warm_save_failed | err=%s", type(exc).__name__
-                    )
+            self._save_floor_warm_pickle()
+            
             from app.bot.private.ws_warm_session import clear_process_warm_session
 
             clear_process_warm_session(stop=True)
