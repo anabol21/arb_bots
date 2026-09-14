@@ -263,12 +263,34 @@ standalone appended figure, not extra rows on the 6-row stack.
 | `floors.py` | Causal SMA-12 trim floors + chosen tf-select α25 |
 | `metrics_ext.py` | Floor traces / help text for the corridor panel |
 | `inject_floors.py` | Append one corridor figure to existing 6-row HTML |
+| `state_p50.py` | Closed + rolling TW-p50 series + sample HTML (not viz_sept) |
 | `cli.py` / `__main__.py` | CLI entry |
+
+## State p50 (current-spread trackers)
+
+Locked observation metrics (not a simulator gate): closed-bar `p50_bar5m`
+plus rolling `p50_roll_1m` / `p50_roll_5m`. The 5-minute tick page
+(`research/tick_window_viz`) draws the same three series on the spread
+row. Definitions:
+[`docs/gear22-state-p50.md`](../../docs/gear22-state-p50.md). Helper:
+`quantiles.rolling_tw_p50`. Sample HTML (does **not** rewrite viz_sept):
+
+```bash
+PYTHONPATH=. python -m research.gear22_quiet_regime_viz.state_p50 \
+  --data-root output/lean_ticks \
+  --coins SOL \
+  --since 2026-08-18T00:00:00Z \
+  --until 2026-08-18T03:00:00Z \
+  --out-dir output/gear22_state_p50
+```
+
+Open `output/gear22_state_p50/gear22_state_p50_SOL.html` with sibling
+`plotly.min.js` (or pass `--inline-plotly`).
 
 ## Tests
 
 ```bash
-PYTHONPATH=. python -m unittest tests.test_gear22_quiet_regime_viz -v
+PYTHONPATH=. python -m unittest tests.test_gear22_quiet_regime_viz tests.test_gear22_state_p50 -v
 ```
 
 Floor helpers (causal / trim10 / NaN policy / W2=36/72/144) live in
