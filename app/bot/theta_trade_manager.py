@@ -3,11 +3,15 @@
 Driven off the live theta emit (~1 Hz) inside one BotRuntime. Journals
 ``theta_trades/`` only. Does not call StubBroker.place / private APIs.
 Does not write ticks or D trees.
+
+**Policy:** Gear 2.2 research policy (`research.gear22_backtest.policy.decide`)
+with frozen observation knobs from `research.gear22_backtest.params_frozen`.
 """
 
 from __future__ import annotations
 
 import json
+import math
 import os
 import time
 import uuid
@@ -20,6 +24,15 @@ from app.bot.paths import theta_trades_jsonl_path
 from app.bot.sentry_setup import capture_trade_event
 from app.bot.stub_broker import legs_for_spread_side, signal_price_for_leg
 from app.bot.theta_screener import ThetaSnapshot
+from research.gear22_backtest.policy import (
+    Decision as PolicyDecision,
+    FeatureSnapshot,
+    PolicyParams,
+    PolicyState,
+    decide as policy_decide,
+    potential_profit_pp,
+)
+from research.gear22_backtest.params_frozen import DEFAULT_OBSERVE_PARAMS
 
 
 def compute_spreads_pct(okx: Mapping[str, Any], bybit: Mapping[str, Any]) -> tuple[float, float]:
@@ -34,12 +47,80 @@ DEFAULT_FILL_DELAY_MS = 70
 DEFAULT_SLOT_K = 1
 DEFAULT_NOTIONAL_USDT = 100.0
 DEFAULT_BOOK_DEPTH = 1
+POLICY_ID = "gear22_frozen_v1"
 
 _GEAR22_TRADE_PROFILES = frozenset(
     {"gear22_would_send", "gear22", "gear2_would_send", "gear2"}
 )
 
 LogFn = Callable[[str], None]
+
+
+def _finite(value: Any) -> Optional[float]:
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        out = float(value)
+    except (TypeError, ValueError):
+        return None
+    if out != out or out in (float("inf"), float("-inf")):
+        return None
+    return out
+
+
+def build_feature_snapshot(
+    *,
+    coin: str,
+    ts_s: int,
+    snapshots: Sequence[ThetaSnapshot],
+    quotes: Mapping[str, Mapping[str, Mapping[str, Any]]],
+) -> Optional[FeatureSnapshot]:
+    """Build FeatureSnapshot for policy.decide from live ThetaSnapshot + books.
+    
+    Returns None if data is incomplete (both sides need p50, theta, floor, spread).
+    """
+    by_key: dict[tuple[str, str], ThetaSnapshot] = {
+        (s.base_coin, s.side): s for s in snapshots
+    }
+    long_snap = by_key.get((coin, "long"))
+    short_snap = by_key.get((coin, "short"))
+    if long_snap is None or short_snap is None:
+        return None
+    
+    books = quotes.get(coin) or {}
+    okx = books.get("okx") or {}
+    bybit = books.get("bybit") or {}
+    
+    try:
+        spread_long, spread_short = compute_spreads_pct(okx, bybit)
+    except (TypeError, ValueError, ZeroDivisionError, KeyError):
+        spread_long, spread_short = math.nan, math.nan
+    
+    def _usable(snap: ThetaSnapshot, spread: float) -> bool:
+        return all(
+            _finite(x) is not None
+            for x in [
+                snap.floor_tf_select_a25,
+                snap.p50_1m,
+                snap.theta_1m,
+                spread,
+            ]
+        )
+    
+    return FeatureSnapshot(
+        ts_s=ts_s,
+        coin=coin,
+        p50_1m_long=long_snap.p50_1m or math.nan,
+        p50_1m_short=short_snap.p50_1m or math.nan,
+        floor_long=long_snap.floor_tf_select_a25 or math.nan,
+        floor_short=short_snap.floor_tf_select_a25 or math.nan,
+        theta_1m_long=long_snap.theta_1m or math.nan,
+        theta_1m_short=short_snap.theta_1m or math.nan,
+        spread_last_long=spread_long,
+        spread_last_short=spread_short,
+        usable_long=_usable(long_snap, spread_long),
+        usable_short=_usable(short_snap, spread_short),
+    )
 
 
 def theta_trade_enabled(
@@ -74,18 +155,6 @@ def _env_int(env: Mapping[str, str], key: str, default: int) -> int:
         return int(raw)
     except ValueError:
         return int(default)
-
-
-def _finite(value: Any) -> Optional[float]:
-    if value is None or isinstance(value, bool):
-        return None
-    try:
-        out = float(value)
-    except (TypeError, ValueError):
-        return None
-    if out != out or out in (float("inf"), float("-inf")):
-        return None
-    return out
 
 
 def opposite_side(side: str) -> str:
@@ -260,16 +329,31 @@ class ThetaTradeConfig:
     slot_k: int = DEFAULT_SLOT_K
     notional_usdt: float = DEFAULT_NOTIONAL_USDT
     book_depth: int = DEFAULT_BOOK_DEPTH
+    policy_params: Optional[PolicyParams] = None
 
     @classmethod
     def from_env(cls, env: Optional[Mapping[str, str]] = None) -> "ThetaTradeConfig":
         e = env if env is not None else os.environ
+        
+        frozen = DEFAULT_OBSERVE_PARAMS
+        policy_params = PolicyParams(
+            theta_open=_env_float(e, "BBOT_THETA_OPEN", frozen.theta_open or 0.0),
+            p50_open=_env_float(e, "BBOT_P50_OPEN", frozen.p50_open or 0.0),
+            min_profit_pp=_env_float(e, "BBOT_MIN_PROFIT_PP", frozen.min_profit_pp or 0.0),
+            fee_round_trip_pp=_env_float(e, "BBOT_FEE_RT_PP", frozen.fee_round_trip_pp),
+            min_spread_open=None,
+            min_theta_close=_env_float(e, "BBOT_MIN_THETA_CLOSE", frozen.min_theta_close or 0.0)
+            if "BBOT_MIN_THETA_CLOSE" in e or frozen.min_theta_close is not None
+            else None,
+        )
+        
         return cls(
             theta_thr=_env_float(e, "BBOT_THETA_THR", DEFAULT_THETA_THR),
             fill_delay_ms=_env_int(e, "BBOT_FILL_DELAY_MS", DEFAULT_FILL_DELAY_MS),
             slot_k=max(1, _env_int(e, "BBOT_SLOT_K", DEFAULT_SLOT_K)),
             notional_usdt=_env_float(e, "BBOT_NOTIONAL_USDT", DEFAULT_NOTIONAL_USDT),
             book_depth=max(1, _env_int(e, "BBOT_BOOK_DEPTH", DEFAULT_BOOK_DEPTH)),
+            policy_params=policy_params,
         )
 
 
@@ -283,6 +367,7 @@ class OpenPosition:
     open_fill_spread: Optional[float]
     open_notional: float
     open_theta_1m: Optional[float]
+    fill_spread_pp: Optional[float] = None
 
 
 @dataclass
@@ -308,6 +393,8 @@ class ThetaDecision:
     opposite_theta_1m: Optional[float] = None
     reject_reason: Optional[str] = None
     size_info: Optional[dict[str, Any]] = None
+    potential_pp: Optional[float] = None
+    policy_decision: Optional[PolicyDecision] = None
 
 
 def decide_theta_k1(
@@ -319,26 +406,50 @@ def decide_theta_k1(
     notional_usdt: float,
     book_depth: int = 1,
     coin_order: Optional[Sequence[str]] = None,
+    policy_params: Optional[PolicyParams] = None,
 ) -> ThetaDecision:
-    """Pure K=1 entry/exit decide (no I/O, no sleep).
-
-    Entry: ``theta_1m(side) >= thr``, slot free, book size OK.
-    Exit: opposite-side ``theta_1m >= thr`` on the held coin.
-    While in position: new entries → ``slot_busy`` skip.
+    """Pure K=1 entry/exit decide using gear 2.2 policy (no I/O, no sleep).
+    
+    Uses policy.decide() from research.gear22_backtest.policy with frozen
+    observation parameters. Replaces old theta_thr entry/exit logic.
     """
+    params = policy_params or PolicyParams()
     by_key: dict[tuple[str, str], ThetaSnapshot] = {
         (s.base_coin, s.side): s for s in snapshots
     }
-
-    # Exit first when holding.
+    
+    now_s = int(time.time())
+    
     if slot.position is not None and not slot.pending:
         pos = slot.position
-        opp = opposite_side(pos.side)
-        snap = by_key.get((pos.base_coin, opp))
-        opp_th = snap.theta_1m if snap is not None else None
-        own = by_key.get((pos.base_coin, pos.side))
-        own_th = own.theta_1m if own is not None else None
-        if opp_th is not None and float(opp_th) >= float(thr):
+        feat = build_feature_snapshot(
+            coin=pos.base_coin,
+            ts_s=now_s,
+            snapshots=snapshots,
+            quotes=quotes,
+        )
+        if feat is None:
+            own = by_key.get((pos.base_coin, pos.side))
+            opp = by_key.get((pos.base_coin, opposite_side(pos.side)))
+            return ThetaDecision(
+                action="skip",
+                base_coin=pos.base_coin,
+                side=pos.side,
+                reason="hold_incomplete_data",
+                theta_1m=own.theta_1m if own else None,
+                opposite_theta_1m=opp.theta_1m if opp else None,
+                reject_reason="incomplete_data",
+            )
+        
+        state = PolicyState(
+            position_side=pos.side,
+            held_coin=pos.base_coin,
+            opened_ts_s=int(pos.open_fill_ts_ms / 1000),
+            fill_spread_pp=pos.fill_spread_pp,
+        )
+        pd = policy_decide(feat, state, params)
+        
+        if pd.action == "close":
             books = quotes.get(pos.base_coin) or {}
             okx = books.get("okx") or {}
             bybit = books.get("bybit") or {}
@@ -350,28 +461,35 @@ def decide_theta_k1(
                 notional_usdt=notional_usdt,
                 book_depth=book_depth,
             )
+            pot_pp = potential_profit_pp(feat, state, params.fee_round_trip_pp)
+            own = by_key.get((pos.base_coin, pos.side))
+            opp = by_key.get((pos.base_coin, opposite_side(pos.side)))
             return ThetaDecision(
                 action="close",
                 base_coin=pos.base_coin,
                 side=pos.side,
-                reason="theta_exit_opposite",
-                theta_1m=own_th,
-                opposite_theta_1m=float(opp_th),
+                reason=pd.reason,
+                theta_1m=own.theta_1m if own else None,
+                opposite_theta_1m=opp.theta_1m if opp else None,
                 size_info=size_info,
+                potential_pp=pot_pp,
+                policy_decision=pd,
             )
-        # In position, not exiting — ignore new entries (spec: slot_busy).
+        
+        own = by_key.get((pos.base_coin, pos.side))
+        opp = by_key.get((pos.base_coin, opposite_side(pos.side)))
         return ThetaDecision(
             action="skip",
             base_coin=pos.base_coin,
             side=pos.side,
-            reason="slot_busy",
-            theta_1m=own_th,
-            opposite_theta_1m=opp_th,
-            reject_reason="slot_busy",
+            reason="slot_busy" if pd.reason == "hold_open_overlap" else pd.reason,
+            theta_1m=own.theta_1m if own else None,
+            opposite_theta_1m=opp.theta_1m if opp else None,
+            reject_reason="slot_busy" if pd.reason == "hold_open_overlap" else pd.reason,
+            policy_decision=pd,
         )
-
+    
     if slot.slot_busy():
-        # Pending fill or occupied — ignore entries.
         held = slot.position.base_coin if slot.position is not None else ""
         return ThetaDecision(
             action="skip",
@@ -380,7 +498,7 @@ def decide_theta_k1(
             reason="slot_busy",
             reject_reason="slot_busy",
         )
-
+    
     order: list[str]
     if coin_order:
         order = [str(c).upper() for c in coin_order]
@@ -390,18 +508,23 @@ def decide_theta_k1(
             if s.base_coin not in seen:
                 seen.append(s.base_coin)
         order = seen
-
+    
     first_size_reject: Optional[ThetaDecision] = None
     for coin in order:
-        for side in ("long", "short"):
-            snap = by_key.get((coin, side))
-            if snap is None or snap.theta_1m is None:
-                continue
-            if float(snap.theta_1m) < float(thr):
-                continue
-            opp = opposite_side(side)
-            opp_snap = by_key.get((coin, opp))
-            opp_th = opp_snap.theta_1m if opp_snap is not None else None
+        feat = build_feature_snapshot(
+            coin=coin,
+            ts_s=now_s,
+            snapshots=snapshots,
+            quotes=quotes,
+        )
+        if feat is None:
+            continue
+        
+        state = PolicyState()
+        pd = policy_decide(feat, state, params)
+        
+        if pd.action in ("open_long", "open_short"):
+            side = "long" if pd.action == "open_long" else "short"
             books = quotes.get(coin) or {}
             okx = books.get("okx") or {}
             bybit = books.get("bybit") or {}
@@ -420,21 +543,24 @@ def decide_theta_k1(
                         base_coin=coin,
                         side=side,
                         reason="reject",
-                        theta_1m=float(snap.theta_1m),
-                        opposite_theta_1m=opp_th,
+                        theta_1m=pd.theta,
+                        opposite_theta_1m=None,
                         reject_reason="insufficient_size",
                         size_info=size_info,
+                        policy_decision=pd,
                     )
                 continue
             return ThetaDecision(
                 action="open",
                 base_coin=coin,
                 side=side,
-                reason="theta_entry",
-                theta_1m=float(snap.theta_1m),
-                opposite_theta_1m=opp_th,
+                reason=pd.reason,
+                theta_1m=pd.theta,
+                opposite_theta_1m=None,
                 size_info=size_info,
+                policy_decision=pd,
             )
+    
     if first_size_reject is not None:
         return first_size_reject
     return ThetaDecision(action="skip", base_coin="", side="", reason="no_signal")
@@ -545,6 +671,7 @@ class ThetaTradeManager:
         fill_size: Mapping[str, Any],
         pnl_fields: Optional[Mapping[str, Any]] = None,
         reject_reason: Optional[str] = None,
+        policy_decision: Optional[PolicyDecision] = None,
     ) -> dict[str, Any]:
         metrics = self._metrics_from_snaps(snapshots, base_coin, side)
         # Spreads for the legs we execute at this event.
@@ -767,6 +894,7 @@ class ThetaTradeManager:
                     fill_bybit=bybit_f,
                     signal_size=signal_size,
                     fill_size=fill_size,
+                    policy_decision=decision.policy_decision,
                 )
                 self.slot.position = OpenPosition(
                     trade_id=trade_id,
@@ -777,6 +905,7 @@ class ThetaTradeManager:
                     open_fill_spread=fill_spread,
                     open_notional=float(self.config.notional_usdt),
                     open_theta_1m=decision.theta_1m,
+                    fill_spread_pp=fill_spread,
                 )
             else:
                 pos = self.slot.position
@@ -802,6 +931,8 @@ class ThetaTradeManager:
                     ),
                     "open_signal_ts_ms": pos.open_signal_ts_ms,
                     "open_fill_ts_ms": pos.open_fill_ts_ms,
+                    "potential_pp": decision.potential_pp,
+                    "policy_id": POLICY_ID,
                 }
                 row = self.build_event_row(
                     trade_id=trade_id,
@@ -819,6 +950,7 @@ class ThetaTradeManager:
                     signal_size=signal_size,
                     fill_size=fill_size,
                     pnl_fields=pnl_fields,
+                    policy_decision=decision.policy_decision,
                 )
                 self.slot.position = None
             self.journal.append_rows([row])
@@ -881,6 +1013,7 @@ class ThetaTradeManager:
             notional_usdt=self.config.notional_usdt,
             book_depth=self.config.book_depth,
             coin_order=coin_order,
+            policy_params=self.config.policy_params,
         )
         return self.execute_decision(
             decision, snapshots=snapshots, quotes=quotes, now_ms=now_ms
@@ -905,6 +1038,7 @@ class ThetaTradeManager:
             notional_usdt=self.config.notional_usdt,
             book_depth=self.config.book_depth,
             coin_order=coin_order,
+            policy_params=self.config.policy_params,
         )
 
         async def _async_sleep(seconds: float) -> None:
@@ -1000,6 +1134,7 @@ class ThetaTradeManager:
                     fill_bybit=bybit_f,
                     signal_size=signal_size,
                     fill_size=fill_size,
+                    policy_decision=decision.policy_decision,
                 )
                 self.slot.position = OpenPosition(
                     trade_id=trade_id,
@@ -1010,6 +1145,7 @@ class ThetaTradeManager:
                     open_fill_spread=fill_spread,
                     open_notional=float(self.config.notional_usdt),
                     open_theta_1m=decision.theta_1m,
+                    fill_spread_pp=fill_spread,
                 )
             else:
                 pos = self.slot.position
@@ -1034,6 +1170,8 @@ class ThetaTradeManager:
                     ),
                     "open_signal_ts_ms": pos.open_signal_ts_ms,
                     "open_fill_ts_ms": pos.open_fill_ts_ms,
+                    "potential_pp": decision.potential_pp,
+                    "policy_id": POLICY_ID,
                 }
                 row = self.build_event_row(
                     trade_id=trade_id,
@@ -1051,6 +1189,7 @@ class ThetaTradeManager:
                     signal_size=signal_size,
                     fill_size=fill_size,
                     pnl_fields=pnl_fields,
+                    policy_decision=decision.policy_decision,
                 )
                 self.slot.position = None
             await asyncio.to_thread(self.journal.append_rows, [row])
