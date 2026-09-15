@@ -193,8 +193,11 @@ python -m unittest tests.test_bbot_theta_trade_k1 -v
 
 - Own tree under BBOT data root only.
 - Never `/data/live`, `/data/bars`, `/data/compacted`, D backup prefixes.
-- No private broker imports in theta trade / floor warm / plot modules.
-- No collector / Contour B / WAL-EDEN edits in this contour.
+- No private broker imports in theta trade / floor warm / plot modules
+  (`place_fn` is injected by runtime for the live canary).
+- No collector / WAL-EDEN / D-tree edits in this contour.
+- Live send is a **sibling** unit: [`gear22-live-canary.md`](gear22-live-canary.md).
+  This would_send unit stays `BBOT_BROKER=stub`.
 
 ## Sentry integration
 

@@ -19,6 +19,7 @@ ENV_RING_SEC = "BBOT_L1_RING_SEC"
 ENV_MAX_TICKS = "BBOT_L1_RING_MAX_TICKS"
 CANARY_COINS = frozenset({"WAL", "EDEN"})
 CANARY_PROFILES = frozenset({"canary_wal_eden", "canary"})
+GEAR22_LIVE_CANARY_PROFILES = frozenset({"gear22_live_canary", "gear22_live"})
 
 
 def _finite(value: Any) -> Optional[float]:
@@ -272,7 +273,7 @@ def should_record_canary_l1(
     if raw in {"0", "false", "off", "no"}:
         return False
     name = str(profile or e.get("BBOT_PROFILE") or "").strip().lower()
-    if name in CANARY_PROFILES:
+    if name in CANARY_PROFILES or name in GEAR22_LIVE_CANARY_PROFILES:
         return True
     if raw in {"1", "true", "on", "yes"}:
         return str(coin or "").strip().upper() in CANARY_COINS or not coin

@@ -140,7 +140,15 @@ class RingRetentionTests(unittest.TestCase):
         self.assertEqual(tick.venue, "bybit")
         self.assertEqual(tick.event_local_ts_ms, 120)
         self.assertTrue(should_record_canary_l1("canary", "EDEN"))
+        self.assertTrue(
+            should_record_canary_l1(
+                "gear22_live_canary",
+                "KAITO",
+                env={"BBOT_PROFILE": "gear22_live_canary"},
+            )
+        )
         self.assertFalse(should_record_canary_l1("gear2_would_send", "WAL"))
+        self.assertFalse(should_record_canary_l1("gear22_would_send", "KAITO"))
 
 
 if __name__ == "__main__":

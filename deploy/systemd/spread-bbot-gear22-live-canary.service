@@ -1,0 +1,65 @@
+# Isolated gear 2.2 live canary (Contour B dual-leg).
+# Do not install, enable, or start on VPS by creating this file in the repo.
+# Do not overwrite collector / D storage units, spread-bbot.service,
+# spread-bbot-gear2.service, WAL/EDEN canary, or the would_send theta-k1 unit.
+# Paths are live-canary-only (/data/bbot-gear22-live-canary), never D trees,
+# never /data/bbot-theta-k1-canary.
+#
+# Live secrets / VENUE / LIVE_ORDERS / SENTRY_DSN stay in a mode-600 env file
+# outside git. Without that file the process fails closed
+# (theta live send + private_live require LIVE_ORDERS=1).
+
+[Unit]
+Description=Spread B-bot gear22 live canary (isolated; Contour B)
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=300
+StartLimitBurst=5
+# Do NOT After= or BindsTo= spread-collector or the would_send canary
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/root/spread_staging
+Environment=BBOT_DATA_ROOT=/data/bbot-gear22-live-canary
+Environment=BBOT_LOG_PATH=/var/log/spread/bbot-gear22-live-canary.log
+Environment=BBOT_PRIVATE_DATA_ROOT=/data/bbot-gear22-live-canary/private
+Environment=BBOT_COINS=KAITO,HOME,WAL,RVN,ONT,2Z,BICO,HMSTR,CAP,BLEND,EDEN,KMNO,GPS,ME,ZBT,MOVE,COAI,AZTEC,APR,YB,ICX,AT,H,MUBARAK,ACU,LA,BEAT,PARTI,SIGN,GIGGLE
+Environment=BBOT_MODE=policy
+Environment=BBOT_PROFILE=gear22_live_canary
+Environment=BBOT_BROKER=private_live
+Environment=BBOT_THETA_TRADE=1
+Environment=BBOT_THETA_LIVE_SEND=1
+Environment=BBOT_NOTIONAL_USDT=20
+Environment=BBOT_THETA_OPEN=0.50
+Environment=BBOT_P50_OPEN=0.60
+Environment=BBOT_MIN_PROFIT_PP=0.20
+Environment=BBOT_MIN_THETA_CLOSE=0.05
+Environment=BBOT_FEE_RT_PP=0.30
+Environment=BBOT_FILL_DELAY_MS=70
+Environment=BBOT_SLOT_K=1
+Environment=BBOT_FLOOR_WATCH=1
+Environment=BBOT_TW_P50_WATCH=1
+Environment=BBOT_THETA_WATCH=1
+Environment=BBOT_CHRONOMETRY=1
+Environment=SENTRY_ENVIRONMENT=gear22-live-canary
+# Default send is Contour B (queue→ws.send). Do not set BBOT_PRIVATE_SEND_PATH=w6.
+# EnvironmentFile supplies VENUE=live, LIVE_ORDERS=1, keys, SENTRY_DSN — not committed.
+EnvironmentFile=-/etc/spread/bbot-gear22-live-canary.env
+# NO SPREAD_* vars, NO BACKUP_RCLONE_PATH=spread-compacted, NO API keys in this unit
+ExecStart=/root/venv/bin/python -m app.bot
+Restart=always
+RestartSec=5
+KillSignal=SIGTERM
+TimeoutStopSec=30
+StandardOutput=append:/var/log/spread/bbot-gear22-live-canary.log
+StandardError=append:/var/log/spread/bbot-gear22-live-canary.log
+MemoryMax=256M
+CPUQuota=20%
+LimitNOFILE=4096
+Nice=10
+ReadWritePaths=/data/bbot-gear22-live-canary /var/log/spread
+InaccessiblePaths=/data/live /data/bars /data/compacted /data/spool /data/bbot /data/bbot-gear2 /data/bbot-canary-wal-eden /data/bbot-theta-k1-canary /data/bbot-gear22
+
+[Install]
+WantedBy=multi-user.target

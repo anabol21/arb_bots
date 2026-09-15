@@ -470,7 +470,9 @@ class FillVsSignalMathTests(unittest.TestCase):
     def test_enabled_only_for_canary_or_flag(self) -> None:
         self.assertTrue(chronometry_enabled({"BBOT_PROFILE": "canary_wal_eden"}))
         self.assertTrue(chronometry_enabled({"BBOT_CHRONOMETRY": "1"}))
+        self.assertTrue(chronometry_enabled({"BBOT_PROFILE": "gear22_live_canary"}))
         self.assertFalse(chronometry_enabled({"BBOT_PROFILE": "gear2_would_send"}))
+        self.assertFalse(chronometry_enabled({"BBOT_PROFILE": "gear22_would_send"}))
         self.assertFalse(
             chronometry_enabled({"BBOT_PROFILE": "canary_wal_eden", "BBOT_CHRONOMETRY": "0"})
         )

@@ -66,6 +66,19 @@ unit **не** enable/start с этим патчем; gear2 остаётся stop
 
 Спека: [`canary-wal-eden-contour.md`](canary-wal-eden-contour.md).
 
+Отдельный gear 2.2 live canary (Contour B; **не** enable/start с этим патчем;
+would_send `spread-bbot-theta-k1-canary` не трогать):
+
+| Роль | Значение |
+|------|----------|
+| Unit (шаблон) | `spread-bbot-gear22-live-canary.service` |
+| Log | `/var/log/spread/bbot-gear22-live-canary.log` |
+| Data | `/data/bbot-gear22-live-canary` |
+| Coins | HTML top30 (same as would_send canary) |
+| Профиль | `BBOT_PROFILE=gear22_live_canary`, notional **20** |
+
+Спека: [`gear22-live-canary.md`](gear22-live-canary.md).
+
 Каталог `/var/log/spread` общий с D — ок; имя файла лога бота должно отличаться
 (`bbot.log`, не `runtime.log`).
 

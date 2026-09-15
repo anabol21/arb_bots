@@ -43,6 +43,7 @@ ENV_LOOKAHEAD_SEC = "BBOT_CHRONOMETRY_LOOKAHEAD_SEC"
 ENV_FILL_WAIT_SEC = "BBOT_CHRONOMETRY_FILL_WAIT_SEC"
 ENV_SYNC = "BBOT_CHRONOMETRY_SYNC"
 CANARY_PROFILES = frozenset({"canary_wal_eden", "canary"})
+GEAR22_LIVE_CANARY_PROFILES = frozenset({"gear22_live_canary", "gear22_live"})
 
 _FILL_PRICE_KEYS = frozenset(
     {
@@ -86,7 +87,7 @@ def chronometry_enabled(
     if raw in {"0", "false", "off", "no"}:
         return False
     profile = str(e.get("BBOT_PROFILE") or "").strip().lower()
-    if profile in CANARY_PROFILES:
+    if profile in CANARY_PROFILES or profile in GEAR22_LIVE_CANARY_PROFILES:
         return True
     return raw in {"1", "true", "on", "yes"}
 

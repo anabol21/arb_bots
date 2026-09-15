@@ -301,6 +301,28 @@ class LiveBrokerPlaceTests(unittest.TestCase):
             self.assertIsNone(broker.pending)
             broker.close()
 
+    def test_place_uses_supplied_intent_id_as_dual_leg_id(self) -> None:
+        from app.bot.private.l1_tick_ring import clear_process_rings, get_signal_book
+
+        clear_process_rings()
+        with tempfile.TemporaryDirectory() as td:
+            broker = self._broker(td)
+            trade_id = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+            abort = broker.place(
+                spread_side="open_long",
+                base_coin="SOL",
+                signal_ts_ms=1,
+                okx_book=_book(),
+                bybit_book=_book(),
+                meta=_meta("SOL"),
+                extra={"trade_id": trade_id},
+                intent_id=trade_id,
+            )
+            self.assertIsNone(abort)
+            kept = get_signal_book(trade_id)
+            self.assertIsNotNone(kept)
+            broker.close()
+
     def test_open_and_flatten_both_parallel(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             broker = self._broker(td)

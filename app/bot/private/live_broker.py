@@ -274,6 +274,7 @@ class LiveBroker(StubBroker):
         meta: InstrumentMeta,
         close_of: Optional[str] = None,
         extra: Optional[dict[str, Any]] = None,
+        intent_id: Optional[str] = None,
     ) -> Optional[str]:
         """Strategy filters, then default trivial dual send (or W6 opt-in)."""
         if self.pending is not None:
@@ -315,7 +316,10 @@ class LiveBroker(StubBroker):
             return abort or "qty_abort"
 
         okx_qty, bybit_qty, okx_px, bybit_px = plan
-        intent_id = str(uuid.uuid4())
+        supplied = str(intent_id or "").strip() or str(
+            (extra or {}).get("intent_id") or (extra or {}).get("trade_id") or ""
+        ).strip()
+        intent_id = supplied or str(uuid.uuid4())
         pending = PendingIntent(
             intent_id=intent_id,
             base_coin=base_coin.upper(),

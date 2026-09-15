@@ -41,6 +41,8 @@ _GEAR2_THETA_PROFILES = frozenset(
         "canary",
         "gear22_would_send",
         "gear22",
+        "gear22_live_canary",
+        "gear22_live",
     }
 )
 
