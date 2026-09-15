@@ -1,8 +1,15 @@
-"""Gear 2.2 θ K=1 would_send contour (NO real orders).
+"""Gear 2.2 θ K=1 would_send contour, plus optional live canary send.
 
 Driven off the live theta emit (~1 Hz) inside one BotRuntime. Journals
-``theta_trades/`` only. Does not call StubBroker.place / private APIs.
-Does not write ticks or D trees.
+``theta_trades/``. The default path does **not** call StubBroker.place or
+private APIs (existing ``gear22_would_send`` / stub unit).
+
+Live canary (fail-closed): ``BBOT_PROFILE=gear22_live_canary`` or
+``BBOT_THETA_LIVE_SEND=1`` requires ``BBOT_BROKER=private_live``,
+``VENUE=live``, and ``LIVE_ORDERS=1``. Then open/close decisions that pass
+size_check call an injected ``place_fn`` (Contour B ``LiveBroker.place``)
+immediately at signal — no 70 ms synthetic fill sleep. ACK flatten stays
+inside Contour B. This module does not import ``app.bot.private``.
 
 **Policy:** Gear 2.2 research policy (`research.gear22_backtest.policy.decide`)
 with frozen observation knobs from `research.gear22_backtest.params_frozen`.
@@ -46,12 +53,111 @@ DEFAULT_THETA_THR = 0.2
 DEFAULT_FILL_DELAY_MS = 70
 DEFAULT_SLOT_K = 1
 DEFAULT_NOTIONAL_USDT = 100.0
+DEFAULT_LIVE_CANARY_NOTIONAL_USDT = 20.0
 DEFAULT_BOOK_DEPTH = 1
 POLICY_ID = "gear22_frozen_v1"
 
+# August-std HTML top30 — same universe as VPS unit spread-bbot-theta-k1-canary.
+GEAR22_HTML_TOP30: tuple[str, ...] = (
+    "KAITO",
+    "HOME",
+    "WAL",
+    "RVN",
+    "ONT",
+    "2Z",
+    "BICO",
+    "HMSTR",
+    "CAP",
+    "BLEND",
+    "EDEN",
+    "KMNO",
+    "GPS",
+    "ME",
+    "ZBT",
+    "MOVE",
+    "COAI",
+    "AZTEC",
+    "APR",
+    "YB",
+    "ICX",
+    "AT",
+    "H",
+    "MUBARAK",
+    "ACU",
+    "LA",
+    "BEAT",
+    "PARTI",
+    "SIGN",
+    "GIGGLE",
+)
+
+GEAR22_LIVE_CANARY_PROFILES = frozenset({"gear22_live_canary", "gear22_live"})
+GEAR22_WOULD_SEND_PROFILES = frozenset({"gear22_would_send", "gear22"})
 _GEAR22_TRADE_PROFILES = frozenset(
     {"gear22_would_send", "gear22", "gear2_would_send", "gear2"}
+    | GEAR22_LIVE_CANARY_PROFILES
 )
+
+
+class ThetaLiveSendError(RuntimeError):
+    """Fail-closed live canary: missing LIVE_ORDERS / private_live / VENUE=live."""
+
+
+PlaceFn = Callable[..., Optional[str]]
+MetaFn = Callable[[str], Any]
+
+
+def normalize_gear22_profile(profile: str) -> str:
+    name = str(profile).strip().lower()
+    if name in GEAR22_WOULD_SEND_PROFILES:
+        return "gear22_would_send"
+    if name in GEAR22_LIVE_CANARY_PROFILES:
+        return "gear22_live_canary"
+    return name
+
+
+def theta_live_send_requested(
+    profile: str,
+    env: Optional[Mapping[str, str]] = None,
+) -> bool:
+    """True when the operator armed gear22 live send (profile or env flag)."""
+    e = env if env is not None else os.environ
+    raw = str(e.get("BBOT_THETA_LIVE_SEND") or "").strip().lower()
+    if raw in ("0", "false", "off", "no"):
+        return False
+    if raw in ("1", "true", "on", "yes"):
+        return True
+    return normalize_gear22_profile(profile) == "gear22_live_canary"
+
+
+def assert_theta_live_send_gates(
+    profile: str,
+    env: Optional[Mapping[str, str]] = None,
+) -> None:
+    """If live send is requested, require private_live + VENUE=live + LIVE_ORDERS=1.
+
+    No-op when the gate is off so the stub would_send unit stays unchanged.
+    Does not import ``app.bot.private`` (stub isolation).
+    """
+    e = env if env is not None else os.environ
+    if not theta_live_send_requested(profile, e):
+        return
+    broker = str(e.get("BBOT_BROKER") or "").strip().lower()
+    venue = str(e.get("VENUE") or "").strip().lower()
+    live_orders = str(e.get("LIVE_ORDERS") or "0").strip().lower()
+    if broker not in {"private_live", "live"}:
+        raise ThetaLiveSendError(
+            "theta live send requires BBOT_BROKER=private_live, "
+            f"got {broker or 'stub'!r}"
+        )
+    if venue != "live":
+        raise ThetaLiveSendError(
+            f"theta live send requires VENUE=live, got {venue or 'unset'!r}"
+        )
+    if live_orders not in {"1", "true", "on", "yes"}:
+        raise ThetaLiveSendError(
+            "theta live send requires LIVE_ORDERS=1 (fail closed)"
+        )
 
 LogFn = Callable[[str], None]
 
@@ -127,14 +233,15 @@ def theta_trade_enabled(
     profile: str,
     env: Optional[Mapping[str, str]] = None,
 ) -> bool:
-    """``BBOT_THETA_TRADE``: 1/0 override; default on for ``gear22_would_send``."""
+    """``BBOT_THETA_TRADE``: 1/0 override; default on for gear22 would_send and live canary."""
     e = env if env is not None else os.environ
     raw = str(e.get("BBOT_THETA_TRADE") or "").strip().lower()
     if raw in ("0", "false", "off", "no"):
         return False
     if raw in ("1", "true", "on", "yes"):
         return True
-    return str(profile).strip().lower() in {"gear22_would_send", "gear22"}
+    name = str(profile).strip().lower()
+    return name in GEAR22_WOULD_SEND_PROFILES or name in GEAR22_LIVE_CANARY_PROFILES
 
 
 def _env_float(env: Mapping[str, str], key: str, default: float) -> float:
@@ -610,7 +717,11 @@ class ThetaTradeJournalWriter:
 
 
 class ThetaTradeManager:
-    """K=1 would_send manager hooked from the theta emit loop."""
+    """K=1 would_send manager hooked from the theta emit loop.
+
+    When ``live_send`` is True, open/close calls ``place_fn`` immediately
+    (Contour B dual-leg). The 70 ms sleep is would_send-only.
+    """
 
     def __init__(
         self,
@@ -620,6 +731,9 @@ class ThetaTradeManager:
         journal: Optional[ThetaTradeJournalWriter] = None,
         log: Optional[LogFn] = None,
         sleep_fn: Optional[Callable[[float], Any]] = None,
+        live_send: bool = False,
+        place_fn: Optional[PlaceFn] = None,
+        meta_fn: Optional[MetaFn] = None,
     ) -> None:
         self.data_root = Path(data_root)
         self.config = config or ThetaTradeConfig.from_env()
@@ -627,6 +741,13 @@ class ThetaTradeManager:
         self._log = log or (lambda _m: None)
         # sleep_fn(seconds) — sync sleep; async runtime wraps with asyncio.sleep.
         self._sleep_fn = sleep_fn or time.sleep
+        self.live_send = bool(live_send)
+        self._place_fn = place_fn
+        self._meta_fn = meta_fn
+        if self.live_send and (self._place_fn is None or self._meta_fn is None):
+            raise ThetaLiveSendError(
+                "theta live send requires place_fn and meta_fn (fail closed)"
+            )
         self.slot = SlotState(k=int(self.config.slot_k))
         self._skip_log_budget = 0
 
@@ -672,6 +793,10 @@ class ThetaTradeManager:
         pnl_fields: Optional[Mapping[str, Any]] = None,
         reject_reason: Optional[str] = None,
         policy_decision: Optional[PolicyDecision] = None,
+        would_send: bool = True,
+        send: bool = False,
+        intent_id: Optional[str] = None,
+        live_abort: Optional[str] = None,
     ) -> dict[str, Any]:
         metrics = self._metrics_from_snaps(snapshots, base_coin, side)
         # Spreads for the legs we execute at this event.
@@ -695,8 +820,11 @@ class ThetaTradeManager:
             "side": side,
             "event": event,
             "reason": reason,
-            "would_send": True,
-            "send": False,
+            "would_send": bool(would_send),
+            "send": bool(send),
+            "intent_id": intent_id or trade_id,
+            "live_send": bool(self.live_send),
+            "fill_model": "venue_ack" if self.live_send else "synthetic_delay",
             "signal_ts_ms": int(signal_ts_ms),
             "fill_ts_ms": int(fill_ts_ms),
             "latency_ms": int(latency_ms),
@@ -754,6 +882,12 @@ class ThetaTradeManager:
             row[f"{prefix}_ask_size"] = snap["ask_size"]
         if pnl_fields:
             row.update(dict(pnl_fields))
+        if live_abort:
+            row["live_abort"] = live_abort
+        if policy_decision is not None:
+            row["policy_id"] = POLICY_ID
+            row["policy_action"] = getattr(policy_decision, "action", None)
+            row["policy_reason"] = getattr(policy_decision, "reason", None)
         return row
 
     def execute_decision(
@@ -856,6 +990,17 @@ class ThetaTradeManager:
             )
             return self.execute_decision(
                 decision, snapshots=snapshots, quotes=quotes, now_ms=signal_ts
+            )
+
+        if self.live_send:
+            return self._execute_live_send(
+                decision,
+                snapshots=snapshots,
+                quotes=quotes,
+                signal_ts=signal_ts,
+                okx_s=okx_s,
+                bybit_s=bybit_s,
+                signal_size=signal_size,
             )
 
         self.slot.pending = True
@@ -996,6 +1141,231 @@ class ThetaTradeManager:
         finally:
             self.slot.pending = False
 
+    def _execute_live_send(
+        self,
+        decision: ThetaDecision,
+        *,
+        snapshots: Sequence[ThetaSnapshot],
+        quotes: Mapping[str, Mapping[str, Mapping[str, Any]]],
+        signal_ts: int,
+        okx_s: Mapping[str, Any],
+        bybit_s: Mapping[str, Any],
+        signal_size: Mapping[str, Any],
+    ) -> list[dict[str, Any]]:
+        """Place Contour B dual-leg immediately at signal. No 70 ms sleep.
+
+        ACK-aware open/flatten is owned by ``place_fn`` (LiveBroker). A
+        non-None abort keeps the theta slot flat on open and occupied on
+        a failed close. insufficient_size never reaches this path.
+        """
+        if self._place_fn is None or self._meta_fn is None:
+            raise ThetaLiveSendError(
+                "theta live send requires place_fn and meta_fn (fail closed)"
+            )
+        if decision.action not in ("open", "close"):
+            return []
+
+        if decision.action == "open":
+            trade_id = str(uuid.uuid4())
+            intent_id = trade_id
+            coin = decision.base_coin
+            side = decision.side
+            spread_side = spread_side_for(side, event="open")
+            close_of: Optional[str] = None
+        else:
+            pos = self.slot.position
+            if pos is None:
+                return []
+            trade_id = pos.trade_id
+            intent_id = str(uuid.uuid4())
+            coin = pos.base_coin
+            side = pos.side
+            spread_side = "close"
+            close_of = "open_long" if side == "long" else "open_short"
+
+        try:
+            meta = self._meta_fn(str(coin).upper())
+        except Exception as exc:  # noqa: BLE001
+            from app.bot.sentry_setup import capture_exception
+
+            capture_exception(
+                exc,
+                extras={"trade_id": trade_id, "coin": coin, "event": decision.action},
+            )
+            raise ThetaLiveSendError(
+                f"theta live send meta lookup failed for {coin}: {type(exc).__name__}"
+            ) from exc
+
+        extra = {
+            "trade_id": trade_id,
+            "intent_id": intent_id,
+            "theta_live_canary": True,
+            "policy_id": POLICY_ID,
+        }
+        self.slot.pending = True
+        abort: Optional[str] = None
+        try:
+            try:
+                abort = self._place_fn(
+                    spread_side=spread_side,
+                    base_coin=str(coin).upper(),
+                    signal_ts_ms=int(signal_ts),
+                    okx_book=dict(okx_s),
+                    bybit_book=dict(bybit_s),
+                    meta=meta,
+                    close_of=close_of,
+                    extra=extra,
+                    intent_id=intent_id,
+                )
+            except TypeError as exc:
+                if "intent_id" not in str(exc):
+                    from app.bot.sentry_setup import capture_exception
+
+                    capture_exception(
+                        exc,
+                        extras={
+                            "trade_id": trade_id,
+                            "intent_id": intent_id,
+                            "coin": coin,
+                            "event": decision.action,
+                        },
+                    )
+                    abort = f"place_raised:{type(exc).__name__}"
+                else:
+                    abort = self._place_fn(
+                        spread_side=spread_side,
+                        base_coin=str(coin).upper(),
+                        signal_ts_ms=int(signal_ts),
+                        okx_book=dict(okx_s),
+                        bybit_book=dict(bybit_s),
+                        meta=meta,
+                        close_of=close_of,
+                        extra=extra,
+                    )
+            except Exception as exc:  # noqa: BLE001
+                from app.bot.sentry_setup import capture_exception
+
+                capture_exception(
+                    exc,
+                    extras={
+                        "trade_id": trade_id,
+                        "intent_id": intent_id,
+                        "coin": coin,
+                        "event": decision.action,
+                    },
+                )
+                abort = f"place_raised:{type(exc).__name__}"
+
+            fill_ts = int(time.time() * 1000)
+            okx_f, bybit_f = self._books_for(quotes, coin)
+            fill_size = size_check(
+                okx=okx_f,
+                bybit=bybit_f,
+                side=side,
+                event=decision.action,
+                notional_usdt=self.config.notional_usdt,
+                book_depth=self.config.book_depth,
+            )
+            sent_ok = abort is None
+            pnl_fields: dict[str, Any] = {}
+            if decision.action == "close":
+                pos = self.slot.position
+                close_spread = spread_for_side(okx_f, bybit_f, opposite_side(side))
+                open_spread = pos.open_fill_spread if pos is not None else None
+                pnl_spread = None
+                if open_spread is not None and close_spread is not None:
+                    pnl_spread = float(open_spread) - float(close_spread)
+                pnl_fields = {
+                    "open_fill_spread": open_spread,
+                    "close_fill_spread": close_spread,
+                    "pnl_spread": pnl_spread,
+                    "pnl_usdt_approx": (
+                        float(pnl_spread) / 100.0 * float(pos.open_notional)
+                        if pnl_spread is not None and pos is not None
+                        else None
+                    ),
+                    "open_signal_ts_ms": pos.open_signal_ts_ms if pos is not None else None,
+                    "open_fill_ts_ms": pos.open_fill_ts_ms if pos is not None else None,
+                    "potential_pp": decision.potential_pp,
+                    "policy_id": POLICY_ID,
+                    "close_intent_id": intent_id,
+                }
+
+            row = self.build_event_row(
+                trade_id=trade_id,
+                base_coin=coin,
+                side=side,
+                event=decision.action,
+                reason=decision.reason if sent_ok else "live_abort",
+                signal_ts_ms=signal_ts,
+                fill_ts_ms=fill_ts,
+                snapshots=snapshots,
+                signal_okx=okx_s,
+                signal_bybit=bybit_s,
+                fill_okx=okx_f,
+                fill_bybit=bybit_f,
+                signal_size=signal_size,
+                fill_size=fill_size,
+                pnl_fields=pnl_fields or None,
+                reject_reason=None if sent_ok else str(abort),
+                policy_decision=decision.policy_decision,
+                would_send=True,
+                send=bool(sent_ok),
+                intent_id=intent_id,
+                live_abort=None if sent_ok else str(abort),
+            )
+            if sent_ok and decision.action == "open":
+                fill_spread = spread_for_side(okx_f, bybit_f, side)
+                self.slot.position = OpenPosition(
+                    trade_id=trade_id,
+                    base_coin=str(coin).upper(),
+                    side=side,
+                    open_signal_ts_ms=signal_ts,
+                    open_fill_ts_ms=fill_ts,
+                    open_fill_spread=fill_spread,
+                    open_notional=float(self.config.notional_usdt),
+                    open_theta_1m=decision.theta_1m,
+                    fill_spread_pp=fill_spread,
+                )
+            elif sent_ok and decision.action == "close":
+                self.slot.position = None
+
+            self.journal.append_rows([row])
+            self._log(
+                f"theta_trade_{decision.action} | trade_id={row['trade_id']} | "
+                f"intent_id={intent_id} | coin={row['base_coin']} | "
+                f"side={row['side']} | send={row.get('send')} | "
+                f"live_abort={row.get('live_abort')}"
+            )
+            sentry_extras: dict[str, Any] = {
+                "signal_ts_ms": row.get("signal_ts_ms"),
+                "fill_ts_ms": row.get("fill_ts_ms"),
+                "latency_ms": row.get("latency_ms"),
+                "spread_signal": row.get("spread_signal"),
+                "spread_fill": row.get("spread_fill"),
+                "slip_spread": row.get("slip_spread"),
+                "theta_1m": row.get("theta_1m"),
+                "intent_id": intent_id,
+                "send": row.get("send"),
+                "live_abort": row.get("live_abort"),
+                "notional_usdt": row.get("notional_usdt"),
+            }
+            if decision.action == "close":
+                sentry_extras.update({
+                    "pnl_spread": row.get("pnl_spread"),
+                    "pnl_usdt_approx": row.get("pnl_usdt_approx"),
+                })
+            capture_trade_event(
+                event=decision.action if sent_ok else "send_abort",
+                trade_id=str(trade_id),
+                coin=str(row["base_coin"]),
+                side=str(row["side"]),
+                extras=sentry_extras,
+            )
+            return [row]
+        finally:
+            self.slot.pending = False
+
     def on_theta_snapshots(
         self,
         snapshots: Sequence[ThetaSnapshot],
@@ -1096,6 +1466,17 @@ class ThetaTradeManager:
             )
             return self.execute_decision(
                 decision, snapshots=snapshots, quotes=quotes, now_ms=signal_ts
+            )
+
+        if self.live_send:
+            return self._execute_live_send(
+                decision,
+                snapshots=snapshots,
+                quotes=quotes,
+                signal_ts=signal_ts,
+                okx_s=okx_s,
+                bybit_s=bybit_s,
+                signal_size=signal_size,
             )
 
         self.slot.pending = True

@@ -17,6 +17,7 @@ from app.policy.trade_manager import (
     live_size_coin_allowed,
     live_size_coins_for_profile,
 )
+from app.bot.theta_trade_manager import GEAR22_HTML_TOP30
 
 ORDER_VENUES = frozenset({"bybit_live", "okx_live"})
 
@@ -174,6 +175,7 @@ _PROFILE_DEFAULT_COINS: Mapping[str, tuple[str, ...]] = {
     "canary_wal_eden": CANARY_WAL_EDEN_COINS,
     "gear2_would_send": GEAR2_WOULD_SEND_COINS,
     "signal_test": SIGNAL_TEST_COINS,
+    "gear22_live_canary": GEAR22_HTML_TOP30,
 }
 
 
@@ -202,6 +204,10 @@ def normalize_bbot_profile(raw: object) -> str:
         return "gear2_would_send"
     if name == "canary":
         return "canary_wal_eden"
+    if name == "gear22":
+        return "gear22_would_send"
+    if name == "gear22_live":
+        return "gear22_live_canary"
     return name
 
 

@@ -63,7 +63,26 @@ class TestSentryIntegration(unittest.TestCase):
         call_kwargs = self.mock_sentry.init.call_args[1]
         self.assertEqual(call_kwargs["dsn"], "https://fake@sentry.io/123")
         self.assertIn("environment", call_kwargs)
+        self.mock_sentry.set_tag.assert_any_call("contour", "gear22_theta_k1")
         self.mock_sentry.flush.assert_not_called()
+
+    @patch("app.bot.sentry_setup._try_import_sentry")
+    def test_sentry_init_live_canary_contour_b(self, mock_import: Mock) -> None:
+        mock_import.return_value = self.mock_sentry
+        from app.bot.sentry_setup import init_sentry
+
+        env = {
+            "SENTRY_DSN": "https://fake@sentry.io/123",
+            "SENTRY_ENVIRONMENT": "gear22-live-canary",
+            "SENTRY_RELEASE": "test-rel",
+            "SENTRY_BRANCH": "cursor/gear22-live-canary-e9eb",
+        }
+        result = init_sentry(profile="gear22_live_canary", env=env)
+        self.assertTrue(result)
+        self.mock_sentry.set_tag.assert_any_call("contour", "contour_b")
+        self.mock_sentry.set_tag.assert_any_call("environment", "gear22-live-canary")
+        self.mock_sentry.set_tag.assert_any_call("branch", "cursor/gear22-live-canary-e9eb")
+        self.mock_sentry.set_tag.assert_any_call("release", "test-rel")
 
     @patch("app.bot.sentry_setup._sentry_enabled", True)
     @patch("app.bot.sentry_setup._init_attempted", True)
@@ -201,11 +220,22 @@ class TestSentryIntegration(unittest.TestCase):
                 theta_1m=0.25,
                 theta_5m=0.22,
                 floor_tf_select_a25=0.10,
-                p50_1m=0.15,
+                p50_1m=0.40,
                 p50_5m=0.14,
                 ts_ms=1000,
                 computed_at_ms=1000,
-            )
+            ),
+            ThetaSnapshot(
+                base_coin="BTC",
+                side="short",
+                theta_1m=0.01,
+                theta_5m=0.01,
+                floor_tf_select_a25=0.10,
+                p50_1m=0.11,
+                p50_5m=0.11,
+                ts_ms=1000,
+                computed_at_ms=1000,
+            ),
         ]
         
         quotes = {
@@ -286,11 +316,22 @@ class TestSentryIntegration(unittest.TestCase):
                 theta_1m=0.25,
                 theta_5m=0.22,
                 floor_tf_select_a25=0.10,
-                p50_1m=0.15,
+                p50_1m=0.40,
                 p50_5m=0.14,
                 ts_ms=1000,
                 computed_at_ms=1000,
-            )
+            ),
+            ThetaSnapshot(
+                base_coin="BTC",
+                side="short",
+                theta_1m=0.01,
+                theta_5m=0.01,
+                floor_tf_select_a25=0.10,
+                p50_1m=0.11,
+                p50_5m=0.11,
+                ts_ms=1000,
+                computed_at_ms=1000,
+            ),
         ]
         
         quotes = {

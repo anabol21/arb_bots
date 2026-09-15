@@ -36,8 +36,12 @@ from app.bot.theta_screener import (
     theta_watch_enabled,
 )
 from app.bot.theta_trade_manager import (
+    DEFAULT_LIVE_CANARY_NOTIONAL_USDT,
+    GEAR22_HTML_TOP30,
     ThetaTradeConfig,
     ThetaTradeManager,
+    assert_theta_live_send_gates,
+    theta_live_send_requested,
     theta_trade_enabled,
 )
 from app.bot.floor_warm import (
@@ -204,10 +208,13 @@ class BotRuntime:
             "canary",
             "gear22_would_send",
             "gear22",
+            "gear22_live_canary",
+            "gear22_live",
         ):
             raise ValueError(
                 f"BBOT_PROFILE must be gear1|signal_test|gear2_would_send|"
-                f"canary_wal_eden|gear22_would_send, got {self.profile!r}"
+                f"canary_wal_eden|gear22_would_send|gear22_live_canary, "
+                f"got {self.profile!r}"
             )
         if self.profile == "default":
             self.profile = "gear1"
@@ -215,8 +222,13 @@ class BotRuntime:
             self.profile = "gear2_would_send"
         if self.profile == "gear22":
             self.profile = "gear22_would_send"
+        if self.profile == "gear22_live":
+            self.profile = "gear22_live_canary"
         if self.profile == "canary":
             self.profile = "canary_wal_eden"
+
+        # Fail closed before broker/sentry when live canary is armed without LIVE_ORDERS.
+        assert_theta_live_send_gates(self.profile)
         
         # Initialize Sentry early (requires profile).
         from app.bot.sentry_setup import init_sentry
@@ -230,8 +242,10 @@ class BotRuntime:
             elif self.mode == "policy" and self.profile == "canary_wal_eden":
                 coins_raw = "WAL,EDEN"
             elif self.mode == "policy" and self.profile == "gear22_would_send":
-                # August-std HTML top30 — require explicit BBOT_COINS in canary.
+                # August-std HTML top30 — require explicit BBOT_COINS in stub canary.
                 coins_raw = "BTC,ETH,SOL,XRP"
+            elif self.mode == "policy" and self.profile == "gear22_live_canary":
+                coins_raw = ",".join(GEAR22_HTML_TOP30)
             else:
                 coins_raw = "BTC,ETH"
         self.coins = parse_coins(coins_raw)
@@ -250,6 +264,8 @@ class BotRuntime:
             self.notional = float(notional_raw)
         elif self.profile == "canary_wal_eden":
             self.notional = 10.0
+        elif self.profile == "gear22_live_canary":
+            self.notional = float(DEFAULT_LIVE_CANARY_NOTIONAL_USDT)
         else:
             self.notional = 100.0
         self.trade_lat_ms = int(os.environ.get("BBOT_TRADE_LAT_MS") or "100")
@@ -345,15 +361,23 @@ class BotRuntime:
                 tw_p50_observer=self.tw_p50_observer,
             )
             self.theta_journal = ThetaJournalWriter(self.data_root)
-        # Gear 2.2 θ K=1 would_send (separate journal; no StubBroker.place).
+        # Gear 2.2 θ K=1 would_send (separate journal). Live canary injects
+        # Contour B place_fn; stub would_send never calls broker.place.
         self.theta_trade_enabled = theta_trade_enabled(self.profile)
         self.theta_trade: ThetaTradeManager | None = None
         self._theta_trade_warned = False
         if self.theta_trade_enabled:
+            live_send = theta_live_send_requested(self.profile)
+            theta_cfg = ThetaTradeConfig.from_env()
+            if live_send:
+                theta_cfg.notional_usdt = float(self.notional)
             self.theta_trade = ThetaTradeManager(
                 data_root=self.data_root,
-                config=ThetaTradeConfig.from_env(),
+                config=theta_cfg,
                 log=lambda m: self.log.info(m),
+                live_send=live_send,
+                place_fn=self.broker.place if live_send else None,
+                meta_fn=self._meta if live_send else None,
             )
         # Floor warm-start (standard for gear22 / when pickle present).
         self._floor_warm_path = resolve_floor_warm_path(self.data_root)
@@ -362,7 +386,8 @@ class BotRuntime:
             warm_path = self._floor_warm_path
             force_warm = str(os.environ.get("BBOT_FLOOR_WARM") or "").strip().lower()
             want_warm = force_warm in ("1", "true", "on", "yes") or (
-                self.profile == "gear22_would_send" and force_warm not in ("0", "false", "off", "no")
+                self.profile in {"gear22_would_send", "gear22_live_canary"}
+                and force_warm not in ("0", "false", "off", "no")
             )
             if want_warm or warm_path.is_file():
                 if warm_path.is_file():
@@ -398,7 +423,10 @@ class BotRuntime:
         """Save floor observer state to pickle (idempotent, safe to call repeatedly)."""
         if self.floor_observer is None:
             return
-        if not (self.profile == "gear22_would_send" or self._floor_warm_loaded):
+        if not (
+            self.profile in {"gear22_would_send", "gear22_live_canary"}
+            or self._floor_warm_loaded
+        ):
             return
         try:
             export_observer_warm_pickle(
@@ -1257,6 +1285,8 @@ class BotRuntime:
             f"tw_p50_watch={'on' if self.tw_p50_enabled else 'off'} | "
             f"theta_watch={'on' if self.theta_enabled else 'off'} | "
             f"theta_trade={'on' if self.theta_trade_enabled else 'off'} | "
+            f"theta_live_send="
+            f"{'on' if getattr(self.theta_trade, 'live_send', False) else 'off'} | "
             f"floor_warm={'loaded' if self._floor_warm_loaded else 'off'}"
         )
         if self.mode == "policy" and self.policy is None:
@@ -1290,7 +1320,8 @@ class BotRuntime:
         tasks: list[asyncio.Task] = [asyncio.create_task(self._heartbeat())]
         # Periodic floor warm pickle save (if floor observer is enabled)
         if self.floor_observer is not None and (
-            self.profile == "gear22_would_send" or self._floor_warm_loaded
+            self.profile in {"gear22_would_send", "gear22_live_canary"}
+            or self._floor_warm_loaded
         ):
             tasks.append(
                 asyncio.create_task(

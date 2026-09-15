@@ -9,8 +9,35 @@ from typing import Any, Mapping, Optional
 _sentry_enabled = False
 _sentry_sdk: Any = None
 _init_attempted = False
+_sentry_profile = "unknown"
+_sentry_tags: dict[str, str] = {}
 
 _log = logging.getLogger("bbot.sentry")
+
+_LIVE_CANARY_PROFILES = frozenset({"gear22_live_canary", "gear22_live"})
+
+
+def _contour_tag(profile: str) -> str:
+    name = str(profile).strip().lower()
+    if name in _LIVE_CANARY_PROFILES:
+        return "contour_b"
+    return "gear22_theta_k1"
+
+
+def _default_sentry_environment(profile: str) -> str:
+    name = str(profile).strip().lower()
+    if name in _LIVE_CANARY_PROFILES:
+        return "gear22-live-canary"
+    return "gear22-would-send-canary"
+
+
+def _resolve_branch(env: Mapping[str, str]) -> str:
+    return str(
+        env.get("SENTRY_BRANCH")
+        or env.get("BBOT_GIT_BRANCH")
+        or env.get("GITHUB_REF_NAME")
+        or ""
+    ).strip()
 
 
 def _try_import_sentry():
@@ -27,10 +54,11 @@ def _try_import_sentry():
 
 def init_sentry(*, profile: str, env: Optional[Mapping[str, str]] = None) -> bool:
     """Initialize Sentry SDK if SENTRY_DSN is set. Returns True if enabled."""
-    global _sentry_enabled, _init_attempted
+    global _sentry_enabled, _init_attempted, _sentry_profile, _sentry_tags
     
     _init_attempted = True
     e = env if env is not None else os.environ
+    _sentry_profile = str(profile or "unknown")
     dsn = str(e.get("SENTRY_DSN") or "").strip()
     if not dsn:
         _log.info("sentry_init | status=skipped | reason=no_dsn")
@@ -41,8 +69,19 @@ def init_sentry(*, profile: str, env: Optional[Mapping[str, str]] = None) -> boo
         _log.warning("sentry_init | status=skipped | reason=sdk_not_installed")
         return False
     
-    environment = str(e.get("SENTRY_ENVIRONMENT") or "gear22-would-send-canary").strip()
+    environment = str(
+        e.get("SENTRY_ENVIRONMENT") or _default_sentry_environment(profile)
+    ).strip()
     release = str(e.get("SENTRY_RELEASE") or "").strip() or None
+    branch = _resolve_branch(e)
+    contour = _contour_tag(profile)
+    _sentry_tags = {
+        "contour": contour,
+        "profile": str(profile),
+        "environment": environment,
+        "release": release or "",
+        "branch": branch,
+    }
     
     sentry.init(
         dsn=dsn,
@@ -52,8 +91,13 @@ def init_sentry(*, profile: str, env: Optional[Mapping[str, str]] = None) -> boo
         profiles_sample_rate=0.0,
     )
     
-    sentry.set_tag("contour", "gear22_theta_k1")
+    sentry.set_tag("contour", contour)
     sentry.set_tag("profile", profile)
+    sentry.set_tag("environment", environment)
+    if release:
+        sentry.set_tag("release", release)
+    if branch:
+        sentry.set_tag("branch", branch)
     
     _sentry_enabled = True
     _log.info(f"sentry_init | status=enabled | environment={environment} | profile={profile}")
@@ -116,8 +160,12 @@ def capture_trade_event(
             scope.set_tag("coin", coin)
             scope.set_tag("side", side)
             scope.set_tag("trade_id", trade_id)
-            scope.set_tag("contour", "gear22_theta_k1")
+            scope.set_tag("contour", _sentry_tags.get("contour") or _contour_tag(_sentry_profile))
             scope.set_tag("kind", "trade")
+            scope.set_tag("environment", _sentry_tags.get("environment") or "")
+            scope.set_tag("release", _sentry_tags.get("release") or "")
+            scope.set_tag("branch", _sentry_tags.get("branch") or "")
+            scope.set_tag("profile", _sentry_tags.get("profile") or _sentry_profile)
             
             scope.fingerprint = ["theta_k1", trade_id, event]
             

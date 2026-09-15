@@ -88,6 +88,7 @@ class ThetaTradeFlagTests(unittest.TestCase):
     def test_default_on_for_gear22(self) -> None:
         self.assertTrue(theta_trade_enabled("gear22_would_send", {}))
         self.assertTrue(theta_trade_enabled("gear22", {}))
+        self.assertTrue(theta_trade_enabled("gear22_live_canary", {}))
         self.assertFalse(theta_trade_enabled("gear2_would_send", {}))
         self.assertFalse(theta_trade_enabled("gear1", {}))
 
