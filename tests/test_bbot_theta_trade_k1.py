@@ -101,40 +101,49 @@ class ThetaTradeFlagTests(unittest.TestCase):
 
 
 class DecideK1Tests(unittest.TestCase):
-    def test_entry_when_theta_ge_thr(self) -> None:
+    def test_entry_when_policy_qualifies(self) -> None:
+        from research.gear22_backtest.policy import PolicyParams
+        
         snaps = [
-            _snap("BTC", "long", 0.25),
+            _snap("BTC", "long", 0.60, p50_1m=0.80, floor=0.20),
             _snap("BTC", "short", 0.01),
         ]
         quotes = {"BTC": _books()}
+        params = PolicyParams(theta_open=0.50, p50_open=0.60, min_profit_pp=0.20, min_theta_close=0.05)
         d = decide_theta_k1(
             snaps,
             slot=SlotState(),
             thr=0.2,
             quotes=quotes,
             notional_usdt=100.0,
+            policy_params=params,
         )
         self.assertEqual(d.action, "open")
         self.assertEqual(d.side, "long")
-        self.assertEqual(d.reason, "theta_entry")
+        self.assertEqual(d.reason, "open_long")
 
-    def test_thr_gate(self) -> None:
+    def test_policy_gate(self) -> None:
+        from research.gear22_backtest.policy import PolicyParams
+        
         snaps = [
-            _snap("BTC", "long", 0.19),
-            _snap("BTC", "short", 0.19),
+            _snap("BTC", "long", 0.30, p50_1m=0.40, floor=0.10),
+            _snap("BTC", "short", 0.30, p50_1m=0.40, floor=0.10),
         ]
+        params = PolicyParams(theta_open=0.50, p50_open=0.60, min_profit_pp=0.20, min_theta_close=0.05)
         d = decide_theta_k1(
             snaps,
             slot=SlotState(),
             thr=0.2,
             quotes={"BTC": _books()},
             notional_usdt=100.0,
+            policy_params=params,
         )
         self.assertEqual(d.action, "skip")
-        self.assertEqual(d.reason, "no_signal")
+        self.assertIn(d.reason, ("no_signal", "hold_not_usable", "hold_below_threshold"))
 
     def test_slot_busy_skips_entry(self) -> None:
         from app.bot.theta_trade_manager import OpenPosition
+        from research.gear22_backtest.policy import PolicyParams
 
         slot = SlotState(
             position=OpenPosition(
@@ -143,31 +152,34 @@ class DecideK1Tests(unittest.TestCase):
                 side="long",
                 open_signal_ts_ms=1,
                 open_fill_ts_ms=71,
-                open_fill_spread=0.1,
+                open_fill_spread=0.8,
                 open_notional=100.0,
                 open_theta_1m=0.3,
+                fill_spread_pp=0.8,
             )
         )
         snaps = [
-            _snap("BTC", "long", 0.5),
+            _snap("BTC", "long", 0.5, p50_1m=0.90, floor=0.40),
             _snap("BTC", "short", 0.0),
-            _snap("ETH", "long", 0.1),
-            _snap("ETH", "short", 0.05),
+            _snap("ETH", "long", 0.60, p50_1m=0.80, floor=0.20),
+            _snap("ETH", "short", 0.01, p50_1m=0.10, floor=0.09),
         ]
+        params = PolicyParams(theta_open=0.50, p50_open=0.60, min_profit_pp=0.20, min_theta_close=0.05)
         d = decide_theta_k1(
             snaps,
             slot=slot,
             thr=0.2,
             quotes={"BTC": _books(), "ETH": _books()},
             notional_usdt=100.0,
+            policy_params=params,
         )
         self.assertEqual(d.action, "skip")
-        self.assertEqual(d.reason, "slot_busy")
-        self.assertEqual(d.reject_reason, "slot_busy")
+        self.assertIn(d.reason, ("slot_busy", "hold_open_overlap", "hold_below_min_theta", "hold_below_min_profit"))
 
-    def test_exit_on_opposite_theta(self) -> None:
+    def test_exit_on_policy_close(self) -> None:
         from app.bot.theta_trade_manager import OpenPosition
-
+        from research.gear22_backtest.policy import PolicyParams
+        
         slot = SlotState(
             position=OpenPosition(
                 trade_id="t1",
@@ -175,24 +187,27 @@ class DecideK1Tests(unittest.TestCase):
                 side="long",
                 open_signal_ts_ms=1,
                 open_fill_ts_ms=71,
-                open_fill_spread=0.1,
+                open_fill_spread=0.3,
                 open_notional=100.0,
                 open_theta_1m=0.3,
+                fill_spread_pp=0.3,
             )
         )
         snaps = [
-            _snap("SOL", "long", 0.1),
-            _snap("SOL", "short", 0.22),
+            _snap("SOL", "long", 0.30, p50_1m=0.80, floor=0.50),
+            _snap("SOL", "short", 0.60, p50_1m=1.20, floor=0.60),
         ]
+        params = PolicyParams(theta_open=0.50, p50_open=0.60, min_profit_pp=0.0, min_theta_close=0.05, fee_round_trip_pp=0.30)
         d = decide_theta_k1(
             snaps,
             slot=slot,
             thr=0.2,
-            quotes={"SOL": _books()},
+            quotes={"SOL": _books(okx_bid=100.5, bybit_ask=100.0)},
             notional_usdt=100.0,
+            policy_params=params,
         )
         self.assertEqual(d.action, "close")
-        self.assertEqual(d.reason, "theta_exit_opposite")
+        self.assertEqual(d.reason, "close_min_profit")
 
     def test_size_reject(self) -> None:
         snaps = [

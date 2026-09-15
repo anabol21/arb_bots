@@ -20,15 +20,27 @@ from research.gear22_backtest.policy import (
     decide_open,
     potential_profit_pp,
 )
-from research.gear22_backtest.replay import (
-    ClosedTrade,
-    OpenPosition,
-    ReplayResult,
-    SlotMode,
-    replay_frame,
-    replay_hive,
-    replay_path,
-)
+
+try:
+    from research.gear22_backtest.replay import (
+        ClosedTrade,
+        OpenPosition,
+        ReplayResult,
+        SlotMode,
+        replay_frame,
+        replay_hive,
+        replay_path,
+    )
+    _REPLAY_AVAILABLE = True
+except ImportError:
+    _REPLAY_AVAILABLE = False
+    ClosedTrade = None  # type: ignore[misc,assignment]
+    OpenPosition = None  # type: ignore[misc,assignment]
+    ReplayResult = None  # type: ignore[misc,assignment]
+    SlotMode = None  # type: ignore[misc,assignment]
+    replay_frame = None  # type: ignore[misc,assignment]
+    replay_hive = None  # type: ignore[misc,assignment]
+    replay_path = None  # type: ignore[misc,assignment]
 
 __all__ = [
     "Action",
