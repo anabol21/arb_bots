@@ -9,6 +9,9 @@ All send/recv/close coroutines are submitted via
 ``asyncio.run_coroutine_threadsafe`` under a per-socket lock so warm
 keepalive and W6 parallel-place worker threads never call
 ``loop.run_until_complete`` across threads (unsafe with asyncio/websockets).
+``close()`` cancels leftover keepalive/close tasks before stopping the loop
+so asyncio does not log «Task was destroyed but it is pending!».
+send/recv do not drain or wait on shutdown.
 """
 
 from __future__ import annotations
@@ -185,11 +188,30 @@ class WebsocketsClientSocket:
         def _run() -> None:
             asyncio.set_event_loop(loop)
             self._loop_ready.set()
-            loop.run_forever()
             try:
-                loop.close()
-            except Exception:  # noqa: BLE001
-                pass
+                loop.run_forever()
+            finally:
+                # Cancel leftovers (websockets Connection.keepalive / close)
+                # before loop.close so GC does not emit
+                # «Task was destroyed but it is pending!».
+                try:
+                    pending = [
+                        task
+                        for task in asyncio.all_tasks(loop)
+                        if not task.done()
+                    ]
+                    for task in pending:
+                        task.cancel()
+                    if pending:
+                        loop.run_until_complete(
+                            asyncio.gather(*pending, return_exceptions=True)
+                        )
+                except Exception:  # noqa: BLE001
+                    pass
+                try:
+                    loop.close()
+                except Exception:  # noqa: BLE001
+                    pass
 
         t = threading.Thread(
             target=_run,
@@ -200,6 +222,38 @@ class WebsocketsClientSocket:
         t.start()
         if not self._loop_ready.wait(timeout=5.0):
             raise RuntimeError("websockets client loop thread failed to start")
+
+    def _drain_pending_loop_tasks(self, *, timeout_sec: float) -> None:
+        """Cancel leftover owner-loop tasks. Shutdown only — not send/recv."""
+        import asyncio
+
+        loop = self._loop
+        if loop is None:
+            return
+        try:
+            running = loop.is_running()
+        except Exception:  # noqa: BLE001
+            return
+        if not running:
+            return
+
+        async def _drain() -> None:
+            current = asyncio.current_task()
+            pending = [
+                task
+                for task in asyncio.all_tasks(loop)
+                if task is not current and not task.done()
+            ]
+            for task in pending:
+                task.cancel()
+            if pending:
+                await asyncio.gather(*pending, return_exceptions=True)
+
+        try:
+            fut = asyncio.run_coroutine_threadsafe(_drain(), loop)
+            fut.result(timeout=timeout_sec)
+        except Exception:  # noqa: BLE001
+            pass
 
     def _stop_loop_thread(self) -> None:
         loop = self._loop
@@ -296,14 +350,33 @@ class WebsocketsClientSocket:
         with self._io_lock:
             conn = self._conn
             loop = self._loop
-            if conn is not None and loop is not None:
-                try:
-                    self._run_on_loop(conn.close(), timeout_sec=5.0)
-                except Exception:  # noqa: BLE001
-                    pass
             self._conn = None
             self._connected = False
             self._closed = True
+            if conn is not None and loop is not None:
+                try:
+                    import asyncio
+
+                    if loop.is_running():
+                        async def _close_conn() -> None:
+                            try:
+                                await conn.close()
+                            except Exception:  # noqa: BLE001
+                                pass
+
+                        fut = asyncio.run_coroutine_threadsafe(_close_conn(), loop)
+                        try:
+                            fut.result(timeout=5.0)
+                        except Exception:  # noqa: BLE001
+                            try:
+                                fut.cancel()
+                            except Exception:  # noqa: BLE001
+                                pass
+                except Exception:  # noqa: BLE001
+                    pass
+            # Await/cancel keepalive+close tasks while the loop is still
+            # running. Stopping first left pending websockets tasks for GC.
+            self._drain_pending_loop_tasks(timeout_sec=2.0)
             self._stop_loop_thread()
 
     @property
