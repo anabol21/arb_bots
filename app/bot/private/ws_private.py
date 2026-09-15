@@ -495,6 +495,37 @@ class PrivateStreamRuntime:
         self.note_private_activity()
         _safe_log("heartbeat", exchange=self.exchange, gen=self.reconnect_generation)
 
+    def maybe_reply_okx_ping(self, text: str, *, trade: bool = False) -> bool:
+        """Reply to OKX literal ``ping`` with ``pong`` on the same socket. No wait."""
+        if self.exchange != "okx" or text != "ping":
+            return False
+        sock = self.trade_socket if trade else self.private_socket
+        if sock is None:
+            return False
+        try:
+            sock.send_text("pong")
+        except Exception as exc:  # noqa: BLE001
+            _safe_log(
+                "okx_pong_reply_failed",
+                exchange=self.exchange,
+                gen=self.reconnect_generation,
+                err=type(exc).__name__,
+            )
+            return False
+        _safe_log(
+            "okx_pong_reply",
+            exchange=self.exchange,
+            gen=self.reconnect_generation,
+        )
+        return True
+
+    def consume_ws_noise(self, text: str, *, trade: bool = False) -> bool:
+        """True when the frame is ping/pong/welcome noise. OKX ping is pong'd."""
+        if not is_ws_noise_frame(self.exchange, text):
+            return False
+        self.maybe_reply_okx_ping(text, trade=trade)
+        return True
+
     def send_trade_heartbeat(self) -> None:
         """Application ping on the trade socket (idle health; not private-only)."""
         assert self.trade_socket is not None
@@ -565,6 +596,7 @@ class PrivateStreamRuntime:
         elif parsed.kind == "order_update":
             self._on_order_update(parsed)
         elif parsed.kind == "heartbeat":
+            self.maybe_reply_okx_ping(text, trade=False)
             _safe_log("heartbeat_ack", exchange=self.exchange, gen=self.reconnect_generation)
         return parsed
 
@@ -933,7 +965,7 @@ class PrivateStreamRuntime:
                 except TimeoutError:
                     continue
             self.note_trade_activity()
-            if is_ws_noise_frame(self.exchange, raw):
+            if self.consume_ws_noise(raw, trade=True):
                 continue
             try:
                 return self.parse_trade_ack_text(raw, expect_req_id=expect_req_id)
@@ -957,7 +989,7 @@ class PrivateStreamRuntime:
                 raw = self.private_socket.recv_text(timeout_sec=min(1.0, remaining))
             except TimeoutError:
                 continue
-            if is_ws_noise_frame(self.exchange, raw):
+            if self.consume_ws_noise(raw, trade=False):
                 continue
             ev = self.handle_inbound_text(raw)
             if ev.kind in expect_kinds:
@@ -974,7 +1006,7 @@ class PrivateStreamRuntime:
                 raw = self.trade_socket.recv_text(timeout_sec=min(1.0, remaining))
             except TimeoutError:
                 continue
-            if is_ws_noise_frame(self.exchange, raw):
+            if self.consume_ws_noise(raw, trade=True):
                 continue
             try:
                 obj = json.loads(raw)

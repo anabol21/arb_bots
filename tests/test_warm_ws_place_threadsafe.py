@@ -705,5 +705,289 @@ class PrivateHeartbeatSilenceTests(unittest.TestCase):
             session.stop()
 
 
+def _is_app_ping_frame(frame: str) -> bool:
+    return frame == "ping" or '"op":"ping"' in frame.replace(" ", "")
+
+
+class WarmPostHandshakeHeartbeatTests(unittest.TestCase):
+    """OKX ~30s idle close: ping immediately after handshake, log send failures."""
+
+    def tearDown(self) -> None:
+        from app.bot.private.ws_warm_session import clear_process_warm_session
+
+        clear_process_warm_session(stop=True)
+
+    def _live_env(self, td: str) -> dict:
+        from app.bot.private.secrets import LIVE_KEY_NAMES
+
+        live_env = Path(td) / "bbot-private-live.env"
+        live_env.write_text(
+            "\n".join(f"{n}=v{i}" for i, n in enumerate(LIVE_KEY_NAMES)) + "\n",
+            encoding="utf-8",
+        )
+        return {
+            "VENUE": "live",
+            "LIVE_ORDERS": "1",
+            "BBOT_PRIVATE_ENV_FILE": str(live_env),
+            "BBOT_PRIVATE_DATA_ROOT": str(Path(td) / "data"),
+        }
+
+    def _push_hs(self, priv, trade, *, okx: bool) -> None:
+        if okx:
+            priv.push_inbound(json.dumps({"event": "login", "code": "0"}))
+            priv.push_inbound(
+                json.dumps(
+                    {"event": "subscribe", "code": "0", "arg": {"channel": "orders"}}
+                )
+            )
+            trade.push_inbound(json.dumps({"event": "login", "code": "0"}))
+        else:
+            priv.push_inbound(json.dumps({"op": "auth", "success": True, "retCode": 0}))
+            priv.push_inbound(json.dumps({"op": "subscribe", "success": True}))
+            trade.push_inbound(json.dumps({"op": "auth", "success": True, "retCode": 0}))
+
+    def _make_bundle(self):
+        from app.bot.private.ws_socket import FakePrivateWsSocket
+        from app.bot.private.ws_warm_session import WarmSocketBundle
+
+        bpriv = FakePrivateWsSocket()
+        btrade = FakePrivateWsSocket(exchange="bybit")
+        opriv = FakePrivateWsSocket()
+        otrade = FakePrivateWsSocket(exchange="okx")
+        self._push_hs(bpriv, btrade, okx=False)
+        self._push_hs(opriv, otrade, okx=True)
+        return WarmSocketBundle(
+            bybit_private=bpriv,
+            bybit_trade=btrade,
+            okx_private=opriv,
+            okx_trade=otrade,
+        )
+
+    def _assert_bundle_has_immediate_pings(self, bundle, *, msg: str) -> None:
+        sockets = (
+            ("bybit_private", bundle.bybit_private),
+            ("bybit_trade", bundle.bybit_trade),
+            ("okx_private", bundle.okx_private),
+            ("okx_trade", bundle.okx_trade),
+        )
+        for name, sock in sockets:
+            pings = [f for f in sock.outbox if _is_app_ping_frame(f)]
+            self.assertGreaterEqual(
+                len(pings),
+                1,
+                f"{msg}: {name} outbox={list(sock.outbox)!r}",
+            )
+
+    def test_default_heartbeat_interval_under_okx_idle(self) -> None:
+        from app.bot.private.ws_warm_session import _DEFAULT_HEARTBEAT_EVERY_SEC
+
+        self.assertEqual(_DEFAULT_HEARTBEAT_EVERY_SEC, 10.0)
+        self.assertLess(_DEFAULT_HEARTBEAT_EVERY_SEC, 30.0)
+
+    def test_start_sends_immediate_private_and_trade_heartbeats(self) -> None:
+        from app.bot.private.selftest import W2PrivateWsTests
+        from app.bot.private.ws_private import RestReseedResult
+        from app.bot.private.ws_warm_session import start_warm_private_session
+
+        with tempfile.TemporaryDirectory() as td:
+            env = self._live_env(td)
+            Path(env["BBOT_PRIVATE_DATA_ROOT"]).mkdir(parents=True, exist_ok=True)
+            bundles: list = []
+
+            def provider():
+                bundle = self._make_bundle()
+                bundles.append(bundle)
+                return bundle
+
+            session = start_warm_private_session(
+                env=env,
+                bybit_credentials=W2PrivateWsTests()._creds(),
+                okx_credentials=W2PrivateWsTests()._creds(okx=True),
+                socket_provider=provider,
+                rest_probe_fn=lambda **_: RestReseedResult(matched=True),
+                attach=True,
+                keepalive=False,
+                heartbeat_every_sec=3600.0,
+                silence_timeout_sec=30.0,
+            )
+            self.assertEqual(len(bundles), 1)
+            self._assert_bundle_has_immediate_pings(
+                bundles[0],
+                msg="start/handshake must ping without waiting heartbeat_every_sec",
+            )
+            okx_priv_pings = [
+                f for f in bundles[0].okx_private.outbox if f == "ping"
+            ]
+            self.assertGreaterEqual(len(okx_priv_pings), 1)
+            self.assertEqual(session._handshake_count, 1)  # noqa: SLF001
+            session.stop()
+
+    def test_recover_sends_immediate_heartbeats(self) -> None:
+        from app.bot.private.selftest import W2PrivateWsTests
+        from app.bot.private.ws_private import RestReseedResult
+        from app.bot.private.ws_warm_session import start_warm_private_session
+
+        with tempfile.TemporaryDirectory() as td:
+            env = self._live_env(td)
+            Path(env["BBOT_PRIVATE_DATA_ROOT"]).mkdir(parents=True, exist_ok=True)
+            bundles: list = []
+
+            def provider():
+                bundle = self._make_bundle()
+                bundles.append(bundle)
+                return bundle
+
+            session = start_warm_private_session(
+                env=env,
+                bybit_credentials=W2PrivateWsTests()._creds(),
+                okx_credentials=W2PrivateWsTests()._creds(okx=True),
+                socket_provider=provider,
+                rest_probe_fn=lambda **_: RestReseedResult(matched=True),
+                attach=True,
+                keepalive=False,
+                heartbeat_every_sec=3600.0,
+                reconnect_base_sec=0.01,
+                reconnect_cap_sec=0.05,
+                silence_timeout_sec=30.0,
+            )
+            self.assertEqual(session._handshake_count, 1)  # noqa: SLF001
+            session.note_disconnect()
+            self.assertFalse(session.is_ready())
+            session._fail_attempt = 0  # noqa: SLF001
+            session._recover_with_backoff()  # noqa: SLF001
+            self.assertTrue(session.is_ready())
+            self.assertEqual(session._handshake_count, 2)  # noqa: SLF001
+            self.assertEqual(len(bundles), 2)
+            self._assert_bundle_has_immediate_pings(
+                bundles[1],
+                msg="recover handshake must ping immediately",
+            )
+            session.stop()
+
+    def test_ensure_ready_after_disconnect_sends_immediate_heartbeats(self) -> None:
+        from app.bot.private.selftest import W2PrivateWsTests
+        from app.bot.private.ws_private import RestReseedResult
+        from app.bot.private.ws_warm_session import start_warm_private_session
+
+        with tempfile.TemporaryDirectory() as td:
+            env = self._live_env(td)
+            Path(env["BBOT_PRIVATE_DATA_ROOT"]).mkdir(parents=True, exist_ok=True)
+            bundles: list = []
+
+            def provider():
+                bundle = self._make_bundle()
+                bundles.append(bundle)
+                return bundle
+
+            session = start_warm_private_session(
+                env=env,
+                bybit_credentials=W2PrivateWsTests()._creds(),
+                okx_credentials=W2PrivateWsTests()._creds(okx=True),
+                socket_provider=provider,
+                rest_probe_fn=lambda **_: RestReseedResult(matched=True),
+                attach=True,
+                keepalive=False,
+                heartbeat_every_sec=3600.0,
+                silence_timeout_sec=30.0,
+            )
+            session.note_disconnect()
+            session.ensure_ready()
+            self.assertEqual(len(bundles), 2)
+            self._assert_bundle_has_immediate_pings(
+                bundles[1],
+                msg="ensure_ready handshake must ping immediately",
+            )
+            session.stop()
+
+    def test_keepalive_heartbeat_failure_logs_and_disconnects_that_venue(self) -> None:
+        from app.bot.private.selftest import W2PrivateWsTests
+        from app.bot.private.ws_private import RestReseedResult
+        from app.bot.private.ws_socket import FakePrivateWsSocket
+        from app.bot.private.ws_warm_session import start_warm_private_session
+
+        with tempfile.TemporaryDirectory() as td:
+            env = self._live_env(td)
+            Path(env["BBOT_PRIVATE_DATA_ROOT"]).mkdir(parents=True, exist_ok=True)
+            session = start_warm_private_session(
+                env=env,
+                bybit_credentials=W2PrivateWsTests()._creds(),
+                okx_credentials=W2PrivateWsTests()._creds(okx=True),
+                socket_provider=lambda: self._make_bundle(),
+                rest_probe_fn=lambda **_: RestReseedResult(matched=True),
+                attach=True,
+                keepalive=False,
+                heartbeat_every_sec=0.01,
+                silence_timeout_sec=30.0,
+            )
+            okx_priv = session.okx_runtime.private_socket
+            bybit_priv = session.bybit_runtime.private_socket
+            assert isinstance(okx_priv, FakePrivateWsSocket)
+            assert isinstance(bybit_priv, FakePrivateWsSocket)
+            orig = okx_priv.send_text
+
+            def boom(text: str) -> None:
+                if text == "ping":
+                    raise ConnectionError("okx private idle close")
+                orig(text)
+
+            okx_priv.send_text = boom  # type: ignore[method-assign]
+            session._last_hb_mono = 0.0  # noqa: SLF001
+            with self.assertLogs("bbot.private.ws_warm", level="WARNING") as cm:
+                session._keepalive_tick()  # noqa: SLF001
+            joined = "\n".join(cm.output)
+            self.assertIn("warm_heartbeat_send_failed", joined)
+            self.assertIn("ConnectionError", joined)
+            self.assertIn("okx private idle close", joined)
+            self.assertIn("exchange=okx", joined)
+            self.assertIsNone(session.okx_runtime.private_socket)
+            self.assertIsNotNone(session.bybit_runtime.private_socket)
+            self.assertTrue(bybit_priv.connected)
+            session.stop()
+
+    def test_okx_inbound_literal_ping_replies_pong(self) -> None:
+        from app.bot.private.selftest import W2PrivateWsTests
+
+        with tempfile.TemporaryDirectory() as td:
+            journal = W2PrivateWsTests()._journal(td)
+            rt, priv, trade = W2PrivateWsTests()._runtime(
+                journal, exchange="okx", symbol="BTC-USDT-SWAP"
+            )
+            parsed = rt.handle_inbound_text("ping")
+            self.assertEqual(parsed.kind, "heartbeat")
+            self.assertIn("pong", priv.outbox)
+            self.assertNotIn("pong", trade.outbox)
+            self.assertTrue(rt.consume_ws_noise("ping", trade=True))
+            self.assertIn("pong", trade.outbox)
+
+    def test_keepalive_trade_drain_pongs_okx_literal_ping(self) -> None:
+        from app.bot.private.selftest import W2PrivateWsTests
+        from app.bot.private.ws_private import RestReseedResult
+        from app.bot.private.ws_socket import FakePrivateWsSocket
+        from app.bot.private.ws_warm_session import start_warm_private_session
+
+        with tempfile.TemporaryDirectory() as td:
+            env = self._live_env(td)
+            Path(env["BBOT_PRIVATE_DATA_ROOT"]).mkdir(parents=True, exist_ok=True)
+            session = start_warm_private_session(
+                env=env,
+                bybit_credentials=W2PrivateWsTests()._creds(),
+                okx_credentials=W2PrivateWsTests()._creds(okx=True),
+                socket_provider=lambda: self._make_bundle(),
+                rest_probe_fn=lambda **_: RestReseedResult(matched=True),
+                attach=True,
+                keepalive=False,
+                heartbeat_every_sec=3600.0,
+                silence_timeout_sec=30.0,
+            )
+            trade = session.okx_runtime.trade_socket
+            assert isinstance(trade, FakePrivateWsSocket)
+            before = list(trade.outbox)
+            trade.push_inbound("ping")
+            session._keepalive_tick()  # noqa: SLF001
+            self.assertIn("pong", trade.outbox)
+            self.assertEqual(before.count("pong"), 0)
+            session.stop()
+
+
 if __name__ == "__main__":
     unittest.main()

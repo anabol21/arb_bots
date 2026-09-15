@@ -78,10 +78,22 @@ LOG = logging.getLogger("bbot.private.ws_warm")
 # Public-style bounded exponential backoff (see app/bot/ws_books.py).
 _RECONNECT_BASE_SEC = 5.0
 _RECONNECT_CAP_SEC = 60.0
-_DEFAULT_HEARTBEAT_EVERY_SEC = 15.0
+# OKX private WS idle-closes around 30s without a client ping. 10s leaves
+# headroom after handshake without changing the 45s silence timeout.
+_DEFAULT_HEARTBEAT_EVERY_SEC = 10.0
 _DEFAULT_POLL_SEC = 1.0
 _DEFAULT_SILENCE_TIMEOUT_SEC = 45.0
 _DEFAULT_RECV_TIMEOUT_SEC = 0.2
+_HEARTBEAT_ERR_MSG_MAX = 160
+
+
+def _heartbeat_err_text(exc: BaseException) -> str:
+    """Type + truncated message for logs. Never frames/secrets/payloads."""
+    msg = " ".join(str(exc).split())
+    if len(msg) > _HEARTBEAT_ERR_MSG_MAX:
+        msg = msg[:_HEARTBEAT_ERR_MSG_MAX] + "..."
+    name = type(exc).__name__
+    return f"{name}:{msg}" if msg else name
 
 
 def reconnect_sleep_sec(
@@ -477,11 +489,7 @@ class PrivateWarmSession:
             now = time.monotonic()
             if (now - self._last_hb_mono) >= float(self.heartbeat_every_sec):
                 for rt in (self.bybit_runtime, self.okx_runtime):
-                    try:
-                        rt.send_heartbeat()
-                        rt.send_trade_heartbeat()
-                    except Exception:  # noqa: BLE001
-                        self.note_disconnect()
+                    if not self._send_runtime_heartbeats(rt, phase="keepalive"):
                         return
                 self._last_hb_mono = now
         # recv_text stays outside ``_lock`` so place_io_section can bump
@@ -561,6 +569,7 @@ class PrivateWarmSession:
                     return False
                 rt.note_trade_activity()
             if is_ws_noise_frame(rt.exchange, raw):
+                rt.maybe_reply_okx_ping(raw, trade=True)
                 continue
             rt.stash_trade_inbound(raw)
         return True
@@ -588,6 +597,25 @@ class PrivateWarmSession:
             env=self.env,
         )
 
+    def _send_runtime_heartbeats(
+        self, runtime: PrivateStreamRuntime, *, phase: str
+    ) -> bool:
+        """Send private+trade pings. False if this venue was disconnected."""
+        try:
+            runtime.send_heartbeat()
+            runtime.send_trade_heartbeat()
+        except Exception as exc:  # noqa: BLE001
+            LOG.warning(
+                "warm_heartbeat_send_failed phase=%s exchange=%s run_id=%s err=%s",
+                phase,
+                runtime.exchange,
+                self.run_id,
+                _heartbeat_err_text(exc),
+            )
+            self.note_disconnect(exchange=runtime.exchange)
+            return False
+        return True
+
     def _handshake_both(self) -> None:
         for runtime, exchange in (
             (self.bybit_runtime, "bybit"),
@@ -600,7 +628,14 @@ class PrivateWarmSession:
             )
             if err is not None:
                 raise RuntimeError(f"warm handshake failed exchange={exchange} err={err}")
+            # Reset the venue idle clock now. Waiting a full heartbeat_every_sec
+            # races OKX's ~30s client-ping close (login is earlier in this call).
+            if not self._send_runtime_heartbeats(runtime, phase="post_handshake"):
+                raise RuntimeError(
+                    f"warm post-handshake heartbeat failed exchange={exchange}"
+                )
         self._handshake_count += 1
+        self._last_hb_mono = time.monotonic()
 
 
 _PROCESS_SESSION: Optional[PrivateWarmSession] = None
