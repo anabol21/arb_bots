@@ -489,6 +489,10 @@ class PrivateStreamRuntime:
         assert self.private_socket is not None
         msg = self.build_heartbeat()
         self.private_socket.send_text(msg.text)
+        # Successful send proves the private socket is still writable; idle
+        # silence uses this so a ping-only keepalive does not false-trip on
+        # quiet private channels (same as send_trade_heartbeat).
+        self.note_private_activity()
         _safe_log("heartbeat", exchange=self.exchange, gen=self.reconnect_generation)
 
     def send_trade_heartbeat(self) -> None:
@@ -519,6 +523,10 @@ class PrivateStreamRuntime:
             silence_timeout_sec * 1_000_000_000
         )
 
+    def note_private_activity(self) -> None:
+        """Refresh private silence clock (inbound frame or successful heartbeat)."""
+        self.last_recv_mono_ns = time.monotonic_ns()
+
     def note_trade_activity(self) -> None:
         self.last_trade_recv_mono_ns = time.monotonic_ns()
 
@@ -540,7 +548,7 @@ class PrivateStreamRuntime:
 
     def handle_inbound_text(self, text: str) -> ParsedStreamEvent:
         """Parse one inbound text frame categorically; never log raw text."""
-        self.last_recv_mono_ns = time.monotonic_ns()
+        self.note_private_activity()
         parsed = self._parse_inbound(text)
         if parsed.kind == "auth_ack":
             self.authenticated = True

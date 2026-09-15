@@ -8,6 +8,9 @@ mapping to post_dispatch_ambiguity ``unknown`` within ~1ms of place send.
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import gc
+import io
 import json
 import tempfile
 import threading
@@ -109,6 +112,70 @@ class WebsocketsClientSocketThreadSafeTests(unittest.TestCase):
         sock.close()
         done.set()
         srv.join(timeout=2.0)
+
+    def test_close_cancels_pending_keepalive_like_tasks(self) -> None:
+        """close() must cancel leftover loop tasks before loop.stop.
+
+        Production Sentry: asyncio «Task was destroyed but it is pending!»
+        on websockets Connection.keepalive / Connection.close during warm
+        teardowns. send/recv path is unchanged.
+        """
+        try:
+            import websockets
+        except ImportError:
+            self.skipTest("websockets not installed")
+
+        ready = threading.Event()
+        done = threading.Event()
+        cancelled = threading.Event()
+        hang_started = threading.Event()
+
+        async def _echo(ws) -> None:
+            async for msg in ws:
+                await ws.send(msg)
+
+        async def _serve() -> None:
+            async with websockets.serve(_echo, "127.0.0.1", 0) as server:
+                ready.port = server.sockets[0].getsockname()[1]  # type: ignore[attr-defined]
+                ready.set()
+                await asyncio.get_running_loop().run_in_executor(None, done.wait)
+
+        srv = threading.Thread(target=lambda: asyncio.run(_serve()), daemon=True)
+        srv.start()
+        self.assertTrue(ready.wait(timeout=5.0))
+        from app.bot.private.ws_socket import WebsocketsClientSocket
+
+        sock = WebsocketsClientSocket(f"ws://127.0.0.1:{int(ready.port)}")  # type: ignore[attr-defined]
+        sock.connect()
+        loop = sock._loop  # noqa: SLF001
+        self.assertIsNotNone(loop)
+
+        async def _hang() -> None:
+            hang_started.set()
+            try:
+                await asyncio.sleep(3600)
+            except asyncio.CancelledError:
+                cancelled.set()
+                raise
+
+        asyncio.run_coroutine_threadsafe(_hang(), loop)
+        self.assertTrue(hang_started.wait(timeout=2.0))
+
+        buf = io.StringIO()
+        with contextlib.redirect_stderr(buf):
+            sock.close()
+            gc.collect()
+        done.set()
+        srv.join(timeout=2.0)
+
+        self.assertTrue(
+            cancelled.is_set(),
+            "close must cancel leftover loop tasks before stopping the loop",
+        )
+        self.assertNotIn(
+            "Task was destroyed but it is pending",
+            buf.getvalue(),
+        )
 
 
 class WarmPlaceIoGuardTests(unittest.TestCase):
@@ -473,6 +540,168 @@ class WarmPlaceIoGuardTests(unittest.TestCase):
             )
             self.assertTrue(got.accepted)
             self.assertEqual(session.bybit_runtime._trade_inbound_stash, [])  # noqa: SLF001
+            session.stop()
+
+
+class PrivateHeartbeatSilenceTests(unittest.TestCase):
+    """Private silence clock must follow trade-side heartbeat accounting."""
+
+    def tearDown(self) -> None:
+        from app.bot.private.ws_warm_session import clear_process_warm_session
+
+        clear_process_warm_session(stop=True)
+
+    def _live_env(self, td: str) -> dict:
+        from app.bot.private.secrets import LIVE_KEY_NAMES
+
+        live_env = Path(td) / "bbot-private-live.env"
+        live_env.write_text(
+            "\n".join(f"{n}=v{i}" for i, n in enumerate(LIVE_KEY_NAMES)) + "\n",
+            encoding="utf-8",
+        )
+        return {
+            "VENUE": "live",
+            "LIVE_ORDERS": "1",
+            "BBOT_PRIVATE_ENV_FILE": str(live_env),
+            "BBOT_PRIVATE_DATA_ROOT": str(Path(td) / "data"),
+        }
+
+    def _push_hs(self, priv, trade, *, okx: bool) -> None:
+        if okx:
+            priv.push_inbound(json.dumps({"event": "login", "code": "0"}))
+            priv.push_inbound(
+                json.dumps(
+                    {"event": "subscribe", "code": "0", "arg": {"channel": "orders"}}
+                )
+            )
+            trade.push_inbound(json.dumps({"event": "login", "code": "0"}))
+        else:
+            priv.push_inbound(json.dumps({"op": "auth", "success": True, "retCode": 0}))
+            priv.push_inbound(json.dumps({"op": "subscribe", "success": True}))
+            trade.push_inbound(json.dumps({"op": "auth", "success": True, "retCode": 0}))
+
+    def _provider(self):
+        from app.bot.private.ws_socket import FakePrivateWsSocket
+        from app.bot.private.ws_warm_session import WarmSocketBundle
+
+        def provider() -> WarmSocketBundle:
+            bpriv = FakePrivateWsSocket()
+            btrade = FakePrivateWsSocket(exchange="bybit")
+            opriv = FakePrivateWsSocket()
+            otrade = FakePrivateWsSocket(exchange="okx")
+            self._push_hs(bpriv, btrade, okx=False)
+            self._push_hs(opriv, otrade, okx=True)
+            return WarmSocketBundle(
+                bybit_private=bpriv,
+                bybit_trade=btrade,
+                okx_private=opriv,
+                okx_trade=otrade,
+            )
+
+        return provider
+
+    def test_private_heartbeat_send_refreshes_silence_clock(self) -> None:
+        from app.bot.private.selftest import W2PrivateWsTests
+
+        with tempfile.TemporaryDirectory() as td:
+            journal = W2PrivateWsTests()._journal(td)
+            rt, priv, _trade = W2PrivateWsTests()._runtime(journal)
+            stale = time.monotonic_ns() - int(60 * 1_000_000_000)
+            rt.last_recv_mono_ns = stale
+            self.assertTrue(rt.silence_exceeded(silence_timeout_sec=45.0))
+            rt.send_heartbeat()
+            self.assertFalse(rt.silence_exceeded(silence_timeout_sec=45.0))
+            self.assertGreater(rt.last_recv_mono_ns, stale)
+            self.assertTrue(
+                any("ping" in frame.replace(" ", "") for frame in priv.outbox),
+                "private heartbeat must send an application ping",
+            )
+
+    def test_silence_still_trips_without_heartbeat_or_inbound(self) -> None:
+        from app.bot.private.selftest import W2PrivateWsTests
+
+        with tempfile.TemporaryDirectory() as td:
+            journal = W2PrivateWsTests()._journal(td)
+            rt, _priv, _trade = W2PrivateWsTests()._runtime(journal)
+            rt.last_recv_mono_ns = time.monotonic_ns() - int(60 * 1_000_000_000)
+            self.assertTrue(
+                rt.silence_exceeded(silence_timeout_sec=45.0),
+                "dead/idle private socket with no heartbeat must still trip silence",
+            )
+            self.assertFalse(
+                rt.silence_exceeded(
+                    silence_timeout_sec=45.0,
+                    now_mono_ns=rt.last_recv_mono_ns + 1,
+                )
+            )
+
+    def test_quiet_private_with_heartbeat_does_not_reconnect(self) -> None:
+        """Quiet private inbox + outbound ping must not storm warm_reconnected."""
+        from app.bot.private.selftest import W2PrivateWsTests
+        from app.bot.private.ws_private import RestReseedResult
+        from app.bot.private.ws_warm_session import start_warm_private_session
+
+        with tempfile.TemporaryDirectory() as td:
+            env = self._live_env(td)
+            Path(env["BBOT_PRIVATE_DATA_ROOT"]).mkdir(parents=True, exist_ok=True)
+            session = start_warm_private_session(
+                env=env,
+                bybit_credentials=W2PrivateWsTests()._creds(),
+                okx_credentials=W2PrivateWsTests()._creds(okx=True),
+                socket_provider=self._provider(),
+                rest_probe_fn=lambda **_: RestReseedResult(matched=True),
+                attach=True,
+                keepalive=True,
+                poll_sec=0.05,
+                heartbeat_every_sec=0.1,
+                silence_timeout_sec=1.5,
+                reconnect_base_sec=0.05,
+                reconnect_cap_sec=0.2,
+            )
+            self.assertEqual(session._handshake_count, 1)  # noqa: SLF001
+            time.sleep(2.0)
+            self.assertTrue(session.is_ready())
+            self.assertEqual(
+                session._handshake_count,  # noqa: SLF001
+                1,
+                "quiet private + heartbeat must not false-trip silence reconnect",
+            )
+            session.stop()
+
+    def test_idle_private_without_heartbeat_still_silence_reconnects(self) -> None:
+        from app.bot.private.selftest import W2PrivateWsTests
+        from app.bot.private.ws_private import RestReseedResult
+        from app.bot.private.ws_warm_session import start_warm_private_session
+
+        with tempfile.TemporaryDirectory() as td:
+            env = self._live_env(td)
+            Path(env["BBOT_PRIVATE_DATA_ROOT"]).mkdir(parents=True, exist_ok=True)
+            session = start_warm_private_session(
+                env=env,
+                bybit_credentials=W2PrivateWsTests()._creds(),
+                okx_credentials=W2PrivateWsTests()._creds(okx=True),
+                socket_provider=self._provider(),
+                rest_probe_fn=lambda **_: RestReseedResult(matched=True),
+                attach=True,
+                keepalive=True,
+                poll_sec=0.05,
+                heartbeat_every_sec=3600.0,
+                silence_timeout_sec=0.3,
+                reconnect_base_sec=0.05,
+                reconnect_cap_sec=0.2,
+            )
+            self.assertEqual(session._handshake_count, 1)  # noqa: SLF001
+            deadline = time.time() + 3.0
+            while (
+                time.time() < deadline
+                and session._handshake_count < 2  # noqa: SLF001
+            ):
+                time.sleep(0.05)
+            self.assertGreaterEqual(
+                session._handshake_count,  # noqa: SLF001
+                2,
+                "real idle (no heartbeat, no inbound) must still silence-reconnect",
+            )
             session.stop()
 
 
