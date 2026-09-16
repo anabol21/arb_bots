@@ -500,18 +500,19 @@ def send_signed_dual(
 
 
 def warm_trade_send_fn(session: Any) -> SendFn:
-    """``send_fn`` that writes to an already-warm trade socket. No recover."""
+    """``send_fn`` that writes to an already-warm trade socket. No recover.
+
+    Goes through ``WarmConnector.send_trade`` so the place path never takes a
+    recv lock (single-loop listen owns ``ws.recv``).
+    """
+    from app.bot.private.ws_warm_session import WarmConnector
+
+    connector = WarmConnector(session)
 
     def _send(item: TrivialSendItem) -> None:
-        runtime = (
-            session.bybit_runtime if item.venue == "bybit" else session.okx_runtime
-        )
-        sock = getattr(runtime, "trade_socket", None)
-        if sock is None:
-            raise TrivialSendError("trade socket missing")
-        sock.send_text(item.text)
-        note = getattr(runtime, "note_trade_activity", None)
-        if callable(note):
-            note()
+        try:
+            connector.send_trade(item.venue, item.text)
+        except RuntimeError as exc:
+            raise TrivialSendError(str(exc) or "trade socket missing") from exc
 
     return _send

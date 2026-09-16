@@ -106,6 +106,14 @@ outside the lock, and re-checks the counter before each socket (exits if
 place became inflight; stashes a trade frame already in hand). Contour B
 asyncio sender queues are unchanged. No VPS deploy in this change.
 
+**Single-loop private warm (2026-09-16).** `#50`/`#51` still left a
+thread-per-socket `WebsocketsClientSocket` with default library ping.
+VPS gear22 live-canary (`3036cf35`): OKX private `1011 keepalive ping
+timeout` ~every 30s → `warm_session_not_ready` / `trivial_send_failed:okx`.
+Production warm now uses one asyncio loop (`app/bot/private/ws_warm_loop.py`)
+and `ping_interval=None`. Contour B place uses `WarmConnector`. See
+[`b-private-warm-single-loop.md`](b-private-warm-single-loop.md).
+
 **`l1_at_send` / journal fill stamps ≠ venue fill latency.** Метки public
 journal `l1_at_send` и stub `Trade_Lat_ms=100` не измеряют время матча на
 бирже. Сравнивать place→fill нужно по private journal `request_sent` →
