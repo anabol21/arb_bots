@@ -6,6 +6,17 @@ Public L1 sockets already stay up for the life of the bot process
 holds one warm private session per process so a signal does not pay that
 round-trip.
 
+Production Contour B warm uses **one asyncio loop** for Bybit/OKX
+private+trade (``app.bot.private.ws_warm_loop``), matching public
+``_listen_loop``: concurrent connect / auth / subscribe / app heartbeat /
+recv / reconnect tasks. ``websockets.connect(..., ping_interval=None)`` so
+only application text ping/pong keeps OKX/Bybit alive. Live place uses
+``WarmConnector`` (ready / send_trade / ack drain) — no thread-per-socket
+and no lock held across recv.
+
+Hermetic tests still inject ``FakePrivateWsSocket`` and the polling
+keepalive thread. That path is the compat shim, not the live-canary path.
+
 Private subscribe instruments are the **same coin pool** as public L1 for the
 running profile (``BBOT_COINS`` / canary WAL+EDEN / gear2 live-size SOL+XRP).
 W6 TRUMP is harness-only when no profile pool is set — never a silent leftover.
@@ -69,6 +80,12 @@ from app.bot.private.wire_transcript import (
 )
 from app.bot.private.ws_socket import PrivateWsSocket
 from app.bot.private.ws_w4_postonly import _handshake_private_and_trade
+from app.bot.private.ws_warm_loop import (
+    clear_process_warm_loop,
+    ensure_process_warm_loop,
+    get_process_warm_loop,
+    is_loop_owned_socket,
+)
 
 LOG = logging.getLogger("bbot.private.ws_warm")
 
@@ -157,6 +174,14 @@ class PrivateWarmSession:
     # >0 while W6/W7 place+ack (or flatten) holds trade I/O; keepalive must not
     # recv/close sockets or steal trade ACK frames during that window.
     _place_inflight: int = 0
+    _loop_mode: bool = False
+    _loop_keepalive: bool = False
+    _venue_hs_lock: dict[str, threading.Lock] = field(
+        default_factory=lambda: {
+            "bybit": threading.Lock(),
+            "okx": threading.Lock(),
+        }
+    )
 
     @property
     def run_id(self) -> str:
@@ -164,8 +189,28 @@ class PrivateWarmSession:
 
     @property
     def keepalive_running(self) -> bool:
+        if self._loop_keepalive:
+            loop = self._warm_loop()
+            return loop is not None and loop.running
         t = self._keepalive_thread
         return t is not None and t.is_alive()
+
+    def _uses_warm_loop(self) -> bool:
+        if self._loop_mode:
+            return True
+        for rt in (self.bybit_runtime, self.okx_runtime):
+            for sock in (rt.private_socket, rt.trade_socket):
+                if is_loop_owned_socket(sock):
+                    return True
+        return False
+
+    def _warm_loop(self) -> Any:
+        for rt in (self.bybit_runtime, self.okx_runtime):
+            for sock in (rt.private_socket, rt.trade_socket):
+                owner = getattr(sock, "_owner", None)
+                if owner is not None:
+                    return owner
+        return get_process_warm_loop()
 
     @property
     def place_inflight(self) -> bool:
@@ -180,6 +225,10 @@ class PrivateWarmSession:
         ``recv_text``. Keepalive holds this lock only for flag checks (and a
         brief heartbeat send); it re-checks the counter before each socket
         recv and exits without draining trade if place is inflight.
+
+        Single-loop warm does not steal ACK frames (listen task owns recv and
+        queues trade inbound). The counter still defers reconnect/teardown
+        while place+ack is in flight.
         """
         with self._lock:
             if self._stopped:
@@ -256,16 +305,23 @@ class PrivateWarmSession:
                 targets = (self.okx_runtime,)
             else:
                 raise ValueError(f"exchange must be bybit|okx, got {exchange!r}")
+            loop_mode = self._uses_warm_loop()
             for rt in targets:
                 rt.mark_reconnect()
                 for sock in (rt.private_socket, rt.trade_socket):
-                    if sock is not None:
-                        try:
+                    if sock is None:
+                        continue
+                    try:
+                        drop = getattr(sock, "drop_connection", None)
+                        if loop_mode and callable(drop):
+                            drop()
+                        else:
                             sock.close()
-                        except Exception:  # noqa: BLE001
-                            pass
-                rt.private_socket = None
-                rt.trade_socket = None
+                    except Exception:  # noqa: BLE001
+                        pass
+                if not loop_mode:
+                    rt.private_socket = None
+                    rt.trade_socket = None
             LOG.info(
                 "warm_disconnect exchange=%s run_id=%s",
                 exchange or "both",
@@ -281,17 +337,19 @@ class PrivateWarmSession:
                 return
             self._bind_fresh_sockets()
             self._handshake_both()
+            self._mark_loop_handshake_done()
             self._started = True
             self._last_hb_mono = time.monotonic()
             LOG.info(
                 "warm_started run_id=%s handshake_count=%s ready=%s "
-                "coins=%s bybit=%s okx=%s",
+                "coins=%s bybit=%s okx=%s loop=%s",
                 self.run_id,
                 self._handshake_count,
                 self.is_ready(),
                 ",".join(self.coins) or "-",
                 ",".join(self.subscribed_bybit()) or self.bybit_symbol,
                 ",".join(self.subscribed_okx()) or self.okx_symbol,
+                self._loop_mode,
             )
 
     def ensure_ready(self) -> None:
@@ -300,6 +358,22 @@ class PrivateWarmSession:
         Prefer background keep-alive recovery. Callers on the send path should
         normally find the session already ready after an idle drop.
         """
+        if self._stopped:
+            raise RuntimeError("warm session already stopped")
+        if self.is_ready():
+            return
+        if self._uses_warm_loop():
+            if self._started:
+                self.note_disconnect()
+            deadline = time.monotonic() + max(5.0, float(self.ack_timeout_sec) * 4)
+            while time.monotonic() < deadline:
+                if self._stopped:
+                    raise RuntimeError("warm session already stopped")
+                if self.is_ready():
+                    self._fail_attempt = 0
+                    return
+                time.sleep(0.05)
+            raise RuntimeError("warm loop ensure_ready timeout")
         with self._lock:
             if self._stopped:
                 raise RuntimeError("warm session already stopped")
@@ -309,6 +383,7 @@ class PrivateWarmSession:
                 self.note_disconnect()
             self._bind_fresh_sockets()
             self._handshake_both()
+            self._mark_loop_handshake_done()
             self._started = True
             self._last_hb_mono = time.monotonic()
             self._fail_attempt = 0
@@ -317,6 +392,8 @@ class PrivateWarmSession:
         """Start background heartbeat + reconnect supervisor (public L1 analogue).
 
         Reconnects while idle — not lazily on the next send.
+        Single-loop warm: listen/heartbeat/reconnect tasks are already on the
+        shared loop; this only arms callbacks and the ready flag.
         """
         with self._lock:
             if self._stopped:
@@ -324,6 +401,20 @@ class PrivateWarmSession:
             if self.keepalive_running:
                 return
             self._external_stop = stop_event
+            if self._uses_warm_loop():
+                self._loop_keepalive = True
+                loop = self._warm_loop()
+                if loop is not None:
+                    loop.set_external_stop(stop_event)
+                    for slot in loop._slots.values():  # noqa: SLF001
+                        slot.heartbeat_every_sec = float(self.heartbeat_every_sec)
+                        slot.silence_timeout_sec = float(self.silence_timeout_sec)
+                        slot.place_inflight_fn = lambda: self._place_inflight > 0
+                        slot.stop_event = stop_event
+                LOG.info(
+                    "warm_keepalive_started run_id=%s mode=single_loop", self.run_id
+                )
+                return
             self._keepalive_stop.clear()
             t = threading.Thread(
                 target=self._keepalive_loop,
@@ -332,7 +423,7 @@ class PrivateWarmSession:
             )
             self._keepalive_thread = t
             t.start()
-            LOG.info("warm_keepalive_started run_id=%s", self.run_id)
+            LOG.info("warm_keepalive_started run_id=%s mode=thread", self.run_id)
 
     def stop_keepalive(self, *, join_timeout_sec: float = 2.0) -> None:
         """Stop the background supervisor thread."""
@@ -344,7 +435,10 @@ class PrivateWarmSession:
 
     def stop(self) -> None:
         """Close sockets and stop keep-alive. Does not delete journal history."""
+        uses_loop = self._uses_warm_loop()
+        owner_loop = self._warm_loop()
         self._stopped = True
+        self._loop_keepalive = False
         if self.wire is not None:
             self.wire._stop.set()  # noqa: SLF001 — halt wire mkdir/write before teardown
         self.stop_keepalive()
@@ -358,6 +452,13 @@ class PrivateWarmSession:
                             pass
                 rt.private_socket = None
                 rt.trade_socket = None
+        if uses_loop and owner_loop is not None:
+            try:
+                owner_loop.stop()
+            except Exception:  # noqa: BLE001
+                pass
+            if owner_loop is get_process_warm_loop():
+                clear_process_warm_loop()
         if self.wire is not None:
             try:
                 self.wire.flush()
@@ -404,6 +505,8 @@ class PrivateWarmSession:
 
     def _recover_with_backoff(self) -> None:
         if self._stop_requested():
+            return
+        if self._uses_warm_loop():
             return
         with self._lock:
             if self._place_inflight > 0:
@@ -596,6 +699,148 @@ class PrivateWarmSession:
             trade=bundle.okx_trade,
             env=self.env,
         )
+        self._loop_mode = any(
+            is_loop_owned_socket(sock)
+            for sock in (
+                bundle.bybit_private,
+                bundle.bybit_trade,
+                bundle.okx_private,
+                bundle.okx_trade,
+            )
+        )
+        if self._loop_mode:
+            self._attach_loop_slots()
+
+    def _attach_loop_slots(self) -> None:
+        loop = self._warm_loop()
+        if loop is None:
+            return
+        loop.set_external_stop(self._external_stop)
+        pairs = (
+            (self.bybit_runtime, "bybit", "private", self.bybit_runtime.private_socket),
+            (self.bybit_runtime, "bybit", "trade", self.bybit_runtime.trade_socket),
+            (self.okx_runtime, "okx", "private", self.okx_runtime.private_socket),
+            (self.okx_runtime, "okx", "trade", self.okx_runtime.trade_socket),
+        )
+        for runtime, exchange, channel, sock in pairs:
+            if sock is None or not is_loop_owned_socket(sock):
+                continue
+            sock.runtime = runtime
+            slot = loop.slot(exchange, channel)
+            if slot is None:
+                continue
+            slot.on_up = lambda s, ex=exchange: self._on_loop_socket_up(ex, s)
+            slot.on_down = lambda s, ex=exchange: self._on_loop_socket_down(ex, s)
+            slot.place_inflight_fn = lambda: self._place_inflight > 0
+            slot.heartbeat_every_sec = float(self.heartbeat_every_sec)
+            slot.silence_timeout_sec = float(self.silence_timeout_sec)
+            slot.stop_event = self._external_stop
+
+    def _on_loop_socket_up(self, exchange: str, sock: Any) -> None:
+        del sock
+        if self._stopped or not self._started:
+            return
+        threading.Thread(
+            target=self._handshake_venue_if_ready,
+            args=(exchange,),
+            name=f"bbot-warm-hs-{exchange}",
+            daemon=True,
+        ).start()
+
+    def _on_loop_socket_down(self, exchange: str, sock: Any) -> None:
+        del sock
+        if self._stopped:
+            return
+        threading.Thread(
+            target=self._handle_loop_socket_down,
+            args=(exchange,),
+            name=f"bbot-warm-down-{exchange}",
+            daemon=True,
+        ).start()
+
+    def _handle_loop_socket_down(self, exchange: str) -> None:
+        lock = self._venue_hs_lock[exchange]
+        with lock:
+            if self._stopped:
+                return
+            with self._lock:
+                if self._place_inflight > 0:
+                    return
+                rt = self.bybit_runtime if exchange == "bybit" else self.okx_runtime
+                if rt.authenticated:
+                    rt.mark_reconnect()
+                LOG.info(
+                    "warm_disconnect exchange=%s run_id=%s source=loop",
+                    exchange,
+                    self.run_id,
+                )
+
+    def _handshake_venue_if_ready(self, exchange: str) -> None:
+        lock = self._venue_hs_lock[exchange]
+        if not lock.acquire(blocking=False):
+            return
+        try:
+            if self._stopped:
+                return
+            rt = self.bybit_runtime if exchange == "bybit" else self.okx_runtime
+            priv = rt.private_socket
+            trade = rt.trade_socket
+            if priv is None or trade is None:
+                return
+            if not getattr(priv, "connected", False) or not getattr(
+                trade, "connected", False
+            ):
+                return
+            if (
+                rt.authenticated
+                and not rt.sends_blocked
+                and getattr(priv, "handshake_done", False)
+                and getattr(trade, "handshake_done", False)
+            ):
+                return
+            err = _handshake_private_and_trade(
+                rt,
+                exchange=exchange,
+                ack_timeout_sec=float(self.ack_timeout_sec),
+            )
+            if err is not None:
+                LOG.warning(
+                    "warm_loop_handshake_failed exchange=%s err=%s run_id=%s",
+                    exchange,
+                    err,
+                    self.run_id,
+                )
+                for sock in (priv, trade):
+                    drop = getattr(sock, "drop_connection", None)
+                    if callable(drop):
+                        drop()
+                return
+            if not self._send_runtime_heartbeats(rt, phase="post_handshake"):
+                return
+            for sock in (priv, trade):
+                if hasattr(sock, "handshake_done"):
+                    sock.handshake_done = True
+            self._handshake_count += 1
+            self._fail_attempt = 0
+            self._last_hb_mono = time.monotonic()
+            LOG.info(
+                "warm_reconnected exchange=%s run_id=%s handshake_count=%s",
+                exchange,
+                self.run_id,
+                self._handshake_count,
+            )
+        finally:
+            lock.release()
+
+    def _mark_loop_handshake_done(self) -> None:
+        for rt in (self.bybit_runtime, self.okx_runtime):
+            for sock in (rt.private_socket, rt.trade_socket):
+                if sock is not None and hasattr(sock, "handshake_done"):
+                    sock.handshake_done = True
+
+    def connector(self) -> "WarmConnector":
+        """Contour B live-place adapter for this session (no recv lock)."""
+        return WarmConnector(self)
 
     def _send_runtime_heartbeats(
         self, runtime: PrivateStreamRuntime, *, phase: str
@@ -641,9 +886,63 @@ class PrivateWarmSession:
 _PROCESS_SESSION: Optional[PrivateWarmSession] = None
 
 
+class WarmConnector:
+    """Live-place adapter: ready / send / ack drain without thread-per-socket.
+
+    Place path: ``send_trade`` schedules ``ws.send`` on the owner loop and
+    waits only for that send. It does not take a lock that recv holds.
+    ACK drain uses the listen-owned inbound queue (``recv_trade`` /
+    ``PrivateStreamRuntime.recv_trade_ack``).
+    """
+
+    def __init__(self, session: PrivateWarmSession) -> None:
+        self.session = session
+
+    def ready(self) -> bool:
+        return self.session.is_ready()
+
+    def place_io_section(self) -> Any:
+        return self.session.place_io_section()
+
+    def send_trade(self, venue: str, text: str) -> None:
+        key = str(venue).strip().lower()
+        if key not in {"bybit", "okx"}:
+            raise ValueError(f"send_trade venue must be bybit|okx, got {venue!r}")
+        runtime = (
+            self.session.bybit_runtime if key == "bybit" else self.session.okx_runtime
+        )
+        sock = runtime.trade_socket
+        if sock is None:
+            raise RuntimeError("trade socket missing")
+        sock.send_text(text)
+        note = getattr(runtime, "note_trade_activity", None)
+        if callable(note):
+            note()
+
+    def recv_trade(self, venue: str, *, timeout_sec: Optional[float] = None) -> str:
+        key = str(venue).strip().lower()
+        if key not in {"bybit", "okx"}:
+            raise ValueError(f"recv_trade venue must be bybit|okx, got {venue!r}")
+        runtime = (
+            self.session.bybit_runtime if key == "bybit" else self.session.okx_runtime
+        )
+        sock = runtime.trade_socket
+        if sock is None:
+            raise RuntimeError("trade socket missing")
+        return sock.recv_text(timeout_sec=timeout_sec)
+
+
 def get_process_warm_session() -> Optional[PrivateWarmSession]:
     """Return the process-attached warm session, if any."""
     return _PROCESS_SESSION
+
+
+def get_process_warm_connector() -> Optional[WarmConnector]:
+    """Return a live-place connector for the process warm session, if any."""
+    session = _PROCESS_SESSION
+    if session is None or session._stopped:  # noqa: SLF001
+        return None
+    return WarmConnector(session)
 
 
 def attach_process_warm_session(session: PrivateWarmSession) -> PrivateWarmSession:
@@ -686,26 +985,45 @@ def _creds_from_live_secrets(secrets: Any, exchange: str) -> LiveCredentials:
     )
 
 
-def _production_socket_provider() -> WarmSocketProvider:
-    """Bind websockets factory if needed and open private+trade sockets."""
-    from app.bot.private.ws_socket import (
-        WebsocketsSocketFactory,
-        bind_socket_factory,
-        get_socket_factory,
-    )
+def _production_socket_provider(
+    *,
+    heartbeat_every_sec: float = _DEFAULT_HEARTBEAT_EVERY_SEC,
+    silence_timeout_sec: float = _DEFAULT_SILENCE_TIMEOUT_SEC,
+    reconnect_base_sec: float = _RECONNECT_BASE_SEC,
+    reconnect_cap_sec: float = _RECONNECT_CAP_SEC,
+) -> WarmSocketProvider:
+    """Open private+trade sockets on the process-wide single asyncio loop.
 
-    factory = get_socket_factory()
-    if factory is None:
-        factory = WebsocketsSocketFactory()
-        bind_socket_factory(factory)
+    Compat: leftover ``WebsocketsSocketFactory`` bindings are ignored for this
+    production path. W4/W6 harnesses that still bind the old factory keep it
+    for their own ``open_private_socket`` calls.
+    """
+    loop = ensure_process_warm_loop(
+        heartbeat_every_sec=float(heartbeat_every_sec),
+        silence_timeout_sec=float(silence_timeout_sec),
+        reconnect_base_sec=float(reconnect_base_sec),
+        reconnect_cap_sec=float(reconnect_cap_sec),
+    )
     ep = endpoints_for_venue("live")
 
     def _open() -> WarmSocketBundle:
         return WarmSocketBundle(
-            bybit_private=factory.open(ep.bybit_private_ws),
-            bybit_trade=factory.open(trade_ws_url_for_exchange("bybit", ep)),
-            okx_private=factory.open(ep.okx_private_ws),
-            okx_trade=factory.open(trade_ws_url_for_exchange("okx", ep)),
+            bybit_private=loop.open(
+                ep.bybit_private_ws, exchange="bybit", channel="private"
+            ),
+            bybit_trade=loop.open(
+                trade_ws_url_for_exchange("bybit", ep),
+                exchange="bybit",
+                channel="trade",
+            ),
+            okx_private=loop.open(
+                ep.okx_private_ws, exchange="okx", channel="private"
+            ),
+            okx_trade=loop.open(
+                trade_ws_url_for_exchange("okx", ep),
+                exchange="okx",
+                channel="trade",
+            ),
         )
 
     return _open
@@ -937,7 +1255,14 @@ def start_warm_private_for_bot_process(
             okx_credentials = _creds_from_live_secrets(secrets, "okx")
 
     provider = (
-        socket_provider if socket_provider is not None else _production_socket_provider()
+        socket_provider
+        if socket_provider is not None
+        else _production_socket_provider(
+            heartbeat_every_sec=float(heartbeat_every_sec),
+            silence_timeout_sec=float(silence_timeout_sec),
+            reconnect_base_sec=float(reconnect_base_sec),
+            reconnect_cap_sec=float(reconnect_cap_sec),
+        )
     )
     return start_warm_private_session(
         env=e,

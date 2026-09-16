@@ -4,11 +4,18 @@ Default CLI never binds a factory and never opens a network socket.
 Tests inject ``FakePrivateWsSocket`` only. Production may bind
 ``WebsocketsSocketFactory`` (lazy ``websockets`` import) only after gates.
 
-``WebsocketsClientSocket`` owns a dedicated asyncio loop thread per socket.
-All send/recv/close coroutines are submitted via
-``asyncio.run_coroutine_threadsafe`` under a per-socket lock so warm
-keepalive and W6 parallel-place worker threads never call
-``loop.run_until_complete`` across threads (unsafe with asyncio/websockets).
+Contour B private warm production path uses one shared asyncio loop
+(``app.bot.private.ws_warm_loop``) with listen-owned recv. This module
+still provides:
+
+- ``FakePrivateWsSocket`` for hermetic tests;
+- ``WebsocketsClientSocket`` as a **compat shim** (W4/W6 harness, one
+  loop thread per socket). Compat connects with ``ping_interval=None``
+  so OKX/Bybit stay on application text ping, not library protocol ping.
+
+``WebsocketsClientSocket`` send/recv/close coroutines are submitted via
+``asyncio.run_coroutine_threadsafe`` under a per-socket lock so leftover
+harness threads never call ``loop.run_until_complete`` across threads.
 ``close()`` cancels leftover keepalive/close tasks before stopping the loop
 so asyncio does not log «Task was destroyed but it is pending!».
 send/recv do not drain or wait on shutdown.
@@ -20,6 +27,18 @@ import concurrent.futures
 import threading
 from collections import deque
 from typing import Any, Deque, List, Optional, Protocol, runtime_checkable
+
+# Application text ping/pong keeps OKX/Bybit private sockets alive.
+# Library protocol ping (websockets default ~20s) is what produced
+# ``ConnectionClosedError: sent 1011 (internal error) keepalive ping timeout``
+# on OKX private. Public L1 (``ws_books.py``) still uses lib ping; do not
+# import this dict from there.
+PRIVATE_WS_CONNECT_KWARGS: dict[str, Any] = {
+    "max_size": 2**20,
+    "ping_interval": None,
+    "ping_timeout": None,
+    "close_timeout": 2,
+}
 
 
 @runtime_checkable
@@ -312,7 +331,9 @@ class WebsocketsClientSocket:
             self._start_loop_thread()
 
             async def _open() -> Any:
-                return await websockets.connect(self._url, max_size=2**20)
+                return await websockets.connect(
+                    self._url, **PRIVATE_WS_CONNECT_KWARGS
+                )
 
             self._conn = self._run_on_loop(_open(), timeout_sec=30.0)
             self._connected = True

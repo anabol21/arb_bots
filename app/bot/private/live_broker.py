@@ -450,8 +450,19 @@ class LiveBroker(StubBroker):
         )
 
         place_io = None
+        connector = None
+        try:
+            from app.bot.private.ws_warm_session import get_process_warm_connector
+
+            connector = get_process_warm_connector()
+        except Exception:  # noqa: BLE001
+            connector = None
         session = self._warm_session_or_none()
-        if session is not None:
+        if connector is not None:
+            if not connector.ready():
+                return "warm_session_not_ready"
+            place_io = connector.place_io_section()
+        elif session is not None:
             if not session.is_ready():
                 return "warm_session_not_ready"
             place_io = session.place_io_section()
