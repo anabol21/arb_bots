@@ -106,6 +106,41 @@ class PrivateWsConnectKwargsTests(unittest.TestCase):
         self.assertIsNone(PRIVATE_WS_CONNECT_KWARGS["ping_timeout"])
         self.assertEqual(PRIVATE_WS_CONNECT_KWARGS["max_size"], 2**20)
 
+    def test_loop_native_connect_disables_lib_ping(self) -> None:
+        from app.bot.private.ws_socket import PRIVATE_WS_CONNECT_KWARGS
+        from app.bot.private.ws_warm_loop import PrivateWarmLoop
+
+        try:
+            import websockets
+        except ImportError:
+            self.skipTest("websockets not installed")
+
+        captured: dict[str, Any] = {}
+
+        class _CM:
+            async def __aenter__(self) -> "_CM":
+                return self
+
+            async def __aexit__(self, *exc: object) -> None:
+                return None
+
+        def _connect(url: str, **kwargs: Any) -> _CM:
+            captured.update(kwargs)
+            captured["url"] = url
+            return _CM()
+
+        loop = PrivateWarmLoop()
+        with mock.patch.object(websockets, "connect", side_effect=_connect):
+            cm = loop._connect_cm("wss://example.test/private")  # noqa: SLF001
+        self.assertIsInstance(cm, _CM)
+        self.assertEqual(captured.get("url"), "wss://example.test/private")
+        self.assertIsNone(captured.get("ping_interval"))
+        self.assertIsNone(captured.get("ping_timeout"))
+        self.assertEqual(captured.get("max_size"), PRIVATE_WS_CONNECT_KWARGS["max_size"])
+        self.assertEqual(
+            captured.get("close_timeout"), PRIVATE_WS_CONNECT_KWARGS["close_timeout"]
+        )
+
     def test_compat_client_passes_ping_interval_none(self) -> None:
         try:
             import websockets  # noqa: F401
