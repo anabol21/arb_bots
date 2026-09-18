@@ -87,7 +87,11 @@ python3 validation/check_hot_add.py
 python3 validation/check_hot_add.py --live-rest
 ```
 
-Local success is not VPS success.
+Local success is not VPS success. Optional `--live-rest` hits public Bybit/OKX
+from this machine into a tmp delta; some cloud egress is CloudFront
+geo-blocked (HTTP 403). That is an environment limit, not a collector
+enable. Fixture tests cover intersection/diff/cap. Live REST belongs on
+the VPS sidecar, still without turning `SPREAD_HOT_ADD` on.
 
 ---
 
