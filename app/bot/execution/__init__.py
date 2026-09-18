@@ -1,6 +1,8 @@
 """Pure execution v2 domain layer.
 
 No sockets, secrets, production writes, systemd or live broker access.
+EV2-03 adds a non-owning same-loop transport kernel; importing it does not
+connect sockets or place orders.
 """
 
 from app.bot.execution.contracts import (
@@ -29,28 +31,60 @@ from app.bot.execution.state_machine import (
     needs_reconciliation,
     opens_allowed,
 )
+from app.bot.execution.transport import (
+    SCHEMA_VERSION as TRANSPORT_SCHEMA_VERSION,
+    CachedInstrument,
+    DispatchResult,
+    DispatchStatus,
+    ExecutionTransport,
+    FrozenStaticFrame,
+    InstrumentCache,
+    LoopOwnedTradeSocket,
+    PreparedDualLeg,
+    TransportError,
+    VenueWriteEvidence,
+    WriteOutcome,
+    declared_owner_loop,
+    prepare_dual_leg,
+    unsigned_frame_finalizer,
+)
 
 __all__ = [
     "SCHEMA_VERSION",
+    "TRANSPORT_SCHEMA_VERSION",
+    "CachedInstrument",
     "ContractValidationError",
+    "DispatchResult",
+    "DispatchStatus",
     "ExecutionEvent",
     "ExecutionEventType",
+    "ExecutionTransport",
+    "FrozenStaticFrame",
+    "InstrumentCache",
     "IntentAction",
     "InvalidTransition",
     "LegPlan",
     "LegState",
     "LegStatus",
+    "LoopOwnedTradeSocket",
+    "PreparedDualLeg",
     "SpreadDirection",
     "SpreadState",
     "SpreadStatus",
     "TradeIntent",
+    "TransportError",
     "Venue",
+    "VenueWriteEvidence",
+    "WriteOutcome",
     "apply_event",
     "apply_events",
     "assert_invariants",
+    "declared_owner_loop",
     "derive_client_id",
     "initial_spread_state",
     "is_proven_flat",
     "needs_reconciliation",
     "opens_allowed",
+    "prepare_dual_leg",
+    "unsigned_frame_finalizer",
 ]

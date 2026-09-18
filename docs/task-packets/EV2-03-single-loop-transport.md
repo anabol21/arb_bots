@@ -188,3 +188,137 @@ Stop and report instead of widening scope if:
 
 Leave changes uncommitted for Codex review and an independent Cursor critic.
 Do not push, access the VPS or start any canary.
+
+## Implementation evidence (2026-09-18)
+
+Local worktree only. No VPS access, no live credentials, no commit, no push.
+No network services and no live exchanges.
+
+Added / amended (allowed paths only):
+
+- `app/bot/execution/transport.py` (`bbot.execution.transport.v1`)
+- `app/bot/execution/__init__.py` (EV2-03 public API export only)
+- `tests/test_execution_transport.py`
+- this task packet (evidence appendix only)
+
+Existing private modules, live broker, runtime, collector, systemd and VPS
+paths were not edited. Stop conditions were not reached:
+`LoopOwnedSocket.asend(text)` already exists as the same-owner-loop send
+boundary; transport duck-types `owner_loop` or `_owner.loop` and never
+owns connect/auth/subscribe/reconnect/recv/close. Frames are finalized by
+an injected builder/signer (tests use `unsigned_frame_finalizer`; no secret
+persistence). OKX `instIdCode` is a required positive int on the immutable
+`InstrumentCache` snapshot and is not looked up in `dispatch()`.
+
+Locked in this kernel:
+
+- Exactly two `LegPlan` values (Bybit + OKX), same `intent_id`, EV2-02
+  `derive_client_id` as venue correlation / request id.
+- `dispatch()` schedules both `asend()` tasks before waiting; one slow or
+  failing write cannot prevent the peer attempt; no receive, ACK wait, or
+  retry.
+- Local `asend` completion is `write_completed`, never accepted/filled/open.
+- Cancellation after scheduling settles both children and returns
+  `DispatchStatus.CANCELLED` with no leftover tasks.
+- Foreign/mixed/unknown loop ownership and bad/stale/missing metadata fail
+  closed before either write.
+- Public `to_public_dict()` / `repr` carry only EV2 ids, venue, byte count,
+  timestamps, latency and allowlisted reason codes.
+
+Commands and counts (local Python 3.9.6):
+
+```text
+PYTHONPYCACHEPREFIX=./.pycache python3 -m py_compile \
+  app/bot/execution/transport.py tests/test_execution_transport.py
+# pass
+
+PYTHONPYCACHEPREFIX=./.pycache python3 -m unittest \
+  tests.test_execution_transport \
+  tests.test_execution_contracts \
+  tests.test_execution_state_machine -v
+# 136 tests, OK (transport 24, contracts+state machine 112 preserved)
+
+PYTHONPYCACHEPREFIX=./.pycache python3 -m unittest \
+  tests.test_warm_single_loop \
+  tests.test_warm_ws_place_threadsafe \
+  tests.test_dual_leg_ack \
+  tests.test_sentry_integration -v
+# 49 tests, OK (warm loop 8, warm place threadsafe 18, ACK 13, Sentry 10)
+
+python3 -m pytest tests/test_order_lease_sol_close.py -v
+# 3 passed
+
+git diff --check
+# pass (files left uncommitted for independent review)
+```
+
+New EV2-03 transport tests: 24.
+EV2-02 contracts/state machine: 112 preserved.
+Private warm/ACK/Sentry regression: 49.
+Lease close pytest: 3.
+Combined: 188.
+
+## Critic blocker fix evidence (2026-09-18)
+
+Local worktree only. No VPS access, no live credentials, no commit, no push.
+No `asyncio.shield`. `__init__.py` unchanged.
+
+Independent critic blockers addressed in `transport.py` + tests only:
+
+1. After both `asend` tasks exist, `dispatch()` loops on `CancelledError`
+   until both children are `done()`, re-cancelling any unfinished child each
+   pass, then returns `DispatchStatus.CANCELLED`. Repeated cancel cannot
+   escape or orphan `ev2-*-asend` tasks. Covered by
+   `test_double_cancel_while_both_fakes_blocked_leaves_no_pending_tasks`
+   (blocked fakes swallow the first child cancel so the second parent cancel
+   interrupts drain; `asyncio.all_tasks()` empty).
+2. Once send tasks exist, clock regression and child `TransportError` cannot
+   make `dispatch()` raise. `_write_one` keeps `WRITE_COMPLETED` /
+   `WRITE_FAILED` / `CANCELLED` if `asend` finished and stamps
+   `reason_code=clock_regression` on a bad post-write clock.
+   `_evidence_from_task` maps leftover child failures instead of re-raising.
+   `_chronometry` returns `(None, None)` post-write. Dispatch result
+   `reason_code` is `clock_regression` with per-venue evidence preserved.
+   Covered by scripted-clock tests
+   `test_clock_regression_after_both_asend_returns_completed_evidence` and
+   `test_clock_regression_versus_signal_after_writes_returns_result`.
+
+Commands and counts (local Python 3.9.6):
+
+```text
+PYTHONPYCACHEPREFIX=./.pycache python3 -m py_compile \
+  app/bot/execution/transport.py tests/test_execution_transport.py
+# pass
+
+PYTHONPYCACHEPREFIX=./.pycache python3 -m unittest \
+  tests.test_execution_transport \
+  tests.test_execution_contracts \
+  tests.test_execution_state_machine -v
+# 139 tests, OK (transport 27, contracts+state machine 112 preserved)
+
+PYTHONPYCACHEPREFIX=./.pycache python3 -m unittest \
+  tests.test_warm_single_loop \
+  tests.test_warm_ws_place_threadsafe \
+  tests.test_dual_leg_ack \
+  tests.test_sentry_integration -v
+# 49 tests, OK (warm loop 8, warm place threadsafe 18, ACK 13, Sentry 10)
+
+python3 -m pytest tests/test_order_lease_sol_close.py -v
+# 3 passed
+
+git diff --check
+# pass (files left uncommitted for independent review)
+```
+
+New EV2-03 transport tests: 27 (24 original + 3 critic-blocker cases).
+EV2-02 contracts/state machine: 112 preserved.
+Private warm/ACK/Sentry regression: 49.
+Lease close pytest: 3.
+Combined: 191.
+
+Independent Cursor critic (`cursor-grok-4.6-high-fast`) initially found two
+safety blockers: repeated cancellation could interrupt child-task cleanup,
+and post-write clock regression could raise without preserving per-venue
+evidence. The fix pass added double-cancel and post-write clock-regression
+tests, the full 191-test matrix remained green, and the independent re-critic
+returned `PASS` on 2026-09-18.
