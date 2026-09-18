@@ -1,4 +1,8 @@
-"""Universe CSV helpers. Live pair screen is take=yes."""
+"""Universe CSV helpers. Live pair screen is take=yes.
+
+Hot-add candidates live in a separate delta file (`universe_delta.py`).
+Discovery must not rewrite take=yes rows in this CSV.
+"""
 
 from __future__ import annotations
 
