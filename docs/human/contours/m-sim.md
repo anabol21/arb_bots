@@ -19,7 +19,13 @@ Replay history on disk to test decision rules. No VPS unit, no public sockets in
 ## How to open the Structurizr view
 
 Lite → title **Contour — Simulator** (key `m-sim`).  
-Mermaid: [`../exports/m-sim.md`](../exports/m-sim.md).
+Click **Прогон истории** for the code view. Mermaid: [`../exports/m-sim.md`](../exports/m-sim.md) (no click-through).
+
+Code views from this contour:
+
+- **Code — Прогон истории**
+
+Historical-tick / feature / trade tables have no code view.
 
 ## Legend
 

@@ -21,7 +21,14 @@ A thin, isolated collector that can subscribe extra coins **without** writing pr
 ## How to open the Structurizr view
 
 Lite → title **Contour — Canary prices** (key `d-hotadd-canary`).  
-Mermaid: [`../exports/d-hotadd-canary.md`](../exports/d-hotadd-canary.md).
+Click a process box for the code view. Mermaid: [`../exports/d-hotadd-canary.md`](../exports/d-hotadd-canary.md) (no click-through).
+
+Code views from this contour:
+
+- **Code — Поиск новых пар** (PR #53 `app/discovery/**`, not on `main`)
+- **Code — Сбор цен (изолированный)** (same collector script + PR #53 `app/utils/hot_add.py`)
+
+Cylinders (delta, drop, isolated ticks/spool/gaps) and the pipe have no code view.
 
 ## Legend
 

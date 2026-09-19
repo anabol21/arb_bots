@@ -22,7 +22,14 @@ The only coded shape that may put a dual-leg order on the private trading channe
 ## How to open the Structurizr view
 
 Lite → title **Contour — Live send** (key `b-live-send`).  
-Mermaid: [`../exports/b-live-send.md`](../exports/b-live-send.md).
+Click a process box for the code view. Mermaid: [`../exports/b-live-send.md`](../exports/b-live-send.md) (no click-through).
+
+Code views from this contour:
+
+- **Code — Решение и отправка (2 монеты)**
+- **Code — Решение и отправка (30 монет)**
+
+Order-queue pipes, order-journal cylinders, and «журнал провода» have no code view (wire **module** is on the 30-coin code view). W6 send path is off — not a code box.
 
 ## Legend
 

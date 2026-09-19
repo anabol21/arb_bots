@@ -19,7 +19,13 @@ Watch and journal 1 Hz decisions on public books **without** sending orders. Sam
 ## How to open the Structurizr view
 
 Lite → title **Contour — Canary B** (key `b-theta-would-send`).  
-Mermaid: [`../exports/b-theta-would-send.md`](../exports/b-theta-would-send.md).
+Click the process box for the code view. Mermaid: [`../exports/b-theta-would-send.md`](../exports/b-theta-would-send.md) (no click-through).
+
+Code views from this contour:
+
+- **Code — Решение раз в секунду, без отправки**
+
+Metrics and intent-journal cylinders have no code view. The VPS unit file is still not in git (unknown).
 
 ## Legend
 

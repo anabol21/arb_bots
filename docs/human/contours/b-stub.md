@@ -20,7 +20,16 @@ The original live asyncio bot: its **own** public books, a decision, a journal o
 ## How to open the Structurizr view
 
 Lite → title **Contour — Stub B** (key `b-stub`).  
-Mermaid: [`../exports/b-stub.md`](../exports/b-stub.md).
+Click a process box for the code view. Mermaid: [`../exports/b-stub.md`](../exports/b-stub.md) (no click-through).
+
+Code views from this contour:
+
+- **Code — Решение без отправки**
+- **Code — Копия журнала**
+- **Code — Решение без отправки (4 монеты)**
+- **Code — Копия журнала (4 монеты)**
+
+Intent-journal cylinders have no code view.
 
 ## Legend
 

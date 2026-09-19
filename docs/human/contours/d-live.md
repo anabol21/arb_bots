@@ -19,7 +19,17 @@ This is the production price collector: public books → files on the VPS → co
 ## How to open the Structurizr view
 
 Lite → title **Contour — Live prices** (key `d-live`).  
-Mermaid: [`../exports/d-live.md`](../exports/d-live.md).
+Click a process box for the code view. Mermaid: [`../exports/d-live.md`](../exports/d-live.md) (no click-through).
+
+Code views from this contour:
+
+- **Code — Сбор цен**
+- **Code — Уплотнение тиков**
+- **Code — Копия тиков**
+- **Code — Уплотнение баров**
+- **Code — Копия баров**
+
+Cylinders (тики, запас, пропуски, уплотнённые, бары) and the pipe (очередь записи) have no code view.
 
 ## Legend
 
