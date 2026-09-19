@@ -4,6 +4,8 @@ No sockets, secrets, production writes, systemd or live broker access.
 EV2-03 adds a non-owning same-loop transport kernel; importing it does not
 connect sockets or place orders.
 EV2-04 adds private event adapters; importing them performs no I/O.
+EV2-05 adds the WAL/projector/exporter kernel; importing it does not open
+files, start threads/tasks, read env, or initialize Sentry.
 """
 
 from app.bot.execution.adapters import (
@@ -29,6 +31,13 @@ from app.bot.execution.contracts import (
     TradeIntent,
     Venue,
     derive_client_id,
+)
+from app.bot.execution.exporters import (
+    InMemoryExporter,
+    MetricsSnapshot,
+    SentryEnvelope,
+    WalExportCursor,
+    map_lifecycle_to_sentry_envelope,
 )
 from app.bot.execution.state_machine import (
     InvalidTransition,
@@ -57,11 +66,25 @@ from app.bot.execution.transport import (
     prepare_dual_leg,
     unsigned_frame_finalizer,
 )
+from app.bot.execution.wal import (
+    SCHEMA_VERSION as WAL_SCHEMA_VERSION,
+    ExecutionWal,
+    InMemoryProjector,
+    ProjectionAck,
+    ReplayResult,
+    WalAppendAck,
+    WalDurableAck,
+    WalError,
+    WalHealth,
+    WalIntegrityError,
+    WalRecord,
+)
 
 __all__ = [
     "ADAPTER_SCHEMA_VERSION",
     "SCHEMA_VERSION",
     "TRANSPORT_SCHEMA_VERSION",
+    "WAL_SCHEMA_VERSION",
     "AdapterBatch",
     "AdapterError",
     "AdapterIssue",
@@ -73,7 +96,10 @@ __all__ = [
     "ExecutionEvent",
     "ExecutionEventType",
     "ExecutionTransport",
+    "ExecutionWal",
     "FrozenStaticFrame",
+    "InMemoryExporter",
+    "InMemoryProjector",
     "InstrumentCache",
     "IntentAction",
     "InvalidTransition",
@@ -81,8 +107,12 @@ __all__ = [
     "LegState",
     "LegStatus",
     "LoopOwnedTradeSocket",
+    "MetricsSnapshot",
     "PreparedDualLeg",
     "PrivateEventAdapter",
+    "ProjectionAck",
+    "ReplayResult",
+    "SentryEnvelope",
     "SpreadDirection",
     "SpreadState",
     "SpreadStatus",
@@ -90,6 +120,13 @@ __all__ = [
     "TransportError",
     "Venue",
     "VenueWriteEvidence",
+    "WalAppendAck",
+    "WalDurableAck",
+    "WalError",
+    "WalExportCursor",
+    "WalHealth",
+    "WalIntegrityError",
+    "WalRecord",
     "WriteOutcome",
     "apply_event",
     "apply_events",
@@ -98,6 +135,7 @@ __all__ = [
     "derive_client_id",
     "initial_spread_state",
     "is_proven_flat",
+    "map_lifecycle_to_sentry_envelope",
     "needs_reconciliation",
     "opens_allowed",
     "prepare_dual_leg",

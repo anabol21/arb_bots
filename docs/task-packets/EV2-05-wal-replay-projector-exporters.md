@@ -335,3 +335,280 @@ Stop and report instead of widening scope if:
 
 Leave implementation changes uncommitted for Codex review and an independent
 Cursor critic. Do not push, access the VPS or start any canary.
+
+## Implementation evidence (2026-09-19)
+
+Local worktree only. No VPS access, no live credentials, no commit, no push.
+No network services, PostgreSQL, Sentry SDK, sockets or live exchanges.
+
+Added / amended (allowed paths only):
+
+- `app/bot/execution/wal.py` (`bbot.execution.wal.v2`)
+- `app/bot/execution/exporters.py`
+- `app/bot/execution/__init__.py` (EV2-05 public API export only)
+- `tests/test_execution_wal.py`
+- `tests/test_execution_exporters.py`
+- this task packet (evidence appendix only)
+
+Frozen modules were not edited: `contracts.py`, `state_machine.py`,
+`adapters.py`, `transport.py`, `journal_v1.py`, `sentry_setup.py`, all
+`app/bot/private/**` behavior, runtime/strategy/collector, deploy/systemd,
+secrets and VPS paths. Stop conditions were not reached: cumulative
+quantity lives on EV2 `ExecutionEvent` payloads inside the sibling WAL
+schema; enqueue never fsyncs or talks to Sentry/PostgreSQL; restart
+opens stay blocked until a durable current-process `RECONCILIATION`
+token is marked; replay fails closed through the frozen EV2-02 FSM;
+tests use only temporary local directories.
+
+Locked in this kernel:
+
+- One global `wal_seq` per accepted enqueue; nacks never consume it.
+- Enqueue ack is `durable=false` and does no file/Sentry/projector/
+  exporter/env/thread work. File create/write/flush/fsync happen only
+  in explicit `drain_once` / `drain_all`.
+- Canonical JSONL hash-chain: genesis `prev_hash` is 64 zeroes;
+  `record_hash` covers the envelope excluding itself.
+- Reserved tail rejects only new OPEN `INTENT_ACCEPTED`; absolute full
+  nacks every event and latches hard-unhealthy.
+- Write/flush/fsync failure and injected crash hooks latch the writer
+  and never claim durability. After-fsync crash still commits the
+  watermark so a retry cannot duplicate a durable line.
+- Torn final line replays the valid prefix (`torn_tail=true`) and is
+  isolated to `wal.jsonl.torn` before a later append. Middle
+  corruption fails closed.
+- `ReplayResult.opens_allowed` is always false;
+  `requires_venue_reconciliation` is always true, including empty,
+  OPEN and FLAT reconstructions.
+- `InMemoryProjector` is idempotent on `(run_id, wal_seq, record_hash)`;
+  gap/conflict fail closed and do not change WAL durability.
+- Exporters consume durable `WalRecord` values only. Sink failure leaves
+  the cursor unmoved. Compatible OPEN intent maps to `theta_k1`/`open`;
+  `FLATNESS_PROVEN` maps to `close`. Rejects/ACKs/fills/recon stay
+  WAL-only. No SDK import, init, capture or flush.
+
+Commands and counts (local Python 3.9.6):
+
+```text
+PYTHONPYCACHEPREFIX=./.pycache python3 -m py_compile \
+  app/bot/execution/wal.py app/bot/execution/exporters.py \
+  tests/test_execution_wal.py tests/test_execution_exporters.py
+# pass
+
+PYTHONPYCACHEPREFIX=./.pycache python3 -m unittest \
+  tests.test_execution_wal \
+  tests.test_execution_exporters \
+  tests.test_execution_adapters \
+  tests.test_execution_transport \
+  tests.test_execution_contracts \
+  tests.test_execution_state_machine -v
+# 199 tests, OK (wal 23, exporters 9, adapters 28, transport 27,
+# contracts+state machine 112 preserved)
+
+PYTHONPYCACHEPREFIX=./.pycache python3 -m unittest \
+  tests.test_warm_single_loop \
+  tests.test_warm_ws_place_threadsafe \
+  tests.test_dual_leg_ack \
+  tests.test_wire_transcript \
+  tests.test_sentry_integration -v
+# 57 tests, OK (warm loop 8, warm place threadsafe 18, ACK 13,
+# wire transcript 8, Sentry 10)
+
+python3 -m pytest tests/test_order_lease_sol_close.py -v
+# 3 passed
+
+git diff --check
+# pass (files left uncommitted for independent review)
+```
+
+New EV2-05 tests: 32 (WAL 23 + exporters 9).
+EV2-04 adapter tests: 28 preserved.
+EV2-03 transport tests: 27 preserved.
+EV2-02 contracts/state machine: 112 preserved.
+Private warm/ACK/wire/Sentry regression: 57.
+Lease close pytest: 3.
+Combined: 259.
+
+## Repair evidence (2026-09-19)
+
+Local worktree only. No commit, no push, no VPS, no credentials, no
+network, no PostgreSQL, no Sentry SDK, no sockets, no live venues.
+Edited only allowed EV2-05 paths: `wal.py`, `exporters.py`, the two
+test modules, and this evidence appendix. Frozen contracts/FSM/
+adapters/transport/journal/Sentry/runtime were not edited.
+
+Six confirmed blockers repaired:
+
+1. Enqueue requires an explicit successful `replay()` scan on first
+   boot and restart. Enqueue before replay nacks with
+   `replay_required`, does not consume `wal_seq`, and does not touch
+   the filesystem. A restart cannot accept seq=1 against a durable
+   prefix.
+2. `health.blocks_opens` is true at the reserved-tail open watermark
+   (`depth >= C-R`) even after the venue gate is complete and without
+   `hard_full`.
+3. Accepting the C-th queued event immediately latches `hard_full`
+   and `blocks_opens`. Drain still persists the accepted prefix.
+   Further enqueue nacks `hard_unhealthy`.
+4. Durable current-process tokens are issued only for
+   `RECONCILIATION` with `matched=true` plus venue and leg. One venue
+   remains blocked. Only distinct fresh Bybit+OKX tokens complete the
+   global venue gate. `matched=false`, venue-less, leg-less and
+   historical tokens cannot. Unhealthy/lag still dominate.
+5. Public `WalRecord` validates exact schema/types/run/hash/event
+   consistency and the canonical `record_hash`. Projector and
+   exporter re-validate defensively. Same-key conflicts are tested
+   with two independently valid records.
+6. `InMemoryExporter` keeps close-intent coin/side and passes that
+   context into the mapper for `FLATNESS_PROVEN`. The pure mapper
+   accepts explicit close context or returns no envelope; it never
+   emits `coin=NA` / `side=NA`.
+
+Existing enqueue tests now call `replay()` first. Import and
+construction remain inert.
+
+Commands and counts (local Python 3.9.6):
+
+```text
+PYTHONPYCACHEPREFIX=./.pycache python3 -m py_compile \
+  app/bot/execution/wal.py app/bot/execution/exporters.py \
+  tests/test_execution_wal.py tests/test_execution_exporters.py
+# pass
+
+PYTHONPYCACHEPREFIX=./.pycache python3 -m unittest \
+  tests.test_execution_wal \
+  tests.test_execution_exporters \
+  tests.test_execution_adapters \
+  tests.test_execution_transport \
+  tests.test_execution_contracts \
+  tests.test_execution_state_machine -v
+# 209 tests, OK (wal 31, exporters 11, adapters 28, transport 27,
+# contracts+state machine 112 preserved)
+
+PYTHONPYCACHEPREFIX=./.pycache python3 -m unittest \
+  tests.test_warm_single_loop \
+  tests.test_warm_ws_place_threadsafe \
+  tests.test_dual_leg_ack \
+  tests.test_wire_transcript \
+  tests.test_sentry_integration -v
+# 57 tests, OK (warm loop 8, warm place threadsafe 18, ACK 13,
+# wire transcript 8, Sentry 10). First run of this block failed
+# once in frozen test_reconnect_does_not_false_trip_silence
+# (hs_after=1); immediate rerun of that test and of the full
+# 57-test block passed. Unrelated timing flake; file not edited.
+
+python3 -m pytest tests/test_order_lease_sol_close.py -v
+# 3 passed
+
+git diff --check
+# pass (files left uncommitted for independent review)
+```
+
+New EV2-05 tests: 42 (WAL 31 + exporters 11).
+EV2-04 adapter tests: 28 preserved.
+EV2-03 transport tests: 27 preserved.
+EV2-02 contracts/state machine: 112 preserved.
+Private warm/ACK/wire/Sentry regression: 57.
+Lease close pytest: 3.
+Combined: 269.
+
+## Second-review blocker repair evidence (2026-09-19)
+
+Local worktree only. No commit, no push, no VPS, no credentials, no
+network, no PostgreSQL, no Sentry SDK, no sockets, no live venues.
+Edited only allowed EV2-05 paths: `wal.py`, `exporters.py`, the two
+test modules, and this evidence appendix. Frozen contracts/FSM/
+adapters/transport/journal/Sentry/runtime were not edited.
+
+Four second-review blockers repaired:
+
+1. First-boot empty-IDLE clears the restart gate with two durable,
+   current-process, `matched=true` venue-wide `RECONCILIATION` events
+   (`venue` in `{OKX, BYBIT}`, `leg_id=None`). That prefix replays
+   through the frozen FSM as `IDLE`. Leg-scoped matched recon remains
+   token-eligible for active intents. Venue-less / `matched=false`
+   still issue no token. Distinct OKX+Bybit is still required.
+2. Marks bind to one `intent_id` for the current recon epoch. Tokens
+   from different intent ids never combine: the second mark raises
+   `intent_mismatch`, fails closed, and leaves the gate incomplete.
+   Same-intent first-boot and cross-intent (empty IDLE + after OPEN)
+   tests cover this.
+3. A current-process reconciliation epoch is advanced on durable
+   `STREAM_GENERATION_MISMATCH`. Outstanding/marked evidence is
+   invalidated, `venue_reconciliation_complete` is set false, and a
+   fresh same-intent two-venue pair is required. Pre-mismatch tokens
+   are rejected. A mismatch after a completed pair immediately makes
+   `health.blocks_opens` true.
+4. Public `map_lifecycle_to_sentry_envelope` identity inputs accept
+   only frozen-style coin `^[A-Z0-9]{2,16}$` and side `long|short`.
+   Secret-like, malformed, `NA`, lowercase and oversized inputs yield
+   no envelope and never appear in `repr` / public data. Exporter
+   close context from valid contract events is preserved.
+
+Replay-before-enqueue, reserved-tail / hard-full health, `WalRecord`
+validation, and the earlier six repairs remain intact.
+
+Commands and counts (local Python 3.9.6):
+
+```text
+PYTHONPYCACHEPREFIX=./.pycache python3 -m py_compile \
+  app/bot/execution/wal.py app/bot/execution/exporters.py \
+  tests/test_execution_wal.py tests/test_execution_exporters.py
+# pass
+
+PYTHONPYCACHEPREFIX=./.pycache python3 -m unittest \
+  tests.test_execution_wal \
+  tests.test_execution_exporters \
+  tests.test_execution_adapters \
+  tests.test_execution_transport \
+  tests.test_execution_contracts \
+  tests.test_execution_state_machine -v
+# 216 tests, OK (wal 36, exporters 13, adapters 28, transport 27,
+# contracts+state machine 112 preserved)
+
+PYTHONPYCACHEPREFIX=./.pycache python3 -m unittest \
+  tests.test_warm_single_loop \
+  tests.test_warm_ws_place_threadsafe \
+  tests.test_dual_leg_ack \
+  tests.test_wire_transcript \
+  tests.test_sentry_integration -v
+# 57 tests, OK (warm loop 8, warm place threadsafe 18, ACK 13,
+# wire transcript 8, Sentry 10)
+
+python3 -m pytest tests/test_order_lease_sol_close.py -v
+# 3 passed
+
+git diff --check
+# pass (files left uncommitted for independent review)
+```
+
+New EV2-05 tests: 49 (WAL 36 + exporters 13).
+EV2-04 adapter tests: 28 preserved.
+EV2-03 transport tests: 27 preserved.
+EV2-02 contracts/state machine: 112 preserved.
+Private warm/ACK/wire/Sentry regression: 57.
+Lease close pytest: 3.
+Combined: 276.
+
+## Independent critic acceptance (2026-09-19)
+
+Final read-only Cursor critic verdict: `PASS`.
+
+The critic independently re-probed mandatory replay-before-enqueue,
+reserved-tail and absolute-full health, strict public `WalRecord` validation,
+first-boot venue-wide OKX+Bybit reconciliation and fresh-process replay,
+cross-intent token rejection, generation-mismatch epoch invalidation, fresh
+post-mismatch reconciliation, close-intent identity preservation and
+secret-like mapper inputs. All previously reported blockers remained closed.
+
+Fault-path spot checks also passed: torn final suffix recovery, middle
+corruption rejection, after-fsync-before-ack recovery, projector/exporter
+idempotency, retryable sink failure, inert import/construction/enqueue and
+denied path enforcement. The diff contains exactly the six task-packet paths;
+frozen contracts, FSM, adapters, transport, journal v1, Sentry and private
+runtime modules remain unchanged.
+
+Acceptance evidence is local-only: 216 EV2 tests passed (36 WAL, 13 exporter,
+28 adapters, 27 transport and 112 contracts/state machine), 57 private
+regression tests passed, 3 lease tests passed, and `git diff --check` passed.
+No VPS, PostgreSQL, Sentry SDK, credentials, live venue or canary authority
+was used.
