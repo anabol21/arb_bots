@@ -1340,6 +1340,41 @@ class VenueReconciliationTokenTests(unittest.TestCase):
                     f"{historical.wal_seq}:{historical.record_hash}"
                 )
 
+    def test_begin_restart_advances_epoch_and_rejects_prior_tokens(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            path = Path(raw) / "wal.v2" / "wal.jsonl"
+            clock = Clock()
+            wal = _wal(path)
+            wal.replay()
+            prior_okx, prior_bybit = _mark_both_venues(wal, clock, venue_wide=True)
+            self.assertTrue(wal.health().venue_reconciliation_complete)
+            self.assertFalse(wal.health().blocks_opens)
+            wal.begin_restart()
+            self.assertFalse(wal.health().venue_reconciliation_complete)
+            self.assertTrue(wal.health().blocks_opens)
+            with self.assertRaises(WalError):
+                wal.mark_venue_reconciled(prior_okx)
+            with self.assertRaises(WalError):
+                wal.mark_venue_reconciled(prior_bybit)
+            fresh_okx = wal.enqueue(_recon(clock, venue=Venue.OKX))
+            fresh_okx_durable = wal.drain_once()
+            assert fresh_okx.accepted and fresh_okx_durable is not None
+            accepted = wal.mark_venue_reconciled(fresh_okx_durable.reconciliation_token)
+            self.assertEqual(accepted, Venue.OKX)
+            self.assertFalse(wal.health().venue_reconciliation_complete)
+            self.assertTrue(wal.health().blocks_opens)
+            fresh_bybit = wal.enqueue(_recon(clock, venue=Venue.BYBIT))
+            fresh_bybit_durable = wal.drain_once()
+            assert fresh_bybit.accepted and fresh_bybit_durable is not None
+            self.assertEqual(
+                wal.mark_venue_reconciled(fresh_bybit_durable.reconciliation_token),
+                Venue.BYBIT,
+            )
+            self.assertTrue(wal.health().venue_reconciliation_complete)
+            self.assertFalse(wal.health().blocks_opens)
+            self.assertNotEqual(fresh_okx_durable.reconciliation_token, prior_okx)
+            self.assertNotEqual(fresh_bybit_durable.reconciliation_token, prior_bybit)
+
 
 class WalRecordValidationTests(unittest.TestCase):
     def test_public_record_rejects_schema_type_run_and_hash_errors(self) -> None:

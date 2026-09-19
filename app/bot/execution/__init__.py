@@ -8,6 +8,8 @@ EV2-05 adds the WAL/projector/exporter kernel; importing it does not open
 files, start threads/tasks, read env, or initialize Sentry.
 EV2-06 adds the execution engine and risk gate; importing it does not
 acquire locks, open sockets, drain the WAL, or place orders.
+EV2-07 adds recovery/restart orchestration; importing it does not
+open sockets, drain the WAL, or place orders.
 """
 
 from app.bot.execution.adapters import (
@@ -66,6 +68,8 @@ from app.bot.execution.transport import (
     WriteOutcome,
     declared_owner_loop,
     prepare_dual_leg,
+    prepare_venue_action,
+    unsigned_cancel_finalizer,
     unsigned_frame_finalizer,
 )
 from app.bot.execution.engine import (
@@ -83,6 +87,24 @@ from app.bot.execution.ownership import (
     SCHEMA_VERSION as OWNERSHIP_SCHEMA_VERSION,
     FileOwnershipFence,
     OwnershipError,
+)
+from app.bot.execution.recovery import (
+    SCHEMA_VERSION as RECOVERY_SCHEMA_VERSION,
+    MAX_RECOVERY_STEPS,
+    RECOVERY_WORST_CASE_EVENTS,
+    PreparedVenueAction,
+    RecoveryActionKind,
+    RecoveryError,
+    RecoveryPlan,
+    RecoveryResult,
+    RecoveryStatus,
+    RestartLiveSnapshot,
+    RestartResult,
+    VenueActionKind,
+    VenueActionResult,
+    exposure_qty,
+    plan_recovery,
+    restart_correlation_id,
 )
 from app.bot.execution.wal import (
     SCHEMA_VERSION as WAL_SCHEMA_VERSION,
@@ -104,7 +126,10 @@ __all__ = [
     "ADAPTER_SCHEMA_VERSION",
     "ENGINE_SCHEMA_VERSION",
     "MAX_NOTIONAL_USDT",
+    "MAX_RECOVERY_STEPS",
     "OWNERSHIP_SCHEMA_VERSION",
+    "RECOVERY_SCHEMA_VERSION",
+    "RECOVERY_WORST_CASE_EVENTS",
     "SCHEMA_VERSION",
     "SUBMIT_WORST_CASE_EVENTS",
     "TRANSPORT_SCHEMA_VERSION",
@@ -138,7 +163,15 @@ __all__ = [
     "MetricsSnapshot",
     "OwnershipError",
     "PreparedDualLeg",
+    "PreparedVenueAction",
     "PrivateEventAdapter",
+    "RecoveryActionKind",
+    "RecoveryError",
+    "RecoveryPlan",
+    "RecoveryResult",
+    "RecoveryStatus",
+    "RestartLiveSnapshot",
+    "RestartResult",
     "ProjectionAck",
     "ReadinessSnapshot",
     "RiskPolicy",
@@ -152,6 +185,8 @@ __all__ = [
     "TradeIntent",
     "TransportError",
     "Venue",
+    "VenueActionKind",
+    "VenueActionResult",
     "VenueWriteEvidence",
     "WalAppendAck",
     "WalDurableAck",
@@ -167,11 +202,16 @@ __all__ = [
     "assert_invariants",
     "declared_owner_loop",
     "derive_client_id",
+    "exposure_qty",
     "initial_spread_state",
     "is_proven_flat",
     "map_lifecycle_to_sentry_envelope",
     "needs_reconciliation",
     "opens_allowed",
+    "plan_recovery",
     "prepare_dual_leg",
+    "prepare_venue_action",
+    "restart_correlation_id",
+    "unsigned_cancel_finalizer",
     "unsigned_frame_finalizer",
 ]

@@ -16,7 +16,7 @@ from enum import Enum
 from types import MappingProxyType
 from typing import Any, Callable, Mapping, Optional, Sequence
 
-from app.bot.execution.adapters import AdapterBatch
+from app.bot.execution.adapters import AdapterBatch, PrivateEventAdapter
 from app.bot.execution.contracts import (
     SCHEMA_VERSION as CONTRACT_SCHEMA_VERSION,
     ContractValidationError,
@@ -30,12 +30,31 @@ from app.bot.execution.contracts import (
     Venue,
     canonical_decimal,
     decimal_to_canonical,
+    derive_client_id,
 )
 from app.bot.execution.ownership import FileOwnershipFence, OwnershipError
+from app.bot.execution.recovery import (
+    RECOVERY_WORST_CASE_EVENTS,
+    RecoveryActionKind,
+    RecoveryLegFactory,
+    RecoveryPlan,
+    RecoveryResult,
+    RecoveryStatus,
+    RestartLiveSnapshot,
+    RestartResult,
+    SnapshotPort,
+    VenueActionKind,
+    VenueActionResult,
+    WalDrainPort,
+    exposure_qty,
+    plan_recovery,
+    restart_correlation_id,
+)
 from app.bot.execution.state_machine import (
     InvalidTransition,
     apply_event,
     initial_spread_state,
+    is_proven_flat,
     opens_allowed,
 )
 from app.bot.execution.transport import (
@@ -47,10 +66,12 @@ from app.bot.execution.transport import (
     VenueWriteEvidence,
     WriteOutcome,
     prepare_dual_leg,
+    prepare_venue_action,
 )
 from app.bot.execution.wal import (
     SUBMIT_WORST_CASE_EVENTS,
     ExecutionWal,
+    ReplayResult,
     WalError,
 )
 
@@ -429,6 +450,10 @@ class ExecutionEngine:
         ownership: FileOwnershipFence,
         monotonic_ns: MonotonicNs,
         state: Optional[SpreadState] = None,
+        recovery_factory: Optional[RecoveryLegFactory] = None,
+        adapter: Optional[PrivateEventAdapter] = None,
+        wal_drain: Optional[WalDrainPort] = None,
+        snapshot_provider: Optional[SnapshotPort] = None,
     ) -> None:
         if not isinstance(wal, ExecutionWal):
             raise EngineError("invalid_intent")
@@ -464,9 +489,25 @@ class ExecutionEngine:
         self._ownership = ownership
         self._ownership_claim = ownership.claim_engine()
         self._monotonic_ns = monotonic_ns
+        if recovery_factory is not None and not callable(recovery_factory):
+            raise EngineError("invalid_plan_set")
+        if adapter is not None and not isinstance(adapter, PrivateEventAdapter):
+            raise EngineError("adapter_invalid")
+        if wal_drain is not None and not callable(wal_drain):
+            raise EngineError("invalid_intent")
+        if snapshot_provider is not None and not callable(snapshot_provider):
+            raise EngineError("invalid_intent")
         self._state = state
         self._lock = asyncio.Lock()
         self._adapter_seeds: dict[str, int] = {}
+        self._recovery_factory = recovery_factory
+        self._adapter = adapter
+        self._wal_drain = wal_drain
+        self._snapshot_provider = snapshot_provider
+        self._recovery_attempts = 0
+        self._last_intent: Optional[TradeIntent] = None
+        self._primary_by_venue: dict[Venue, LegPlan] = {}
+        self._restart_unproven = False
         self._note_seeds((), state)
 
     @property
@@ -600,6 +641,8 @@ class ExecutionEngine:
             or not self._readiness.okx_private_ready
         ):
             return "private_stream_not_ready"
+        if self._restart_unproven:
+            return "opens_not_allowed"
         if not opens_allowed(self._state):
             return "opens_not_allowed"
         health = self._wal.health()
@@ -1018,6 +1061,9 @@ class ExecutionEngine:
             return self._reject(intent, "wal_capacity")
         if not self._commit_events((accepted_event,), accepted_state):
             return self._reject(intent, "wal_capacity")
+        if intent.action is IntentAction.OPEN:
+            self._remember_primary_plans(bybit, okx)
+        self._last_intent = intent
 
         try:
             self._ownership.assert_owned(self._ownership_claim)
@@ -1143,6 +1189,675 @@ class ExecutionEngine:
             applied_count=len(events),
             reason_code=None,
             recovery_required=self._state.recovery_required,
+        )
+
+    def _recovery_result(
+        self,
+        status: RecoveryStatus,
+        action: RecoveryActionKind,
+        reason_code: str,
+        *,
+        dispatch: Optional[VenueActionResult] = None,
+    ) -> RecoveryResult:
+        halted = self._state.status is SpreadStatus.HALTED
+        return RecoveryResult(
+            status=status,
+            reason_code=reason_code,
+            recovery_required=bool(self._state.recovery_required or halted),
+            halted=halted,
+            action=action,
+            dispatch=dispatch,
+        )
+
+    def _trade_ready(self, venue: Venue) -> bool:
+        if venue is Venue.BYBIT:
+            return self._readiness.bybit_trade_ready
+        return self._readiness.okx_trade_ready
+
+    def _both_private_ready(self) -> bool:
+        return self._readiness.bybit_private_ready and self._readiness.okx_private_ready
+
+    def _recovery_event(
+        self,
+        *,
+        intent_id: str,
+        event_type: ExecutionEventType,
+        sequence: int,
+        monotonic_ns: int,
+        venue: Optional[Venue],
+        leg_id: Optional[str],
+        payload: Mapping[str, Any],
+        dedupe: str,
+    ) -> ExecutionEvent:
+        return ExecutionEvent(
+            schema_version=CONTRACT_SCHEMA_VERSION,
+            event_id=_event_id(
+                intent_id,
+                event_type.value,
+                None if venue is None else venue.value,
+                leg_id,
+                sequence,
+                dedupe,
+            ),
+            event_type=event_type,
+            intent_id=intent_id,
+            run_id=self._run_id,
+            sequence=sequence,
+            monotonic_ns=monotonic_ns,
+            venue=venue,
+            leg_id=leg_id,
+            payload=payload,
+        )
+
+    def _plan_recovery_locked(self) -> RecoveryPlan:
+        return plan_recovery(
+            self._state,
+            self._readiness,
+            attempts=self._recovery_attempts,
+            wal_blocks_opens=self._wal.health().blocks_opens or self._restart_unproven,
+        )
+
+    async def plan_recovery(self) -> RecoveryPlan:
+        async with self._lock:
+            return self._plan_recovery_locked()
+
+    async def apply_recovery_step(self, plan: RecoveryPlan) -> RecoveryResult:
+        async with self._lock:
+            return await self._apply_recovery_locked(plan)
+
+    async def begin_restart(self, replay: ReplayResult) -> RestartResult:
+        async with self._lock:
+            if not isinstance(replay, ReplayResult):
+                raise EngineError("invalid_intent")
+            if replay.opens_allowed:
+                raise EngineError("opens_not_allowed")
+            state = replay.state
+            if not isinstance(state, SpreadState) or state.run_id != self._run_id:
+                raise EngineError("invalid_intent")
+            if self._state.last_sequence > state.last_sequence:
+                raise EngineError("adapter_transition")
+            self._state = state
+            self._adapter_seeds = {}
+            self._note_seeds((), state)
+            self._recovery_attempts = 0
+            self._last_intent = None
+            self._primary_by_venue = {}
+            self._restart_unproven = True
+            self._wal.begin_restart()
+            if self._adapter is not None:
+                self._adapter.reset_for_restart(
+                    last_sequences=dict(self._adapter_seeds),
+                    last_monotonic_ns=state.last_monotonic_ns,
+                )
+            return RestartResult(
+                replayed_status=state.status,
+                opens_allowed=False,
+                requires_reseed=True,
+                restart_intent_id=restart_correlation_id(state, self._run_id),
+                reason_code="restart_unproven",
+            )
+
+    async def acknowledge_reconciliation(self, token: str) -> None:
+        async with self._lock:
+            if self._wal_drain is not None:
+                self._wal_drain()
+            else:
+                self._wal.drain_all()
+            self._wal.mark_venue_reconciled(token)
+            if self._wal.health().venue_reconciliation_complete:
+                self._restart_unproven = False
+
+    async def _apply_recovery_locked(self, plan: RecoveryPlan) -> RecoveryResult:
+        if not isinstance(plan, RecoveryPlan):
+            return self._recovery_result(
+                RecoveryStatus.BLOCKED,
+                RecoveryActionKind.WAIT_RESEED,
+                "ambiguous_exposure",
+            )
+        try:
+            self._ownership.assert_owned(self._ownership_claim)
+        except OwnershipError:
+            return self._recovery_result(
+                RecoveryStatus.BLOCKED, plan.kind, "ownership_not_held"
+            )
+        current = self._plan_recovery_locked()
+        if current.kind is not plan.kind or current.venue is not plan.venue:
+            return self._recovery_result(
+                RecoveryStatus.BLOCKED, current.kind, current.reason_code
+            )
+        if current.kind is RecoveryActionKind.WAIT_RESEED:
+            return self._apply_wait_reseed_locked()
+        if current.kind is RecoveryActionKind.CANCEL_PEER:
+            return await self._apply_cancel_locked(current)
+        if current.kind is RecoveryActionKind.FLATTEN_FILLED:
+            return await self._apply_flatten_locked(current)
+        if current.kind is RecoveryActionKind.PROVE_FLAT:
+            return self._apply_prove_flat_locked()
+        if current.kind is RecoveryActionKind.HALT:
+            return self._apply_halt_locked()
+        return self._recovery_result(
+            RecoveryStatus.APPLIED, RecoveryActionKind.NOTHING, "nothing_to_do"
+        )
+
+    def _apply_wait_reseed_locked(self) -> RecoveryResult:
+        self._recovery_attempts += 1
+        idle_or_flat = (
+            self._state.status is SpreadStatus.IDLE and not self._state.legs
+        ) or (
+            self._state.status is SpreadStatus.FLAT and is_proven_flat(self._state)
+        )
+        if idle_or_flat:
+            snapshot = None
+            if self._snapshot_provider is not None:
+                try:
+                    snapshot = self._snapshot_provider()
+                except Exception:
+                    snapshot = None
+            if isinstance(snapshot, RestartLiveSnapshot) and snapshot.watch_set_flat:
+                emitted = self._emit_restart_recon_locked()
+                if emitted is not None:
+                    return emitted
+                return self._recovery_result(
+                    RecoveryStatus.BLOCKED,
+                    RecoveryActionKind.WAIT_RESEED,
+                    "reseed_failed",
+                )
+            return self._recovery_result(
+                RecoveryStatus.BLOCKED,
+                RecoveryActionKind.WAIT_RESEED,
+                "restart_unproven" if snapshot is not None else "wait_reseed",
+            )
+        return self._recovery_result(
+            RecoveryStatus.BLOCKED,
+            RecoveryActionKind.WAIT_RESEED,
+            "wait_reseed",
+        )
+
+    def _emit_restart_recon_locked(self) -> Optional[RecoveryResult]:
+        intent_id = restart_correlation_id(self._state, self._run_id)
+        if not self._wal.can_admit(2, open_intent=False):
+            return self._recovery_result(
+                RecoveryStatus.BLOCKED, RecoveryActionKind.WAIT_RESEED, "wal_capacity"
+            )
+        seq = self._state.last_sequence
+        events: list[ExecutionEvent] = []
+        for venue in (Venue.BYBIT, Venue.OKX):
+            seq += 1
+            mono = self._mono_at_least(None)
+            events.append(
+                self._recovery_event(
+                    intent_id=intent_id,
+                    event_type=ExecutionEventType.RECONCILIATION,
+                    sequence=seq,
+                    monotonic_ns=mono,
+                    venue=venue,
+                    leg_id=None,
+                    payload={"matched": True},
+                    dedupe=f"restart_recon:{venue.value}:{intent_id}",
+                )
+            )
+        folded = self._fold(events)
+        if folded is None:
+            return None
+        if not self._commit_events(events, folded):
+            return self._recovery_result(
+                RecoveryStatus.BLOCKED, RecoveryActionKind.WAIT_RESEED, "wal_capacity"
+            )
+        return self._recovery_result(
+            RecoveryStatus.APPLIED, RecoveryActionKind.WAIT_RESEED, "wait_reseed"
+        )
+
+    def _remember_primary_plans(self, bybit: LegPlan, okx: LegPlan) -> None:
+        if bybit.reduce_only or okx.reduce_only:
+            return
+        self._primary_by_venue = {Venue.BYBIT: bybit, Venue.OKX: okx}
+
+    def _trusted_primary(self, venue: Venue) -> Optional[LegPlan]:
+        if self._adapter is not None:
+            plan = self._adapter.primary_plan(venue)
+            if isinstance(plan, LegPlan) and not plan.reduce_only:
+                return plan
+        stored = self._primary_by_venue.get(venue)
+        if isinstance(stored, LegPlan) and not stored.reduce_only:
+            return stored
+        return None
+
+    def _cancel_matches_primary(self, factory: LegPlan, primary: LegPlan) -> bool:
+        return (
+            factory.venue is primary.venue
+            and factory.leg_id == primary.leg_id
+            and factory.instrument == primary.instrument
+            and factory.side == primary.side
+            and factory.client_id == primary.client_id
+            and not factory.reduce_only
+        )
+
+    def _flatten_matches_primary(
+        self, factory: LegPlan, primary: LegPlan, qty: Decimal
+    ) -> bool:
+        opposite = "sell" if primary.side == "buy" else "buy"
+        expected_cid = derive_client_id(
+            primary.intent_id, primary.venue, reduce_only=True
+        )
+        return (
+            factory.venue is primary.venue
+            and factory.leg_id == primary.leg_id
+            and factory.instrument == primary.instrument
+            and factory.side == opposite
+            and factory.reduce_only
+            and factory.client_id == expected_cid
+            and factory.quantity == qty
+        )
+
+    def _factory_plan(self, venue: Venue, kind: VenueActionKind) -> Optional[LegPlan]:
+        if self._recovery_factory is None:
+            return None
+        try:
+            plan = self._recovery_factory(self._state, venue, kind)
+        except (TypeError, ValueError, ContractValidationError, EngineError):
+            return None
+        if not isinstance(plan, LegPlan):
+            return None
+        if plan.venue is not venue:
+            return None
+        if self._state.intent_id is not None and plan.intent_id != self._state.intent_id:
+            return None
+        return plan
+
+    async def _apply_cancel_locked(self, plan: RecoveryPlan) -> RecoveryResult:
+        if plan.venue is None:
+            return self._recovery_result(
+                RecoveryStatus.BLOCKED, RecoveryActionKind.CANCEL_PEER, "cancel_failed"
+            )
+        if not self._trade_ready(plan.venue):
+            self._recovery_attempts += 1
+            return self._recovery_result(
+                RecoveryStatus.BLOCKED,
+                RecoveryActionKind.CANCEL_PEER,
+                "trade_socket_not_ready",
+            )
+        primary = self._trusted_primary(plan.venue)
+        if primary is None:
+            return self._recovery_result(
+                RecoveryStatus.BLOCKED, RecoveryActionKind.CANCEL_PEER, "cancel_failed"
+            )
+        factory_plan = self._factory_plan(plan.venue, VenueActionKind.CANCEL)
+        if factory_plan is None or not self._cancel_matches_primary(factory_plan, primary):
+            return self._recovery_result(
+                RecoveryStatus.BLOCKED, RecoveryActionKind.CANCEL_PEER, "cancel_failed"
+            )
+        peer = None
+        for leg in self._state.legs:
+            if leg.venue is plan.venue:
+                peer = leg
+                break
+        if peer is None or factory_plan.leg_id != peer.leg_id:
+            return self._recovery_result(
+                RecoveryStatus.BLOCKED, RecoveryActionKind.CANCEL_PEER, "cancel_failed"
+            )
+        intent_id = self._state.intent_id or factory_plan.intent_id
+        try:
+            prepared = prepare_venue_action(
+                factory_plan,
+                self._cache,
+                kind=VenueActionKind.CANCEL,
+                now_mono_ns=self._now(),
+                run_id=self._run_id,
+                intent=self._last_intent,
+            )
+        except TransportError:
+            return self._recovery_result(
+                RecoveryStatus.BLOCKED, RecoveryActionKind.CANCEL_PEER, "cancel_failed"
+            )
+        if not self._wal.can_admit(RECOVERY_WORST_CASE_EVENTS, open_intent=False):
+            return self._recovery_result(
+                RecoveryStatus.BLOCKED, RecoveryActionKind.CANCEL_PEER, "wal_capacity"
+            )
+        seq = self._state.last_sequence + 1
+        requested = self._recovery_event(
+            intent_id=intent_id,
+            event_type=ExecutionEventType.CANCEL_REQUESTED,
+            sequence=seq,
+            monotonic_ns=self._mono_at_least(None),
+            venue=plan.venue,
+            leg_id=peer.leg_id,
+            payload={},
+            dedupe=f"cancel_requested:{plan.venue.value}:{peer.leg_id}",
+        )
+        folded = self._fold((requested,))
+        if folded is None:
+            return self._recovery_result(
+                RecoveryStatus.BLOCKED, RecoveryActionKind.CANCEL_PEER, "cancel_failed"
+            )
+        if not self._commit_events((requested,), folded):
+            return self._recovery_result(
+                RecoveryStatus.BLOCKED, RecoveryActionKind.CANCEL_PEER, "wal_capacity"
+            )
+        try:
+            self._ownership.assert_owned(self._ownership_claim)
+        except OwnershipError:
+            return self._recovery_result(
+                RecoveryStatus.BLOCKED,
+                RecoveryActionKind.CANCEL_PEER,
+                "ownership_not_held",
+            )
+        self._recovery_attempts += 1
+        try:
+            result = await self._transport.dispatch_action(prepared)
+        except asyncio.CancelledError:
+            self._commit_started_uncertainty(
+                intent_id, plan.venue, peer.leg_id, started=False, halt=True
+            )
+            raise
+        except Exception:
+            return self._recovery_result(
+                RecoveryStatus.BLOCKED, RecoveryActionKind.CANCEL_PEER, "cancel_failed"
+            )
+        evidence = result.evidence
+        started = _write_representable(evidence)
+        if started and _write_uncertain(evidence):
+            self._commit_timeout(intent_id, plan.venue, peer.leg_id)
+            return self._recovery_result(
+                RecoveryStatus.BLOCKED,
+                RecoveryActionKind.CANCEL_PEER,
+                "cancel_failed",
+                dispatch=result,
+            )
+        if not started:
+            return self._recovery_result(
+                RecoveryStatus.BLOCKED,
+                RecoveryActionKind.CANCEL_PEER,
+                "cancel_failed",
+                dispatch=result,
+            )
+        return self._recovery_result(
+            RecoveryStatus.APPLIED,
+            RecoveryActionKind.CANCEL_PEER,
+            "peer_working",
+            dispatch=result,
+        )
+
+    async def _apply_flatten_locked(self, plan: RecoveryPlan) -> RecoveryResult:
+        if plan.venue is None:
+            return self._recovery_result(
+                RecoveryStatus.BLOCKED,
+                RecoveryActionKind.FLATTEN_FILLED,
+                "flatten_failed",
+            )
+        if not self._trade_ready(plan.venue):
+            self._recovery_attempts += 1
+            return self._recovery_result(
+                RecoveryStatus.BLOCKED,
+                RecoveryActionKind.FLATTEN_FILLED,
+                "trade_socket_not_ready",
+            )
+        filled = None
+        for leg in self._state.legs:
+            if leg.venue is plan.venue:
+                filled = leg
+                break
+        if filled is None or filled.reduce_only:
+            return self._recovery_result(
+                RecoveryStatus.BLOCKED,
+                RecoveryActionKind.FLATTEN_FILLED,
+                "flatten_failed",
+            )
+        qty = exposure_qty(filled, self._state.lot_tolerance)
+        if qty is None or qty <= 0:
+            return self._recovery_result(
+                RecoveryStatus.BLOCKED,
+                RecoveryActionKind.FLATTEN_FILLED,
+                "ambiguous_exposure",
+            )
+        primary = self._trusted_primary(plan.venue)
+        if primary is None:
+            return self._recovery_result(
+                RecoveryStatus.BLOCKED,
+                RecoveryActionKind.FLATTEN_FILLED,
+                "flatten_failed",
+            )
+        factory_plan = self._factory_plan(plan.venue, VenueActionKind.PLACE)
+        if factory_plan is None or not self._flatten_matches_primary(
+            factory_plan, primary, qty
+        ):
+            return self._recovery_result(
+                RecoveryStatus.BLOCKED,
+                RecoveryActionKind.FLATTEN_FILLED,
+                "flatten_failed",
+            )
+        if factory_plan.leg_id != filled.leg_id:
+            return self._recovery_result(
+                RecoveryStatus.BLOCKED,
+                RecoveryActionKind.FLATTEN_FILLED,
+                "flatten_failed",
+            )
+        if self._adapter is not None:
+            try:
+                self._adapter.bind_recovery_plan(factory_plan)
+            except Exception:
+                return self._recovery_result(
+                    RecoveryStatus.BLOCKED,
+                    RecoveryActionKind.FLATTEN_FILLED,
+                    "flatten_failed",
+                )
+        intent_id = self._state.intent_id or factory_plan.intent_id
+        try:
+            prepared = prepare_venue_action(
+                factory_plan,
+                self._cache,
+                kind=VenueActionKind.PLACE,
+                now_mono_ns=self._now(),
+                run_id=self._run_id,
+                intent=self._last_intent,
+            )
+        except TransportError:
+            return self._recovery_result(
+                RecoveryStatus.BLOCKED,
+                RecoveryActionKind.FLATTEN_FILLED,
+                "flatten_failed",
+            )
+        seq = self._state.last_sequence + 1
+        sent = self._request_sent_from_plan(intent_id, factory_plan, seq)
+        folded = self._fold((sent,))
+        if folded is None:
+            return self._recovery_result(
+                RecoveryStatus.BLOCKED,
+                RecoveryActionKind.FLATTEN_FILLED,
+                "flatten_failed",
+            )
+        if not self._wal.can_admit(RECOVERY_WORST_CASE_EVENTS, open_intent=False):
+            return self._recovery_result(
+                RecoveryStatus.BLOCKED,
+                RecoveryActionKind.FLATTEN_FILLED,
+                "wal_capacity",
+            )
+        # Enqueue is admission, not durability. A process crash before drain
+        # still depends on mandatory restart REST reseed and the deterministic
+        # reduce-only client id. Do not fsync or drain here.
+        if not self._commit_events((sent,), folded):
+            return self._recovery_result(
+                RecoveryStatus.BLOCKED,
+                RecoveryActionKind.FLATTEN_FILLED,
+                "wal_capacity",
+            )
+        try:
+            self._ownership.assert_owned(self._ownership_claim)
+        except OwnershipError:
+            return self._recovery_result(
+                RecoveryStatus.BLOCKED,
+                RecoveryActionKind.FLATTEN_FILLED,
+                "ownership_not_held",
+            )
+        try:
+            result = await self._transport.dispatch_action(prepared)
+        except asyncio.CancelledError:
+            self._commit_started_uncertainty(
+                intent_id, plan.venue, filled.leg_id, started=False, halt=True
+            )
+            raise
+        except Exception:
+            self._recovery_attempts += 1
+            return self._recovery_result(
+                RecoveryStatus.BLOCKED,
+                RecoveryActionKind.WAIT_RESEED,
+                "wait_reseed",
+            )
+        evidence = result.evidence
+        started = _write_representable(evidence)
+        self._recovery_attempts += 1
+        if started and _write_uncertain(evidence):
+            self._commit_timeout(intent_id, plan.venue, filled.leg_id)
+            return self._recovery_result(
+                RecoveryStatus.BLOCKED,
+                RecoveryActionKind.FLATTEN_FILLED,
+                "flatten_failed",
+                dispatch=result,
+            )
+        if not started:
+            return self._recovery_result(
+                RecoveryStatus.BLOCKED,
+                RecoveryActionKind.WAIT_RESEED,
+                "wait_reseed",
+                dispatch=result,
+            )
+        return self._recovery_result(
+            RecoveryStatus.APPLIED,
+            RecoveryActionKind.FLATTEN_FILLED,
+            "flatten_required",
+            dispatch=result,
+        )
+
+    def _request_sent_from_plan(
+        self, intent_id: str, plan: LegPlan, sequence: int
+    ) -> ExecutionEvent:
+        return self._recovery_event(
+            intent_id=intent_id,
+            event_type=ExecutionEventType.REQUEST_SENT,
+            sequence=sequence,
+            monotonic_ns=self._mono_at_least(None),
+            venue=plan.venue,
+            leg_id=plan.leg_id,
+            payload={
+                "quantity": decimal_to_canonical(plan.quantity),
+                "reduce_only": plan.reduce_only,
+                "instrument": plan.instrument,
+                "side": plan.side,
+                "client_id": plan.client_id,
+                "stream_generation": self._readiness.generation_for(plan.venue),
+            },
+            dedupe=f"request_sent:{plan.venue.value}:{plan.leg_id}:recovery",
+        )
+
+    def _commit_timeout(self, intent_id: str, venue: Venue, leg_id: str) -> None:
+        event = self._recovery_event(
+            intent_id=intent_id,
+            event_type=ExecutionEventType.ACK_TIMEOUT,
+            sequence=self._state.last_sequence + 1,
+            monotonic_ns=self._mono_at_least(None),
+            venue=venue,
+            leg_id=leg_id,
+            payload={"reason_code": "ack_timeout"},
+            dedupe=f"ack_timeout:{venue.value}:{leg_id}:recovery",
+        )
+        folded = self._fold((event,))
+        if folded is not None:
+            self._commit_events((event,), folded)
+
+    def _halt_event(self, intent_id: str) -> ExecutionEvent:
+        return self._recovery_event(
+            intent_id=intent_id,
+            event_type=ExecutionEventType.FAULT,
+            sequence=self._state.last_sequence + 1,
+            monotonic_ns=self._mono_at_least(None),
+            venue=None,
+            leg_id=None,
+            payload={"halt": True, "reason_code": "halt"},
+            dedupe="fault:halt:1:recovery",
+        )
+
+    def _commit_started_uncertainty(
+        self,
+        intent_id: str,
+        venue: Venue,
+        leg_id: str,
+        *,
+        started: bool,
+        halt: bool,
+    ) -> None:
+        del venue, leg_id, started
+        if not halt:
+            return
+        event = self._halt_event(intent_id)
+        folded = self._fold((event,))
+        if folded is not None:
+            self._commit_events((event,), folded)
+
+    def _apply_prove_flat_locked(self) -> RecoveryResult:
+        if self._state.status is SpreadStatus.HALTED:
+            return self._recovery_result(
+                RecoveryStatus.HALTED, RecoveryActionKind.NOTHING, "halt"
+            )
+        if not self._both_private_ready() or not self._state.stream_generation_ok:
+            self._recovery_attempts += 1
+            return self._recovery_result(
+                RecoveryStatus.BLOCKED, RecoveryActionKind.PROVE_FLAT, "stream_blocked"
+            )
+        intent_id = self._state.intent_id or restart_correlation_id(
+            self._state, self._run_id
+        )
+        event = self._recovery_event(
+            intent_id=intent_id,
+            event_type=ExecutionEventType.FLATNESS_PROVEN,
+            sequence=self._state.last_sequence + 1,
+            monotonic_ns=self._mono_at_least(None),
+            venue=None,
+            leg_id=None,
+            payload={"positions_flat": True, "open_orders_flat": True},
+            dedupe="flatness_proven",
+        )
+        folded = self._fold((event,))
+        if folded is None:
+            self._recovery_attempts += 1
+            return self._recovery_result(
+                RecoveryStatus.BLOCKED, RecoveryActionKind.PROVE_FLAT, "reseed_failed"
+            )
+        if not self._wal.can_admit(1, open_intent=False):
+            return self._recovery_result(
+                RecoveryStatus.BLOCKED, RecoveryActionKind.PROVE_FLAT, "wal_capacity"
+            )
+        if not self._commit_events((event,), folded):
+            return self._recovery_result(
+                RecoveryStatus.BLOCKED, RecoveryActionKind.PROVE_FLAT, "wal_capacity"
+            )
+        self._recovery_attempts = 0
+        return self._recovery_result(
+            RecoveryStatus.APPLIED, RecoveryActionKind.PROVE_FLAT, "prove_flat"
+        )
+
+    def _apply_halt_locked(self) -> RecoveryResult:
+        if self._state.status is SpreadStatus.HALTED:
+            return self._recovery_result(
+                RecoveryStatus.HALTED, RecoveryActionKind.NOTHING, "halt"
+            )
+        intent_id = self._state.intent_id or restart_correlation_id(
+            self._state, self._run_id
+        )
+        event = self._halt_event(intent_id)
+        folded = self._fold((event,))
+        if folded is None:
+            return self._recovery_result(
+                RecoveryStatus.BLOCKED, RecoveryActionKind.HALT, "ambiguous_exposure"
+            )
+        if not self._wal.can_admit(1, open_intent=False):
+            return self._recovery_result(
+                RecoveryStatus.BLOCKED, RecoveryActionKind.HALT, "wal_capacity"
+            )
+        if not self._commit_events((event,), folded):
+            return self._recovery_result(
+                RecoveryStatus.BLOCKED, RecoveryActionKind.HALT, "wal_capacity"
+            )
+        return self._recovery_result(
+            RecoveryStatus.HALTED, RecoveryActionKind.HALT, "halt"
         )
 
     def to_public_dict(self) -> dict[str, Any]:

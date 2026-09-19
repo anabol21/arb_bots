@@ -798,6 +798,46 @@ class ReplayAndRestartTests(unittest.TestCase):
         self.assertEqual(earlier.events[0].sequence, 11)
         self.assertGreaterEqual(earlier.events[0].monotonic_ns, 9001)
 
+    def test_primary_plan_is_non_reduce_and_reset_drops_bindings(self) -> None:
+        adapter = _adapter(last_sequence=4, last_monotonic_ns=4000)
+        primary = adapter.primary_plan(Venue.OKX)
+        assert primary is not None
+        self.assertFalse(primary.reduce_only)
+        self.assertEqual(primary.instrument, OKX_INST)
+        self.assertEqual(primary.side, "buy")
+        flatten = LegPlan.build(
+            intent_id=INTENT_ID,
+            leg_id=OKX_LEG,
+            venue=Venue.OKX,
+            instrument=OKX_INST,
+            side="sell",
+            quantity=Decimal(QTY),
+            reduce_only=True,
+        )
+        adapter.bind_recovery_plan(flatten)
+        self.assertEqual(adapter.primary_plan(Venue.OKX), primary)
+        adapter.reset_for_restart(
+            last_sequences={INTENT_ID: 4}, last_monotonic_ns=4000
+        )
+        self.assertIsNone(adapter.primary_plan(Venue.OKX))
+        self.assertEqual(adapter.last_sequence(INTENT_ID), 4)
+        unknown = adapter.adapt(
+            {
+                "id": _okx_cid(),
+                "code": "0",
+                "data": [{"sCode": "0"}],
+            },
+            venue=Venue.OKX,
+            source="trade_ack",
+            generation=1,
+            receive_mono_ns=4001,
+        )
+        self.assertTrue(
+            any(item.reason_code == "unknown_correlation" for item in unknown.issues)
+        )
+        adapter.register(_intent(), _plans())
+        self.assertIsNotNone(adapter.primary_plan(Venue.OKX))
+
 
 class CorrelationTests(unittest.TestCase):
     def test_unknown_and_ambiguous_never_create_third_leg(self) -> None:

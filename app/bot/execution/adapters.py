@@ -247,6 +247,21 @@ class _BoundLeg:
     plan: LegPlan
 
 
+def _same_leg_identity(left: _BoundLeg, right: _BoundLeg) -> bool:
+    """True when two bindings name the same intent/venue/instrument/leg.
+
+    Recovery adds a reduce-only client without replacing the open
+    instrument map entry. Those two objects are not identical, but they
+    are the same watched leg and must not be treated as a conflict.
+    """
+    return (
+        left.intent.intent_id == right.intent.intent_id
+        and left.plan.venue is right.plan.venue
+        and left.plan.instrument == right.plan.instrument
+        and left.plan.leg_id == right.plan.leg_id
+    )
+
+
 @dataclass
 class _IntentSeq:
     last_sequence: int
@@ -308,9 +323,9 @@ class PrivateEventAdapter:
             venue: _new_fence(generation) for venue, generation in self._expected_seed.items()
         }
         self._emitted_keys: set[str] = set()
-        self._last_fill: dict[tuple[str, Venue], Decimal] = {}
-        self._fill_piece_hashes: dict[tuple[str, Venue], set[str]] = {}
-        self._fill_piece_qty: dict[tuple[str, Venue], Decimal] = {}
+        self._last_fill: dict[tuple[str, Venue, str], Decimal] = {}
+        self._fill_piece_hashes: dict[tuple[str, Venue, str], set[str]] = {}
+        self._fill_piece_qty: dict[tuple[str, Venue, str], Decimal] = {}
 
     def register(self, intent: TradeIntent, plans: Sequence[LegPlan]) -> None:
         if not isinstance(intent, TradeIntent):
@@ -354,6 +369,86 @@ class PrivateEventAdapter:
         for item in bound:
             self._legs_by_client[item.plan.client_id] = item
             self._legs_by_instrument[(item.plan.venue, item.plan.instrument)] = item
+
+    def bind_recovery_plan(self, plan: LegPlan) -> None:
+        """Bind a reduce-only flatten plan without dropping open client ids."""
+        if not isinstance(plan, LegPlan):
+            raise AdapterError("invalid_registration")
+        intent = self._intents.get(plan.intent_id)
+        if intent is None:
+            raise AdapterError("invalid_registration", intent_id=plan.intent_id)
+        if not plan.reduce_only:
+            raise AdapterError("invalid_registration", intent_id=plan.intent_id)
+        expected = derive_client_id(
+            intent.intent_id, plan.venue, reduce_only=True
+        )
+        if plan.client_id != expected:
+            raise AdapterError("client_id_mismatch", intent_id=intent.intent_id)
+        existing = self._legs_by_client.get(plan.client_id)
+        if existing is not None:
+            if existing.plan.client_id != plan.client_id:
+                raise AdapterError("duplicate_binding", intent_id=intent.intent_id)
+            return
+        self._legs_by_client[plan.client_id] = _BoundLeg(intent=intent, plan=plan)
+
+    def primary_plan(
+        self, venue: object, *, intent_id: Optional[str] = None
+    ) -> Optional[LegPlan]:
+        """Read-only primary non-reduce binding. None if unregistered."""
+        venue_e = _coerce_venue(venue)
+        if intent_id is None:
+            if len(self._intents) != 1:
+                return None
+            intent_id = next(iter(self._intents))
+        if not isinstance(intent_id, str) or not intent_id:
+            return None
+        bound = self._bound_for_venue(intent_id, venue_e)
+        if bound is None or bound.plan.reduce_only:
+            return None
+        return bound.plan
+
+    def reset_for_restart(
+        self,
+        *,
+        last_sequences: Optional[Mapping[str, int]] = None,
+        last_monotonic_ns: Optional[int] = None,
+    ) -> None:
+        """Drop bindings and fill state. Caller must register again."""
+        if last_monotonic_ns is not None:
+            if (
+                not isinstance(last_monotonic_ns, int)
+                or isinstance(last_monotonic_ns, bool)
+                or last_monotonic_ns < 0
+            ):
+                raise AdapterError("invalid_generation")
+            self._mono_seed = last_monotonic_ns
+        if last_sequences is not None:
+            if not isinstance(last_sequences, Mapping):
+                raise AdapterError("invalid_registration")
+            seeds: dict[str, int] = {}
+            for seed_intent, sequence in last_sequences.items():
+                if not isinstance(seed_intent, str) or not seed_intent:
+                    raise AdapterError("invalid_registration")
+                if (
+                    not isinstance(sequence, int)
+                    or isinstance(sequence, bool)
+                    or sequence < 0
+                ):
+                    raise AdapterError("invalid_registration")
+                seeds[seed_intent] = sequence
+            self._seq_seed = seeds
+        self._legs_by_client.clear()
+        self._legs_by_instrument.clear()
+        self._intents.clear()
+        self._seq.clear()
+        self._emitted_keys.clear()
+        self._last_fill.clear()
+        self._fill_piece_hashes.clear()
+        self._fill_piece_qty.clear()
+        self._fences = {
+            venue: _new_fence(generation)
+            for venue, generation in self._expected_seed.items()
+        }
 
     def expected_generation(self, venue: Venue) -> int:
         return self._fences[_coerce_venue(venue)].expected
@@ -595,10 +690,16 @@ class PrivateEventAdapter:
         fence.rest_orders_ok = False
 
     def _bound_for_venue(self, intent_id: str, venue: Venue) -> Optional[_BoundLeg]:
+        reduce_bound: Optional[_BoundLeg] = None
         for bound in self._legs_by_client.values():
             if bound.intent.intent_id == intent_id and bound.plan.venue is venue:
-                return bound
-        return None
+                if not bound.plan.reduce_only:
+                    return bound
+                reduce_bound = bound
+        return reduce_bound
+
+    def _fill_key(self, bound: _BoundLeg, venue: Venue) -> tuple[str, Venue, str]:
+        return (bound.intent.intent_id, venue, bound.plan.client_id)
 
     def _lookup_client(self, client_id: Optional[str]) -> Optional[_BoundLeg]:
         if not client_id:
@@ -633,17 +734,21 @@ class PrivateEventAdapter:
             )
             return None
         if by_client is not None and by_inst is not None and by_client is not by_inst:
-            issues.append(
-                _issue(
-                    "conflicting_identity",
-                    venue=venue,
-                    source=source,
-                    generation=generation,
-                    intent_id=by_client.intent.intent_id,
-                    leg_id=by_client.plan.leg_id,
+            if not _same_leg_identity(by_client, by_inst):
+                issues.append(
+                    _issue(
+                        "conflicting_identity",
+                        venue=venue,
+                        source=source,
+                        generation=generation,
+                        intent_id=by_client.intent.intent_id,
+                        leg_id=by_client.plan.leg_id,
+                    )
                 )
-            )
-            return None
+                return None
+            # bind_recovery_plan keeps the open plan on the instrument map
+            # and adds a reduce-only client. Order/fill/cancel frames that
+            # carry that extra client id must follow the client binding.
         if by_client is not None:
             if instrument and instrument != by_client.plan.instrument:
                 issues.append(
@@ -760,7 +865,10 @@ class PrivateEventAdapter:
             leg_id=bound.plan.leg_id,
             receive_mono_ns=receive_mono_ns,
             payload=payload_out,
-            dedupe_key=f"{bound.intent.intent_id}|ack|{venue.value}|{event_type.value}",
+            dedupe_key=(
+                f"{bound.intent.intent_id}|ack|{venue.value}|"
+                f"{bound.plan.client_id}|{event_type.value}"
+            ),
         )
         if event is not None:
             events.append(event)
@@ -926,7 +1034,7 @@ class PrivateEventAdapter:
         piece_hash: str,
         piece_qty: Decimal,
     ) -> Optional[Decimal]:
-        key = (bound.intent.intent_id, venue)
+        key = self._fill_key(bound, venue)
         seen = self._fill_piece_hashes.setdefault(key, set())
         if piece_hash in seen:
             return self._fill_piece_qty.get(key, Decimal("0"))
@@ -948,7 +1056,7 @@ class PrivateEventAdapter:
         events: list[ExecutionEvent],
         issues: list[AdapterIssue],
     ) -> None:
-        key = (bound.intent.intent_id, venue)
+        key = self._fill_key(bound, venue)
         last = self._last_fill.get(key)
         if last is not None and qty < last:
             issues.append(
@@ -990,7 +1098,7 @@ class PrivateEventAdapter:
             payload={"quantity": decimal_to_canonical(qty)},
             dedupe_key=(
                 f"{bound.intent.intent_id}|fill|{venue.value}|"
-                f"{decimal_to_canonical(qty)}"
+                f"{bound.plan.client_id}|{decimal_to_canonical(qty)}"
             ),
         )
         if event is not None:
@@ -1011,11 +1119,16 @@ class PrivateEventAdapter:
         if status in _reject_states(venue):
             event_type = ExecutionEventType.ACK_REJECTED
             payload: dict[str, Any] = {"reason_code": "venue_rejected"}
-            dedupe = f"{bound.intent.intent_id}|ack|{venue.value}|{event_type.value}"
+            dedupe = (
+                f"{bound.intent.intent_id}|ack|{venue.value}|"
+                f"{bound.plan.client_id}|{event_type.value}"
+            )
         else:
             event_type = ExecutionEventType.CANCEL_ACK
             payload = {}
-            dedupe = f"{bound.intent.intent_id}|cancel|{venue.value}"
+            dedupe = (
+                f"{bound.intent.intent_id}|cancel|{venue.value}|{bound.plan.client_id}"
+            )
         event = self._make_event(
             intent=bound.intent,
             event_type=event_type,

@@ -436,6 +436,93 @@ def prepare_dual_leg(
     )
 
 
+def unsigned_cancel_finalizer(
+    static: FrozenStaticFrame,
+    *,
+    timestamp_ms: int,
+    request_id: str,
+    client_id: str,
+) -> str:
+    """Test/injected cancel builder: client-id cancel only. No venue order id."""
+    if not isinstance(static, FrozenStaticFrame):
+        raise TransportError("rejected_before_write")
+    if not isinstance(timestamp_ms, int) or isinstance(timestamp_ms, bool) or timestamp_ms < 0:
+        raise TransportError("clock_regression")
+    if request_id != client_id or client_id != static.client_id:
+        raise TransportError("client_id_mismatch")
+    if static.venue is Venue.OKX:
+        body = {
+            "id": request_id,
+            "op": "cancel-order",
+            "args": [{"instId": static.instrument, "clOrdId": client_id}],
+            "ts": timestamp_ms,
+        }
+    elif static.venue is Venue.BYBIT:
+        body = {
+            "reqId": request_id,
+            "op": "order.cancel",
+            "args": [
+                {
+                    "category": "linear",
+                    "symbol": static.instrument,
+                    "orderLinkId": client_id,
+                }
+            ],
+            "ts": timestamp_ms,
+        }
+    else:
+        raise TransportError("invalid_leg_set")
+    return json.dumps(body, separators=(",", ":"), ensure_ascii=False)
+
+
+def prepare_venue_action(
+    plan: LegPlan,
+    cache: InstrumentCache,
+    *,
+    kind: object,
+    now_mono_ns: int,
+    run_id: str,
+    intent: Optional[TradeIntent] = None,
+) -> Any:
+    """Freeze one venue action. Freshness is checked only for ``plan.venue``."""
+    from app.bot.execution.recovery import PreparedVenueAction, VenueActionKind
+
+    if not isinstance(kind, VenueActionKind):
+        try:
+            kind = VenueActionKind(str(kind))
+        except ValueError as exc:
+            raise TransportError("invalid_leg_set") from exc
+    if not isinstance(plan, LegPlan):
+        raise TransportError("invalid_leg_set")
+    if not isinstance(cache, InstrumentCache):
+        raise TransportError("invalid_metadata")
+    if not isinstance(run_id, str) or not run_id:
+        raise TransportError("invalid_leg_set")
+    if intent is not None:
+        if not isinstance(intent, TradeIntent):
+            raise TransportError("invalid_leg_set")
+        if plan.intent_id != intent.intent_id:
+            raise TransportError("intent_id_mismatch", intent_id=intent.intent_id)
+        if intent.run_id != run_id:
+            raise TransportError("intent_id_mismatch", intent_id=intent.intent_id)
+    if kind is VenueActionKind.PLACE and not plan.reduce_only:
+        raise TransportError("invalid_leg_set", intent_id=plan.intent_id)
+    if kind is VenueActionKind.CANCEL and plan.reduce_only:
+        raise TransportError("invalid_leg_set", intent_id=plan.intent_id)
+    now = _require_int(now_mono_ns, field="now_mono_ns")
+    snapshot = cache.get(plan.venue, plan.instrument)
+    snapshot.assert_fresh(now_mono_ns=now)
+    frame = _freeze_plan(plan, snapshot)
+    return PreparedVenueAction(
+        intent_id=plan.intent_id,
+        run_id=run_id if intent is None else intent.run_id,
+        kind=kind,
+        venue=plan.venue,
+        frame=frame,
+        fresh_until_mono_ns=snapshot.fresh_until_mono_ns,
+    )
+
+
 def unsigned_frame_finalizer(
     static: FrozenStaticFrame,
     *,
@@ -708,6 +795,7 @@ class ExecutionTransport:
         self._bybit_socket = bybit_socket
         self._okx_socket = okx_socket
         self._finalize_frame = finalize_frame
+        self._finalize_cancel = unsigned_cancel_finalizer
         self._monotonic_ns = monotonic_ns
         self._wall_ms = wall_ms if wall_ms is not None else _default_wall_ms
 
@@ -801,26 +889,124 @@ class ExecutionTransport:
             reason_code=reason_code,
         )
 
-    def _preflight(self, prepared: PreparedDualLeg) -> Optional[DispatchResult]:
-        if not isinstance(prepared, PreparedDualLeg):
-            raise TransportError("invalid_leg_set")
+    def _preflight_loop(self) -> Optional[str]:
         try:
             running = asyncio.get_running_loop()
         except RuntimeError:
-            return self._reject(prepared, "loop_not_running")
+            return "loop_not_running"
         if running is not self._loop:
-            return self._reject(prepared, "foreign_loop")
+            return "foreign_loop"
         if not self._loop.is_running():
-            return self._reject(prepared, "loop_not_running")
+            return "loop_not_running"
         bybit_loop = declared_owner_loop(self._bybit_socket)
         okx_loop = declared_owner_loop(self._okx_socket)
         if bybit_loop is None or okx_loop is None:
-            return self._reject(prepared, "unknown_loop_ownership")
+            return "unknown_loop_ownership"
         if bybit_loop is not self._loop or okx_loop is not self._loop:
-            return self._reject(prepared, "mixed_loop_ownership")
+            return "mixed_loop_ownership"
         if bybit_loop is not okx_loop:
-            return self._reject(prepared, "mixed_loop_ownership")
+            return "mixed_loop_ownership"
         return None
+
+    def _preflight(self, prepared: PreparedDualLeg) -> Optional[DispatchResult]:
+        if not isinstance(prepared, PreparedDualLeg):
+            raise TransportError("invalid_leg_set")
+        reason = self._preflight_loop()
+        if reason is not None:
+            return self._reject(prepared, reason)
+        return None
+
+    async def dispatch_action(self, prepared: Any) -> Any:
+        """One-venue cancel or reduce-only place. No ACK wait, retry, or sibling."""
+        from app.bot.execution.recovery import (
+            PreparedVenueAction,
+            VenueActionKind,
+            VenueActionResult,
+            SCHEMA_VERSION as RECOVERY_SCHEMA,
+        )
+
+        if not isinstance(prepared, PreparedVenueAction):
+            raise TransportError("invalid_leg_set")
+        reason = self._preflight_loop()
+        if reason is not None:
+            return VenueActionResult(
+                schema_version=RECOVERY_SCHEMA,
+                kind=prepared.kind,
+                venue=prepared.venue,
+                evidence=_not_attempted(prepared.frame, reason_code=reason),
+            )
+        entry_ns = self._mono()
+        if entry_ns > prepared.fresh_until_mono_ns:
+            return VenueActionResult(
+                schema_version=RECOVERY_SCHEMA,
+                kind=prepared.kind,
+                venue=prepared.venue,
+                evidence=_not_attempted(prepared.frame, reason_code="stale_metadata"),
+            )
+        finalizer = (
+            self._finalize_cancel
+            if prepared.kind is VenueActionKind.CANCEL
+            else self._finalize_frame
+        )
+        try:
+            timestamp_ms = self._wall_ms()
+            if (
+                not isinstance(timestamp_ms, int)
+                or isinstance(timestamp_ms, bool)
+                or timestamp_ms < 0
+            ):
+                return VenueActionResult(
+                    schema_version=RECOVERY_SCHEMA,
+                    kind=prepared.kind,
+                    venue=prepared.venue,
+                    evidence=_not_attempted(prepared.frame, reason_code="clock_regression"),
+                )
+            text = finalizer(
+                prepared.frame,
+                timestamp_ms=timestamp_ms,
+                request_id=prepared.frame.client_id,
+                client_id=prepared.frame.client_id,
+            )
+            if not isinstance(text, str):
+                raise TransportError("rejected_before_write", intent_id=prepared.intent_id)
+            payload_bytes = _payload_bytes(text)
+        except TransportError as exc:
+            return VenueActionResult(
+                schema_version=RECOVERY_SCHEMA,
+                kind=prepared.kind,
+                venue=prepared.venue,
+                evidence=_not_attempted(
+                    prepared.frame,
+                    reason_code=exc.reason_code
+                    if exc.reason_code in TRANSPORT_REASON_CODES
+                    else "rejected_before_write",
+                ),
+            )
+        except Exception:
+            return VenueActionResult(
+                schema_version=RECOVERY_SCHEMA,
+                kind=prepared.kind,
+                venue=prepared.venue,
+                evidence=_not_attempted(
+                    prepared.frame, reason_code="rejected_before_write"
+                ),
+            )
+        socket = (
+            self._bybit_socket if prepared.venue is Venue.BYBIT else self._okx_socket
+        )
+        evidence = await self._write_one(
+            venue=prepared.venue,
+            socket=socket,
+            text=text,
+            frame=prepared.frame,
+            payload_bytes=payload_bytes,
+        )
+        return VenueActionResult(
+            schema_version=RECOVERY_SCHEMA,
+            kind=prepared.kind,
+            venue=prepared.venue,
+            evidence=evidence,
+        )
 
     def _finalize(self, prepared: PreparedDualLeg, timestamp_ms: int) -> tuple[str, str, int, int]:
         bybit_text = self._finalize_frame(

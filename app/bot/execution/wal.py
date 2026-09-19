@@ -1006,7 +1006,7 @@ class ExecutionWal:
             integrity_unhealthy=self._integrity_unhealthy,
         )
 
-    def mark_venue_reconciled(self, token: object) -> None:
+    def mark_venue_reconciled(self, token: object) -> Venue:
         if not isinstance(token, str) or not token:
             raise WalError("invalid_reconciliation_token")
         bound = self._current_process_recon.get(token)
@@ -1039,6 +1039,18 @@ class ExecutionWal:
         self._reconciled_venues.add(venue)
         if Venue.OKX in self._reconciled_venues and Venue.BYBIT in self._reconciled_venues:
             self._venue_reconciled = True
+        return venue
+
+    def begin_restart(self) -> None:
+        """Advance the in-process reconciliation epoch.
+
+        Prior tokens become invalid even when this same in-memory WAL was
+        already venue-reconciled. Token format is unchanged. This is not
+        durability: enqueue still does not fsync or drain.
+        """
+        if not self._scanned:
+            raise WalError("replay_required")
+        self._advance_recon_epoch()
 
     def _advance_recon_epoch(self) -> None:
         self._recon_epoch += 1
