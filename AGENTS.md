@@ -15,6 +15,15 @@ The same runtime may be used in different contexts:
 
 Agents must always distinguish these contexts explicitly when reasoning about bugs, validation, and runtime behavior.
 
+## Architecture context (required)
+Before non-trivial work, read:
+1. `architecture.md`
+2. Then the specific module files linked from Module Map / Critical Paths
+
+When you change topology (new process, send path, journal layout, contour boundary):
+update `architecture.md` in the same change.
+Do not put secrets in docs.
+
 ## Current Priority
 Current repository priority is data-engineering reliability, not strategy expansion.
 
