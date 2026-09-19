@@ -1,0 +1,40 @@
+[Unit]
+Description=Spread collector hot-add canary (isolated parquet/spool; not production)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/root/spread_hotadd_canary
+Environment=SPREAD_UNIVERSE=/root/spread_hotadd_canary/bybit_okx_universe_canary10.csv
+Environment=SPREAD_PARQUET_ROOT=/data/live-hotadd-canary
+Environment=SPREAD_SPOOL_ROOT=/data/spool-hotadd-canary
+Environment=SPREAD_GAPS_ROOT=/data/gaps-hotadd-canary
+Environment=SPREAD_RUNTIME_LOG=/var/log/spread/runtime-hotadd-canary.log
+Environment=SPREAD_FAILED_BATCHES_LOG=/var/log/spread/failed_batches-hotadd-canary.log
+Environment=SPREAD_LEAN_SCHEMA=1
+Environment=SPREAD_COLLECT_BARS=0
+Environment=SPREAD_WS_RECONNECT_V2=1
+Environment=SPREAD_WS_CONNECT_PER_SEC=3
+Environment=SPREAD_TICK_SKEW_MAX_MS=2000
+Environment=SPREAD_TICK_AGE_MAX_MS=2000
+Environment=SPREAD_HOT_ADD=1
+Environment=SPREAD_HOT_ADD_POLL_SEC=10
+Environment=SPREAD_HOT_ADD_DELTA=/root/spread_hotadd_canary/hot_add_delta.csv
+Environment=SPREAD_HOT_ADD_DROP=/root/spread_hotadd_canary/hot_add_drop.csv
+# Raise to 16 only for experiment B +10 window (see docs/hot-add-new-coins.md).
+Environment=SPREAD_HOT_ADD_MAX_EXTRA=8
+ExecStartPre=/usr/bin/mkdir -p /data/live-hotadd-canary /data/spool-hotadd-canary /data/gaps-hotadd-canary /var/log/spread
+ExecStart=/root/venv/bin/python app/screaner_b_o.py
+LimitNOFILE=65535
+InaccessiblePaths=/data/live
+Restart=on-failure
+RestartSec=30
+KillSignal=SIGTERM
+TimeoutStopSec=120
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

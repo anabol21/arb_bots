@@ -38,6 +38,17 @@ from utils.tick_validity import (  # noqa: E402
     TickValidityGate,
     book_l1_complete,
 )
+from utils.hot_add import (  # noqa: E402
+    HotAddController,
+    hot_add_delta_path,
+    hot_add_drop_path,
+    hot_add_enabled,
+    hot_add_max_extra,
+    hot_add_poll_sec,
+    quote_state_for_row,
+    run_hot_add_poller,
+)
+from utils.task_supervisor import TaskSupervisor  # noqa: E402
 from utils.universe_csv import load_take_yes_pairs  # noqa: E402
 from utils.ws_gap_journal import WsGapJournal  # noqa: E402
 from utils.ws_reconnect import (  # noqa: E402
@@ -131,6 +142,7 @@ mount_failure_state = MountFailureState()
 ws_reconnect = ReconnectController()
 tick_validity = TickValidityGate()
 connect_scheduler = ExchangeConnectScheduler(connects_per_sec=connect_per_sec())
+_task_supervisor: Optional[TaskSupervisor] = None
 
 
 def _ms_int(value: Any) -> int:
@@ -145,32 +157,7 @@ def load_pairs_from_csv(path, row_start=0, row_end=10):
 
 pairs = load_pairs_from_csv(UNIVERSE_PATH, ROW_START, ROW_END)
 
-quotes = {
-    row["base_coin"]: {
-        "okx_symbol": row["okx_symbol"],
-        "bybit_symbol": row["bybit_symbol"],
-        "okx": {
-            "bid_price": None,
-            "bid_size": None,
-            "ask_price": None,
-            "ask_size": None,
-            "ts_exchange": None,
-            "local_recv_ts_ms": None,
-            "delivery_latency_ms": None,
-        },
-        "bybit": {
-            "bid_price": None,
-            "bid_size": None,
-            "ask_price": None,
-            "ask_size": None,
-            "ts_exchange": None,
-            "cts_exchange": None,
-            "local_recv_ts_ms": None,
-            "delivery_latency_ms": None,
-        },
-    }
-    for row in pairs
-}
+quotes = {row["base_coin"]: quote_state_for_row(row) for row in pairs}
 
 
 def _persist_buffer(
@@ -929,7 +916,7 @@ async def heartbeat():
             "spool_files_count=%s | spool_bytes_total=%s | "
             "spool_recovered_total=%s | spool_recovery_failed_total=%s"
             + reconnect_bits,
-            len(pairs),
+            len(quotes),
             tick_schema_mode(),
             str(collect_bars_enabled()).lower(),
             len(opportunities_buffer),
@@ -972,9 +959,67 @@ def chunked(seq, size):
         yield seq[i:i + size]
 
 
+def spawn_coin(row: dict[str, str]) -> None:
+    """Orchestration-only hot-add: init quotes[coin], spawn existing book listeners.
+
+    Does not call REST. Does not change subscribe payloads, parse, or spread.
+    """
+    supervisor = _task_supervisor
+    if supervisor is None:
+        raise RuntimeError("spawn_coin requires an active task supervisor")
+    coin = str(row.get("base_coin", "")).strip()
+    okx_symbol = str(row.get("okx_symbol", "")).strip()
+    bybit_symbol = str(row.get("bybit_symbol", "")).strip()
+    if not coin or not okx_symbol or not bybit_symbol:
+        raise ValueError("spawn_coin requires base_coin, okx_symbol, bybit_symbol")
+    if coin in quotes:
+        raise RuntimeError(f"spawn_coin duplicate quotes slot: {coin}")
+    quotes[coin] = quote_state_for_row(
+        {
+            "base_coin": coin,
+            "okx_symbol": okx_symbol,
+            "bybit_symbol": bybit_symbol,
+        }
+    )
+    supervisor.add(okx_listener(coin, okx_symbol), name=f"okx:{coin}")
+    supervisor.add(bybit_listener(coin, bybit_symbol), name=f"bybit:{coin}")
+    runtime_logger.info(
+        "hot_add_spawned | base_coin=%s | okx_symbol=%s | bybit_symbol=%s",
+        coin,
+        okx_symbol,
+        bybit_symbol,
+    )
+
+
+async def drop_coin(coin: str) -> None:
+    """Orchestration-only hot-drop: cancel book (and bar) tasks, then remove quotes[coin]."""
+    supervisor = _task_supervisor
+    if supervisor is None:
+        raise RuntimeError("drop_coin requires an active task supervisor")
+    coin = str(coin).strip()
+    if not coin:
+        runtime_logger.error("drop_coin_invalid | base_coin=-")
+        return
+    if coin not in quotes:
+        runtime_logger.error(
+            "drop_coin_missing | base_coin=%s | reason=not_in_quotes",
+            coin,
+        )
+        return
+    task_names = [f"okx:{coin}", f"bybit:{coin}"]
+    if collect_bars_enabled():
+        task_names.append(f"okx-candle:{coin}")
+        if COLLECT_BYBIT_BARS:
+            task_names.append(f"bybit-kline:{coin}")
+    cancelled = supervisor.cancel_named(*task_names)
+    await supervisor.drain_named(cancelled)
+    del quotes[coin]
+    runtime_logger.info("hot_add_dropped | base_coin=%s", coin)
+
+
 async def main():
     global publisher, bars_publisher, recovery_worker, bars_recovery_worker
-    global spool, bars_spool
+    global spool, bars_spool, _task_supervisor
 
     # Refresh path/flag module views for test env overrides at main() time.
     parquet_root = resolve_parquet_root()
@@ -1070,20 +1115,20 @@ async def main():
     main_task = asyncio.current_task()
     if main_task is None:
         raise RuntimeError("main task is unavailable")
-    tasks = [
-        asyncio.create_task(heartbeat(), name="heartbeat"),
-        asyncio.create_task(
-            monitor_primary_storage_failure(main_task),
-            name="primary-storage-failure-monitor",
-        ),
-    ]
+    supervisor = TaskSupervisor()
+    _task_supervisor = supervisor
+    supervisor.add(heartbeat(), name="heartbeat")
+    supervisor.add(
+        monitor_primary_storage_failure(main_task),
+        name="primary-storage-failure-monitor",
+    )
 
     loop = asyncio.get_running_loop()
+    hot_add_reload = asyncio.Event()
 
     def request_shutdown():
         runtime_logger.info("shutdown signal received, cancelling tasks")
-        for task in tasks:
-            task.cancel()
+        supervisor.cancel_all()
 
     for sig in (signal.SIGINT, signal.SIGTERM):
         try:
@@ -1104,30 +1149,22 @@ async def main():
                 base_coin = row["base_coin"]
                 okx_symbol = row["okx_symbol"]
                 bybit_symbol = row["bybit_symbol"]
-                tasks.append(
-                    asyncio.create_task(okx_listener(base_coin, okx_symbol), name=f"okx:{base_coin}")
-                )
-                tasks.append(
-                    asyncio.create_task(
-                        bybit_listener(base_coin, bybit_symbol), name=f"bybit:{base_coin}"
-                    )
+                supervisor.add(okx_listener(base_coin, okx_symbol), name=f"okx:{base_coin}")
+                supervisor.add(
+                    bybit_listener(base_coin, bybit_symbol), name=f"bybit:{base_coin}"
                 )
             if do_bars:
                 for row in pairs:
-                    tasks.append(
-                        asyncio.create_task(
-                            okx_candle5m_listener(row["base_coin"], row["okx_symbol"]),
-                            name=f"okx-candle:{row['base_coin']}",
-                        )
+                    supervisor.add(
+                        okx_candle5m_listener(row["base_coin"], row["okx_symbol"]),
+                        name=f"okx-candle:{row['base_coin']}",
                     )
                     if COLLECT_BYBIT_BARS:
-                        tasks.append(
-                            asyncio.create_task(
-                                bybit_kline5m_listener(
-                                    row["base_coin"], row["bybit_symbol"]
-                                ),
-                                name=f"bybit-kline:{row['base_coin']}",
-                            )
+                        supervisor.add(
+                            bybit_kline5m_listener(
+                                row["base_coin"], row["bybit_symbol"]
+                            ),
+                            name=f"bybit-kline:{row['base_coin']}",
                         )
         else:
             pair_batches = list(chunked(pairs, batch_size))
@@ -1147,21 +1184,22 @@ async def main():
                     okx_symbol = row["okx_symbol"]
                     bybit_symbol = row["bybit_symbol"]
 
-                    tasks.append(asyncio.create_task(okx_listener(base_coin, okx_symbol), name=f"okx:{base_coin}"))
-                    tasks.append(asyncio.create_task(bybit_listener(base_coin, bybit_symbol), name=f"bybit:{base_coin}"))
+                    supervisor.add(
+                        okx_listener(base_coin, okx_symbol), name=f"okx:{base_coin}"
+                    )
+                    supervisor.add(
+                        bybit_listener(base_coin, bybit_symbol),
+                        name=f"bybit:{base_coin}",
+                    )
                     if do_bars:
-                        tasks.append(
-                            asyncio.create_task(
-                                okx_candle5m_listener(base_coin, okx_symbol),
-                                name=f"okx-candle:{base_coin}",
-                            )
+                        supervisor.add(
+                            okx_candle5m_listener(base_coin, okx_symbol),
+                            name=f"okx-candle:{base_coin}",
                         )
                         if COLLECT_BYBIT_BARS:
-                            tasks.append(
-                                asyncio.create_task(
-                                    bybit_kline5m_listener(base_coin, bybit_symbol),
-                                    name=f"bybit-kline:{base_coin}",
-                                )
+                            supervisor.add(
+                                bybit_kline5m_listener(base_coin, bybit_symbol),
+                                name=f"bybit-kline:{base_coin}",
                             )
 
                 if batch_idx < len(pair_batches):
@@ -1170,7 +1208,49 @@ async def main():
                     )
                     await asyncio.sleep(SUBSCRIBE_BATCH_PAUSE_SEC)
 
-        await asyncio.gather(*tasks)
+        hot_add_on = hot_add_enabled()
+        runtime_logger.info(
+            "hot_add | enabled=%s | delta=%s | drop=%s | max_extra=%s",
+            str(hot_add_on).lower(),
+            hot_add_delta_path(),
+            hot_add_drop_path(),
+            os.environ.get("SPREAD_HOT_ADD_MAX_EXTRA", "8"),
+        )
+        if hot_add_on:
+            max_extra = hot_add_max_extra()
+            delta_path = hot_add_delta_path()
+            drop_path = hot_add_drop_path()
+            controller = HotAddController(
+                quotes=quotes,
+                spawn=spawn_coin,
+                max_extra=max_extra,
+                initial_pair_count=len(pairs),
+                logger=runtime_logger,
+            )
+
+            def request_hot_add_reload():
+                runtime_logger.info("hot_add_reload_signal | signal=SIGHUP")
+                hot_add_reload.set()
+
+            try:
+                loop.add_signal_handler(signal.SIGHUP, request_hot_add_reload)
+            except (NotImplementedError, AttributeError):
+                pass
+            supervisor.add(
+                run_hot_add_poller(
+                    controller,
+                    delta_path,
+                    interval_sec=hot_add_poll_sec(),
+                    reload_event=hot_add_reload,
+                    logger=runtime_logger,
+                    supervisor=supervisor,
+                    drop_path=drop_path,
+                    drop_fn=drop_coin,
+                ),
+                name="hot-add-poller",
+            )
+
+        await supervisor.wait()
     except asyncio.CancelledError:
         mount_failure = mount_failure_state.failure()
         if mount_failure is None:
@@ -1182,10 +1262,7 @@ async def main():
                 mount_failure.batch_id,
             )
 
-        for task in tasks:
-            task.cancel()
-
-        await asyncio.gather(*tasks, return_exceptions=True)
+        await supervisor.drain()
         await asyncio.sleep(0.25)
         if mount_failure is not None:
             raise RuntimeError(
@@ -1259,6 +1336,8 @@ async def main():
                     )
         except Exception as exc:
             shutdown_error = exc
+        finally:
+            _task_supervisor = None
         if shutdown_error is not None:
             raise shutdown_error
 

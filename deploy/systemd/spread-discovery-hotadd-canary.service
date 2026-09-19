@@ -1,0 +1,21 @@
+[Unit]
+Description=Hot-add canary discovery (REST sidecar; not production collector)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=root
+WorkingDirectory=/root/spread_hotadd_canary
+Environment=SPREAD_UNIVERSE=/root/spread_hotadd_canary/bybit_okx_universe_canary10.csv
+Environment=SPREAD_HOT_ADD_DELTA=/root/spread_hotadd_canary/hot_add_delta.csv
+Environment=SPREAD_DISCOVERY_MAX_NEW=8
+ExecStart=/root/venv/bin/python3 -m app.discovery \
+  --universe /root/spread_hotadd_canary/bybit_okx_universe_canary10.csv \
+  --delta /root/spread_hotadd_canary/hot_add_delta.csv \
+  --max-new 8
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
