@@ -88,11 +88,12 @@ each mtime change applies the listed `base_coin` rows once.
 
 ---
 
-## Canary unit (VPS experiments A–D)
+## Canary unit (VPS experiments A–D and thin listing-wait)
 
 Separate systemd unit — **not** `spread-collector.service`:
 
 - Template: [`deploy/systemd/spread-collector-hotadd-canary.service`](../deploy/systemd/spread-collector-hotadd-canary.service)
+- Discovery timer (listing-wait): [`spread-discovery-hotadd-canary.timer`](../deploy/systemd/spread-discovery-hotadd-canary.timer)
 - `SPREAD_HOT_ADD=1` **only** on this unit; production unit must stay off.
 - Parquet: `/data/live-hotadd-canary`
 - Spool: `/data/spool-hotadd-canary`
@@ -100,9 +101,58 @@ Separate systemd unit — **not** `spread-collector.service`:
 - Log: `/var/log/spread/runtime-hotadd-canary.log`
 - `InaccessiblePaths=/data/live` so the canary cannot publish into production
   ticks even if misconfigured.
+- Thin canary clone: `/root/spread_hotadd_canary` (not `/root/spread_staging`).
+- Universe: `/root/spread_hotadd_canary/bybit_okx_universe_canary10.csv` — **full**
+  prod copy + REST backfill (`take=no` for missing intersection rows), then
+  `take=yes` on exactly **10 crypto** pairs (`research/is_crypto.py`). Discovery
+  and hot-add skip `is_crypto=no` tickers.
 
 Never run a second writer on `/data/live`. Do not restart production
 `spread-collector` for these experiments. Do not fan-out `spread-bbot-theta-k1-canary`.
+
+### Thin listing-wait canary (10 pairs)
+
+Goal: wait for a **real** new Bybit×OKX listing while production stays at
+188 pairs. Do **not** use a 10-row CSV slice — that makes discovery fill
+`MAX_EXTRA` immediately.
+
+| Mode | Signals |
+|------|---------|
+| **Idle** | Heartbeat `pairs=10`; `hot_add_applied` empty; discovery JSON each cycle: large `csv_coins`, `delta_rows=0`, `new_before_cap=0`; prod `pairs=188`, `NRestarts=0` |
+| **Event** | Delta row for `base_coin` absent from canary copy **and** prod CSV; `hot_add_spawned` + `ws_subscribe_ok`; `pairs=11` (or +k ≤ 8); starter 10 still tick |
+| **Abort** | First hour `pairs` > 10 without a coin missing from the full copy; delta coin already in copy or prod CSV; any write under `/data/live`; prod collector restart |
+
+Prep (once per canary start):
+
+```bash
+export CANARY_ROOT=/root/spread_hotadd_canary
+export PROD_CSV=/root/spread_staging/bybit_okx_universe.csv
+cd $CANARY_ROOT   # branch cursor/hot-add-new-coins-58c9 (PR #53)
+python3 validation/prep_canary10_universe.py \
+  --prod-universe "$PROD_CSV" \
+  --out "$CANARY_ROOT/bybit_okx_universe_canary10.csv" \
+  --dry-run-discovery \
+  --delta "$CANARY_ROOT/hot_add_delta.csv"
+# Log line canary10_written lists the 10 take=yes names — keep for compare.
+```
+
+Start (does **not** restart `spread-collector`):
+
+```bash
+sudo cp deploy/systemd/spread-collector-hotadd-canary.service /etc/systemd/system/
+sudo cp deploy/systemd/spread-discovery-hotadd-canary.{service,timer} /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo mkdir -p /data/live-hotadd-canary /data/spool-hotadd-canary /data/gaps-hotadd-canary
+sudo systemctl enable --now spread-collector-hotadd-canary
+sudo systemctl enable --now spread-discovery-hotadd-canary.timer
+```
+
+Run window: **7 days** or first listing event (whichever comes first). After a
+successful hot-add, optional drop of **that new coin only** via
+`hot_add_drop.csv` (snapshot) to prove the starter 10 survive — do not drop the
+starter 10 in this experiment.
+
+Discovery logs (journal): `discovery_done | ... | csv_coins=... | delta_rows=... | coins=...`
 
 ### Experiment runbook
 
@@ -163,7 +213,10 @@ python3 -m py_compile app/screaner_b_o.py app/utils/hot_add.py \
   app/utils/task_supervisor.py app/utils/universe_delta.py \
   app/discovery/intersection.py app/discovery/__main__.py
 python3 -m unittest tests/test_universe_delta.py \
-  tests/test_hot_add_supervisor.py tests/test_universe_discovery.py
+  tests/test_hot_add_supervisor.py tests/test_universe_discovery.py \
+  tests/test_canary10_universe.py
+python3 -m py_compile validation/prep_canary10_universe.py \
+  app/utils/canary10_universe.py app/utils/canary10_guards.py
 python3 validation/check_hot_add.py
 python3 -m py_compile validation/hot_add_canary_driver.py \
   validation/compare_hotadd_canary_live.py

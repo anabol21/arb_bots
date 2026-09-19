@@ -195,6 +195,45 @@ class RunDiscoveryMockHttpTests(unittest.TestCase):
                     }
                 )
 
+    def test_run_discovery_skips_non_crypto_new_listings(self) -> None:
+        universe = self.root / "bybit_okx_universe.csv"
+        delta = self.root / "hot_add_delta.csv"
+        self._write_universe(universe, ["KEEP"])
+
+        def http_get_json(url: str, params: Mapping[str, str]) -> dict[str, Any]:
+            parsed = urlparse(url)
+            if "bybit.com" in parsed.netloc:
+                return {
+                    "retCode": 0,
+                    "result": {
+                        "list": [
+                            _bybit_item("KEEP"),
+                            _bybit_item("NEWCOIN"),
+                            _bybit_item("AAPL"),
+                        ],
+                        "nextPageCursor": "",
+                    },
+                }
+            if "okx.com" in parsed.netloc:
+                return {
+                    "code": "0",
+                    "data": [
+                        _okx_item("KEEP"),
+                        _okx_item("NEWCOIN"),
+                        _okx_item("AAPL"),
+                    ],
+                }
+            raise AssertionError(f"unexpected url {url}")
+
+        summary = run_discovery(
+            universe_path=universe,
+            delta_path=delta,
+            max_new=8,
+            http_get_json=http_get_json,
+        )
+        self.assertEqual(summary["coins"], ["NEWCOIN"])
+        self.assertGreaterEqual(summary["skipped_non_crypto"], 1)
+
     def test_run_discovery_writes_capped_delta_not_universe(self) -> None:
         universe = self.root / "bybit_okx_universe.csv"
         delta = self.root / "hot_add_delta.csv"

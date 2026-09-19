@@ -8,6 +8,8 @@ import os
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Mapping, MutableMapping, Optional, Sequence
 
+from research.is_crypto import is_crypto
+
 from .task_supervisor import TaskSupervisor
 from .universe_delta import read_delta_rows, read_drop_coins
 
@@ -124,6 +126,12 @@ class HotAddController:
                     coin or "-",
                     okx_symbol or "-",
                     bybit_symbol or "-",
+                )
+                continue
+            if not is_crypto(coin):
+                self.logger.info(
+                    "hot_add_skip | base_coin=%s | reason=non_crypto",
+                    coin,
                 )
                 continue
             if coin in self.quotes:

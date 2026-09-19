@@ -20,6 +20,7 @@ from app.utils.universe_delta import (
     diff_intersection_against_csv,
     write_delta_atomic,
 )
+from research.is_crypto import is_crypto
 
 logger = logging.getLogger("discovery")
 
@@ -272,8 +273,18 @@ def run_discovery(
     bybit_f = filter_bybit_live_usdt_linear(bybit_norm)
     okx_f = filter_okx_live_usdt_swap(okx_norm)
     intersection = build_intersection_rows(okx_f, bybit_f)
+    crypto_intersection: list[dict[str, str]] = []
+    skipped_non_crypto: list[str] = []
+    for row in intersection:
+        coin = str(row.get("base_coin", "")).strip()
+        if not coin:
+            continue
+        if not is_crypto(coin):
+            skipped_non_crypto.append(coin)
+            continue
+        crypto_intersection.append(row)
     csv_coins = csv_base_coins(universe_path)
-    fresh = diff_intersection_against_csv(intersection, csv_coins)
+    fresh = diff_intersection_against_csv(crypto_intersection, csv_coins)
     kept, dropped = apply_hard_cap(fresh, max_new)
     write_delta_atomic(delta_path, kept, universe_path=universe_path)
     summary = {
@@ -284,6 +295,8 @@ def run_discovery(
         "bybit_filtered": len(bybit_f),
         "okx_filtered": len(okx_f),
         "intersection": len(intersection),
+        "intersection_crypto": len(crypto_intersection),
+        "skipped_non_crypto": len(skipped_non_crypto),
         "csv_coins": len(csv_coins),
         "new_before_cap": len(fresh),
         "delta_rows": len(kept),
@@ -293,13 +306,16 @@ def run_discovery(
     }
     logger.info(
         "discovery_done | bybit_raw=%s | okx_raw=%s | bybit_filtered=%s | "
-        "okx_filtered=%s | intersection=%s | csv_coins=%s | new_before_cap=%s | "
+        "okx_filtered=%s | intersection=%s | intersection_crypto=%s | "
+        "skipped_non_crypto=%s | csv_coins=%s | new_before_cap=%s | "
         "delta_rows=%s | dropped_by_cap=%s | max_new=%s | coins=%s",
         summary["bybit_raw"],
         summary["okx_raw"],
         summary["bybit_filtered"],
         summary["okx_filtered"],
         summary["intersection"],
+        summary["intersection_crypto"],
+        summary["skipped_non_crypto"],
         summary["csv_coins"],
         summary["new_before_cap"],
         summary["delta_rows"],

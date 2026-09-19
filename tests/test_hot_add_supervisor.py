@@ -133,6 +133,35 @@ class TaskSupervisorTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("okx:AAA", names)
 
 
+class NonCryptoHotAddTests(unittest.TestCase):
+    def test_apply_rows_skips_non_crypto(self) -> None:
+        quotes = {
+            "AAA": quote_state_for_row(
+                {"okx_symbol": "AAA-USDT-SWAP", "bybit_symbol": "AAAUSDT"}
+            )
+        }
+        spawned: list[str] = []
+
+        def spawn(row: dict[str, str]) -> None:
+            coin = row["base_coin"]
+            quotes[coin] = quote_state_for_row(row)
+            spawned.append(coin)
+
+        logger = logging.getLogger("test-non-crypto")
+        logger.addHandler(logging.NullHandler())
+        controller = HotAddController(
+            quotes=quotes,
+            spawn=spawn,
+            max_extra=8,
+            initial_pair_count=1,
+            logger=logger,
+        )
+        added = controller.apply_rows([_delta_row("AAPL")])
+        self.assertEqual(added, [])
+        self.assertEqual(spawned, [])
+        self.assertNotIn("AAPL", quotes)
+
+
 class FakeDeltaHotAddTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self) -> None:
         self.temp = tempfile.TemporaryDirectory()
@@ -297,6 +326,7 @@ class FakeDeltaHotAddTests(unittest.IsolatedAsyncioTestCase):
             await supervisor.drain_named(tasks)
             del quotes[coin]
 
+        spawn(_delta_row("AAA"))
         spawn(_delta_row("NEW1"))
         await asyncio.sleep(0.05)
         await drop_coin_like_screaner("NEW1")

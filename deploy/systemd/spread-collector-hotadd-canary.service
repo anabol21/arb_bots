@@ -6,7 +6,8 @@ Wants=network-online.target
 [Service]
 Type=simple
 User=root
-WorkingDirectory=/root/spread_staging
+WorkingDirectory=/root/spread_hotadd_canary
+Environment=SPREAD_UNIVERSE=/root/spread_hotadd_canary/bybit_okx_universe_canary10.csv
 Environment=SPREAD_PARQUET_ROOT=/data/live-hotadd-canary
 Environment=SPREAD_SPOOL_ROOT=/data/spool-hotadd-canary
 Environment=SPREAD_GAPS_ROOT=/data/gaps-hotadd-canary
@@ -20,8 +21,8 @@ Environment=SPREAD_TICK_SKEW_MAX_MS=2000
 Environment=SPREAD_TICK_AGE_MAX_MS=2000
 Environment=SPREAD_HOT_ADD=1
 Environment=SPREAD_HOT_ADD_POLL_SEC=10
-Environment=SPREAD_HOT_ADD_DELTA=/root/spread_staging/hot_add_delta.csv
-Environment=SPREAD_HOT_ADD_DROP=/root/spread_staging/hot_add_drop.csv
+Environment=SPREAD_HOT_ADD_DELTA=/root/spread_hotadd_canary/hot_add_delta.csv
+Environment=SPREAD_HOT_ADD_DROP=/root/spread_hotadd_canary/hot_add_drop.csv
 # Raise to 16 only for experiment B +10 window (see docs/hot-add-new-coins.md).
 Environment=SPREAD_HOT_ADD_MAX_EXTRA=8
 ExecStartPre=/usr/bin/mkdir -p /data/live-hotadd-canary /data/spool-hotadd-canary /data/gaps-hotadd-canary /var/log/spread
