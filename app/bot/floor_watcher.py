@@ -36,6 +36,7 @@ from typing import Any, Mapping, Optional, Sequence
 
 import numpy as np
 
+from app.bot.fsadvise import advise_dontneed
 from app.bot.paths import floor_metrics_jsonl_path
 from app.schema.lean_event import BAR_INTERVAL_MS
 
@@ -678,5 +679,6 @@ class FloorJournalWriter:
                     fh.write("\n")
                 fh.flush()
                 os.fsync(fh.fileno())
+                advise_dontneed(fh.fileno())
             written.append(path)
         return written

@@ -23,6 +23,14 @@ One process / one canary unit journals **all** of:
 | theta | `{BBOT_DATA_ROOT}/theta/…/metrics.jsonl` |
 | **theta_trades** | `{BBOT_DATA_ROOT}/theta_trades/…/trades.jsonl` |
 
+After a successful flush+fsync, the floor / tw_p50 / theta `metrics.jsonl`
+writers call `posix_fadvise(POSIX_FADV_DONTNEED)` on the append fd (see
+[`app/bot/fsadvise.py`](../app/bot/fsadvise.py)). That drops kernel page
+cache for the live day file so `MemoryCurrent` does not track journal
+size inside the unit cgroup (`inactive_file` / `MemoryMax` pressure).
+It is **not** a durability, schema, or path change; compact-to-parquet
+still only covers old days. Missing `posix_fadvise` is a no-op.
+
 No second observer process. No Contour B / collector / WAL-EDEN / private path changes.
 
 ### Strategy K=1
