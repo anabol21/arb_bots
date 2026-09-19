@@ -8,7 +8,7 @@ SIGTERM. This supervisor includes tasks added after wait() started.
 from __future__ import annotations
 
 import asyncio
-from typing import Any, Coroutine, Optional
+from typing import Any, Coroutine, Optional, Sequence
 
 
 class TaskSupervisor:
@@ -55,6 +55,24 @@ class TaskSupervisor:
         for task in list(self._tasks):
             task.cancel()
         self._wakeup.set()
+
+    def cancel_named(self, *names: str) -> list[asyncio.Task[Any]]:
+        """Cancel tasks whose ``get_name()`` is in *names* without closing the supervisor."""
+        want = set(names)
+        targets: list[asyncio.Task[Any]] = []
+        for task in list(self._tasks):
+            if task.get_name() in want:
+                task.cancel()
+                targets.append(task)
+        if targets:
+            self._wakeup.set()
+        return targets
+
+    async def drain_named(self, tasks: Sequence[asyncio.Task[Any]]) -> None:
+        """Wait for named cancellations to finish (return_exceptions)."""
+        pending = [task for task in tasks if not task.done()]
+        if pending:
+            await asyncio.gather(*pending, return_exceptions=True)
 
     async def wait(self) -> None:
         """Block until closed and drained, or a non-cancelled task fails."""

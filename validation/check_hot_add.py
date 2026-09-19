@@ -54,6 +54,8 @@ def main() -> int:
         "app/utils/universe_delta.py",
         "app/discovery/intersection.py",
         "app/discovery/__main__.py",
+        "validation/hot_add_canary_driver.py",
+        "validation/compare_hotadd_canary_live.py",
     ]
     compile_proc = subprocess.run(
         [sys.executable, "-m", "py_compile", *compile_targets],

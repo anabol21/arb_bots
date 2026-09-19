@@ -6,21 +6,24 @@ import asyncio
 import logging
 import os
 from pathlib import Path
-from typing import Any, Callable, Mapping, MutableMapping, Optional, Sequence
+from typing import Any, Awaitable, Callable, Mapping, MutableMapping, Optional, Sequence
 
 from .task_supervisor import TaskSupervisor
-from .universe_delta import read_delta_rows
+from .universe_delta import read_delta_rows, read_drop_coins
 
 HOT_ADD_ENV = "SPREAD_HOT_ADD"
 DELTA_ENV = "SPREAD_HOT_ADD_DELTA"
+DROP_ENV = "SPREAD_HOT_ADD_DROP"
 MAX_EXTRA_ENV = "SPREAD_HOT_ADD_MAX_EXTRA"
 POLL_SEC_ENV = "SPREAD_HOT_ADD_POLL_SEC"
 
 DEFAULT_DELTA_PATH = "hot_add_delta.csv"
+DEFAULT_DROP_PATH = "hot_add_drop.csv"
 DEFAULT_MAX_EXTRA = 8
 DEFAULT_POLL_SEC = 30.0
 
 SpawnFn = Callable[[Mapping[str, str]], None]
+DropFn = Callable[[str], Awaitable[None]]
 
 
 def _flag_on(name: str) -> bool:
@@ -34,6 +37,11 @@ def hot_add_enabled() -> bool:
 
 def hot_add_delta_path() -> Path:
     raw = os.environ.get(DELTA_ENV, DEFAULT_DELTA_PATH).strip() or DEFAULT_DELTA_PATH
+    return Path(raw)
+
+
+def hot_add_drop_path() -> Path:
+    raw = os.environ.get(DROP_ENV, DEFAULT_DROP_PATH).strip() or DEFAULT_DROP_PATH
     return Path(raw)
 
 
@@ -155,6 +163,33 @@ class HotAddController:
         return added
 
 
+async def _apply_drop_snapshot(
+    drop_path: Path,
+    drop_fn: DropFn,
+    *,
+    last_mtime: Optional[float],
+    logger: logging.Logger,
+) -> Optional[float]:
+    if not drop_path.exists():
+        logger.warning("hot_add_drop_missing | path=%s", drop_path)
+        return last_mtime
+    mtime = drop_path.stat().st_mtime
+    if mtime == last_mtime:
+        return last_mtime
+    coins = read_drop_coins(drop_path)
+    dropped = 0
+    for coin in coins:
+        await drop_fn(coin)
+        dropped += 1
+    logger.info(
+        "hot_add_drop_read | path=%s | rows=%s | invoked=%s",
+        drop_path,
+        len(coins),
+        dropped,
+    )
+    return mtime
+
+
 async def run_hot_add_poller(
     controller: HotAddController,
     delta_path: Path,
@@ -163,9 +198,12 @@ async def run_hot_add_poller(
     reload_event: asyncio.Event,
     logger: logging.Logger,
     supervisor: Optional[TaskSupervisor] = None,
+    drop_path: Optional[Path] = None,
+    drop_fn: Optional[DropFn] = None,
 ) -> None:
-    """Poll / SIGHUP-reload the delta file. Never REST. Missing file is not fatal."""
-    last_mtime: Optional[float] = None
+    """Poll / SIGHUP-reload delta and drop snapshots. Never REST. Missing files are not fatal."""
+    last_delta_mtime: Optional[float] = None
+    last_drop_mtime: Optional[float] = None
     while True:
         if supervisor is not None and supervisor.closed:
             return
@@ -174,7 +212,7 @@ async def run_hot_add_poller(
                 logger.warning("hot_add_delta_missing | path=%s", delta_path)
             else:
                 mtime = delta_path.stat().st_mtime
-                if mtime != last_mtime:
+                if mtime != last_delta_mtime:
                     rows = read_delta_rows(delta_path)
                     added = controller.apply_rows(rows)
                     logger.info(
@@ -184,18 +222,30 @@ async def run_hot_add_poller(
                         len(added),
                         controller.extra_count(),
                     )
-                    last_mtime = mtime
+                    last_delta_mtime = mtime
+            if drop_path is not None and drop_fn is not None:
+                last_drop_mtime = await _apply_drop_snapshot(
+                    drop_path,
+                    drop_fn,
+                    last_mtime=last_drop_mtime,
+                    logger=logger,
+                )
         except asyncio.CancelledError:
             raise
         except Exception as exc:
             logger.error(
-                "hot_add_poll_failed | path=%s | error=%s",
+                "hot_add_poll_failed | delta=%s | drop=%s | error=%s",
                 delta_path,
+                drop_path,
                 exc,
             )
         try:
             await asyncio.wait_for(reload_event.wait(), timeout=interval_sec)
             reload_event.clear()
-            logger.info("hot_add_reload | source=sighup_or_event | path=%s", delta_path)
+            logger.info(
+                "hot_add_reload | source=sighup_or_event | delta=%s | drop=%s",
+                delta_path,
+                drop_path,
+            )
         except asyncio.TimeoutError:
             pass

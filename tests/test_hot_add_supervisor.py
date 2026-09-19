@@ -21,7 +21,10 @@ from app.utils.hot_add import (  # noqa: E402
     run_hot_add_poller,
 )
 from app.utils.task_supervisor import TaskSupervisor  # noqa: E402
-from app.utils.universe_delta import write_delta_atomic  # noqa: E402
+from app.utils.universe_delta import (  # noqa: E402
+    write_delta_atomic,
+    write_drop_atomic,
+)
 
 
 def _delta_row(coin: str) -> dict[str, str]:
@@ -101,6 +104,33 @@ class TaskSupervisorTests(unittest.IsolatedAsyncioTestCase):
 
         with self.assertRaises(RuntimeError):
             supervisor.add(noop(), name="too-late")
+
+    async def test_cancel_named_does_not_close_supervisor(self) -> None:
+        supervisor = TaskSupervisor()
+        cancelled: dict[str, bool] = {}
+
+        supervisor.add(
+            _hang_until_cancelled("okx:X", cancelled),
+            name="okx:X",
+        )
+        supervisor.add(
+            _hang_until_cancelled("bybit:X", cancelled),
+            name="bybit:X",
+        )
+        supervisor.add(
+            _hang_until_cancelled("okx:AAA", cancelled),
+            name="okx:AAA",
+        )
+        await asyncio.sleep(0.05)
+        tasks = supervisor.cancel_named("okx:X", "bybit:X")
+        await supervisor.drain_named(tasks)
+        await asyncio.sleep(0.01)
+        self.assertFalse(supervisor.closed)
+        self.assertTrue(cancelled["okx:X"])
+        self.assertTrue(cancelled["bybit:X"])
+        self.assertNotIn("okx:AAA", cancelled)
+        names = {task.get_name() for task in supervisor.snapshot()}
+        self.assertIn("okx:AAA", names)
 
 
 class FakeDeltaHotAddTests(unittest.IsolatedAsyncioTestCase):
@@ -236,11 +266,108 @@ class FakeDeltaHotAddTests(unittest.IsolatedAsyncioTestCase):
         for path, was in existing.items():
             self.assertEqual(path.exists(), was)
 
+    async def test_drop_coin_cancels_hot_add_and_keeps_bootstrap(self) -> None:
+        quotes = {
+            "AAA": quote_state_for_row(
+                {
+                    "okx_symbol": "AAA-USDT-SWAP",
+                    "bybit_symbol": "AAAUSDT",
+                }
+            )
+        }
+        cancelled: dict[str, bool] = {}
+        supervisor = TaskSupervisor()
+
+        def spawn(row: dict[str, str]) -> None:
+            coin = row["base_coin"]
+            quotes[coin] = quote_state_for_row(row)
+            supervisor.add(
+                _hang_until_cancelled(f"okx:{coin}", cancelled),
+                name=f"okx:{coin}",
+            )
+            supervisor.add(
+                _hang_until_cancelled(f"bybit:{coin}", cancelled),
+                name=f"bybit:{coin}",
+            )
+
+        async def drop_coin_like_screaner(coin: str) -> None:
+            if coin not in quotes:
+                return
+            tasks = supervisor.cancel_named(f"okx:{coin}", f"bybit:{coin}")
+            await supervisor.drain_named(tasks)
+            del quotes[coin]
+
+        spawn(_delta_row("NEW1"))
+        await asyncio.sleep(0.05)
+        await drop_coin_like_screaner("NEW1")
+        self.assertNotIn("NEW1", quotes)
+        self.assertIn("AAA", quotes)
+        self.assertTrue(cancelled["okx:NEW1"])
+        self.assertTrue(cancelled["bybit:NEW1"])
+        self.assertFalse(supervisor.closed)
+        names = {task.get_name() for task in supervisor.snapshot()}
+        self.assertIn("okx:AAA", names)
+
+    async def test_drop_poller_invokes_drop_fn_on_snapshot(self) -> None:
+        quotes = {"AAA": quote_state_for_row({"okx_symbol": "A", "bybit_symbol": "A"})}
+        dropped: list[str] = []
+
+        async def drop_fn(coin: str) -> None:
+            dropped.append(coin)
+            quotes.pop(coin, None)
+
+        spawn_calls: list[str] = []
+
+        def spawn(row: dict[str, str]) -> None:
+            spawn_calls.append(row["base_coin"])
+            quotes[row["base_coin"]] = quote_state_for_row(row)
+
+        logger = logging.getLogger("test-hot-add-drop")
+        logger.addHandler(logging.NullHandler())
+        controller = HotAddController(
+            quotes=quotes,
+            spawn=spawn,
+            max_extra=8,
+            initial_pair_count=1,
+            logger=logger,
+        )
+        drop_file = self.root / "hot_add_drop.csv"
+        write_drop_atomic(drop_file, ["NEW1", "NEW2"])
+        quotes["NEW1"] = quote_state_for_row(_delta_row("NEW1"))
+        quotes["NEW2"] = quote_state_for_row(_delta_row("NEW2"))
+        reload_event = asyncio.Event()
+        supervisor = TaskSupervisor()
+        supervisor.add(
+            run_hot_add_poller(
+                controller,
+                self.root / "missing_delta.csv",
+                interval_sec=0.05,
+                reload_event=reload_event,
+                logger=logger,
+                supervisor=supervisor,
+                drop_path=drop_file,
+                drop_fn=drop_fn,
+            ),
+            name="hot-add-poller",
+        )
+        for _ in range(50):
+            if dropped == ["NEW1", "NEW2"]:
+                break
+            await asyncio.sleep(0.02)
+        self.assertEqual(dropped, ["NEW1", "NEW2"])
+        self.assertNotIn("NEW1", quotes)
+        self.assertNotIn("NEW2", quotes)
+        self.assertIn("AAA", quotes)
+        supervisor.cancel_all()
+        await supervisor.drain()
+
 
 class CollectorWiringTests(unittest.TestCase):
     def test_screaner_uses_supervisor_and_spawn_coin(self) -> None:
         src = (REPO / "app" / "screaner_b_o.py").read_text(encoding="utf-8")
         self.assertIn("def spawn_coin(", src)
+        self.assertIn("async def drop_coin(", src)
+        self.assertIn("cancel_named", src)
         self.assertIn("TaskSupervisor", src)
         self.assertIn("hot_add_enabled()", src)
         self.assertNotIn("await asyncio.gather(*tasks)", src)
@@ -256,6 +383,23 @@ class CollectorWiringTests(unittest.TestCase):
         )
         self.assertNotIn("SPREAD_HOT_ADD=1", unit)
         self.assertNotIn("SPREAD_HOT_ADD=true", unit)
+
+    def test_canary_systemd_enables_hot_add_only_there(self) -> None:
+        unit = (
+            REPO / "deploy" / "systemd" / "spread-collector-hotadd-canary.service"
+        ).read_text(encoding="utf-8")
+        self.assertIn("SPREAD_HOT_ADD=1", unit)
+        self.assertIn("/data/live-hotadd-canary", unit)
+        self.assertIn("InaccessiblePaths", unit)
+        parquet_lines = [
+            line
+            for line in unit.splitlines()
+            if line.startswith("Environment=SPREAD_PARQUET_ROOT=")
+        ]
+        self.assertEqual(
+            parquet_lines,
+            ["Environment=SPREAD_PARQUET_ROOT=/data/live-hotadd-canary"],
+        )
 
 
 if __name__ == "__main__":

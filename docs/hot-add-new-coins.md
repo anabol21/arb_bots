@@ -56,6 +56,7 @@ Env, **default OFF**:
 | `SPREAD_HOT_ADD_DELTA` | `hot_add_delta.csv` | Delta snapshot from D0. Not REST. |
 | `SPREAD_HOT_ADD_MAX_EXTRA` | `8` | Cap on coins beyond the import-time pool. |
 | `SPREAD_HOT_ADD_POLL_SEC` | `30` | Poll interval. SIGHUP re-reads immediately. |
+| `SPREAD_HOT_ADD_DROP` | `hot_add_drop.csv` | Drop snapshot (`base_coin` column). Gated by `SPREAD_HOT_ADD`. |
 
 When on, the collector:
 
@@ -72,6 +73,87 @@ kill the process. Cap: `hot_add_cap_hit`, stop adding.
 Heartbeat `pairs=` is `len(quotes)` so a successful hot-add is visible without
 a restart.
 
+### Drop API (`drop_coin`)
+
+Orchestration only (no unsubscribe JSON; ingest frozen). Order matters:
+
+1. `TaskSupervisor.cancel_named` for `okx:{coin}` and `bybit:{coin}` (and
+   `okx-candle:` / `bybit-kline:` only when bar collection is on).
+2. Short drain of those tasks.
+3. `del quotes[coin]`.
+
+Missing coin: `drop_coin_missing` error log, process continues. The extra cap
+does not apply to drops. Drop file uses **snapshot** semantics (same as delta):
+each mtime change applies the listed `base_coin` rows once.
+
+---
+
+## Canary unit (VPS experiments A–D)
+
+Separate systemd unit — **not** `spread-collector.service`:
+
+- Template: [`deploy/systemd/spread-collector-hotadd-canary.service`](../deploy/systemd/spread-collector-hotadd-canary.service)
+- `SPREAD_HOT_ADD=1` **only** on this unit; production unit must stay off.
+- Parquet: `/data/live-hotadd-canary`
+- Spool: `/data/spool-hotadd-canary`
+- Gaps: `/data/gaps-hotadd-canary`
+- Log: `/var/log/spread/runtime-hotadd-canary.log`
+- `InaccessiblePaths=/data/live` so the canary cannot publish into production
+  ticks even if misconfigured.
+
+Never run a second writer on `/data/live`. Do not restart production
+`spread-collector` for these experiments. Do not fan-out `spread-bbot-theta-k1-canary`.
+
+### Experiment runbook
+
+| Stage | What | Driver / script |
+|-------|------|-----------------|
+| A | 2-coin bootstrap CSV (e.g. BTC+ETH), empty delta/drop, soak ticks | `validation/hot_add_canary_driver.py prepare` |
+| B | Cumulative delta +1, then +3, then +13 (+10 window) — **one step per minute** | `validation/hot_add_canary_driver.py run` |
+| C | Drop 1–2 **added** coins via `hot_add_drop.csv` | last step of `run` schedule |
+| D | Full 188 `take=yes` canary vs prod parquet (read-only) | `validation/compare_hotadd_canary_live.py` |
+
+Before stage B minute with +10 new coins, raise canary only:
+
+```bash
+# in spread-collector-hotadd-canary.service drop-in or systemctl edit:
+Environment=SPREAD_HOT_ADD_MAX_EXTRA=16
+sudo systemctl daemon-reload
+sudo systemctl restart spread-collector-hotadd-canary
+```
+
+Production `SPREAD_HOT_ADD_MAX_EXTRA` stays at 8.
+
+**VPS commands (after code deploy to `/root/spread_staging` on branch PR #53):**
+
+```bash
+sudo cp deploy/systemd/spread-collector-hotadd-canary.service /etc/systemd/system/
+sudo systemctl daemon-reload
+export STAGING=/root/spread_staging
+python3 validation/hot_add_canary_driver.py prepare \
+  --universe $STAGING/bybit_okx_universe.csv \
+  --staging-dir $STAGING/canary-hotadd \
+  --bootstrap BTC,ETH
+# Override universe for canary only (drop-in):
+# Environment=SPREAD_UNIVERSE=/root/spread_staging/canary-hotadd/canary_2coin.csv
+# Environment=SPREAD_HOT_ADD_DELTA=/root/spread_staging/canary-hotadd/hot_add_delta.csv
+# Environment=SPREAD_HOT_ADD_DROP=/root/spread_staging/canary-hotadd/hot_add_drop.csv
+sudo systemctl enable --now spread-collector-hotadd-canary
+python3 validation/hot_add_canary_driver.py run \
+  --staging-dir $STAGING/canary-hotadd \
+  --universe $STAGING/bybit_okx_universe.csv \
+  --interval-sec 60
+```
+
+Watch canary log for `hot_add_spawned`, `hot_add_applied`, `hot_add_dropped`,
+`ws_subscribe_ok`, `pairs=`. Production: `NRestarts=0`, `pairs=188`.
+
+Experiment D go/no-go (defaults in compare script):
+
+- Canary gap count in window ≤ production gap count.
+- Canary p95 delivery proxy ≤ production p95 + **100 ms**.
+- Per-coin tick count ratio (canary/prod) ≥ **0.95** on shared coins.
+
 ---
 
 ## Local proof (this patch)
@@ -83,6 +165,8 @@ python3 -m py_compile app/screaner_b_o.py app/utils/hot_add.py \
 python3 -m unittest tests/test_universe_delta.py \
   tests/test_hot_add_supervisor.py tests/test_universe_discovery.py
 python3 validation/check_hot_add.py
+python3 -m py_compile validation/hot_add_canary_driver.py \
+  validation/compare_hotadd_canary_live.py
 # optional public REST into tmp (still no /data writes):
 python3 validation/check_hot_add.py --live-rest
 ```

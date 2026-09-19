@@ -32,6 +32,7 @@ DELTA_FIELDNAMES = (
 )
 
 REQUIRED_DELTA_FIELDS = ("base_coin", "okx_symbol", "bybit_symbol")
+DROP_FIELDNAMES = ("base_coin",)
 
 FORBIDDEN_DELTA_PREFIXES = (
     "/data/live",
@@ -145,6 +146,65 @@ def apply_hard_cap(
     if len(material) <= max_new:
         return material, 0
     return material[:max_new], len(material) - max_new
+
+
+def read_drop_coins(path: DeltaPath) -> list[str]:
+    """Read a drop snapshot (base_coin column). Empty/missing file → empty list."""
+    csv_path = _as_path(path)
+    if not csv_path.exists():
+        return []
+    with csv_path.open("r", encoding="utf-8", newline="") as fh:
+        reader = csv.DictReader(fh)
+        if not reader.fieldnames:
+            raise ValueError(f"drop file has no header: {csv_path}")
+        if "base_coin" not in reader.fieldnames:
+            raise ValueError(
+                f"drop file missing required column 'base_coin': {csv_path}"
+            )
+        coins: list[str] = []
+        seen: set[str] = set()
+        for row in reader:
+            coin = str(row.get("base_coin", "")).strip()
+            if not coin or coin in seen:
+                continue
+            seen.add(coin)
+            coins.append(coin)
+        return coins
+
+
+def write_drop_atomic(path: DeltaPath, coins: Sequence[str]) -> Path:
+    """Atomic replace of the drop snapshot (base_coin rows only)."""
+    drop_path = _as_path(path)
+    text = str(drop_path.expanduser().absolute())
+    for prefix in FORBIDDEN_DELTA_PREFIXES:
+        if text == prefix or text.startswith(prefix + os.sep):
+            raise DeltaPathError(f"refusing to write drop list under {prefix}: {drop_path}")
+    drop_path.parent.mkdir(parents=True, exist_ok=True)
+    unique = []
+    seen: set[str] = set()
+    for raw in coins:
+        coin = str(raw).strip()
+        if not coin or coin in seen:
+            continue
+        seen.add(coin)
+        unique.append(coin)
+    tmp_path = drop_path.with_name(drop_path.name + ".tmp")
+    try:
+        with tmp_path.open("w", encoding="utf-8", newline="") as fh:
+            writer = csv.DictWriter(fh, fieldnames=list(DROP_FIELDNAMES))
+            writer.writeheader()
+            for coin in unique:
+                writer.writerow({"base_coin": coin})
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp_path, drop_path)
+    except Exception:
+        try:
+            tmp_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise
+    return drop_path
 
 
 def read_delta_rows(path: DeltaPath) -> list[dict[str, str]]:

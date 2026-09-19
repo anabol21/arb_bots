@@ -41,6 +41,7 @@ from utils.tick_validity import (  # noqa: E402
 from utils.hot_add import (  # noqa: E402
     HotAddController,
     hot_add_delta_path,
+    hot_add_drop_path,
     hot_add_enabled,
     hot_add_max_extra,
     hot_add_poll_sec,
@@ -990,6 +991,32 @@ def spawn_coin(row: dict[str, str]) -> None:
     )
 
 
+async def drop_coin(coin: str) -> None:
+    """Orchestration-only hot-drop: cancel book (and bar) tasks, then remove quotes[coin]."""
+    supervisor = _task_supervisor
+    if supervisor is None:
+        raise RuntimeError("drop_coin requires an active task supervisor")
+    coin = str(coin).strip()
+    if not coin:
+        runtime_logger.error("drop_coin_invalid | base_coin=-")
+        return
+    if coin not in quotes:
+        runtime_logger.error(
+            "drop_coin_missing | base_coin=%s | reason=not_in_quotes",
+            coin,
+        )
+        return
+    task_names = [f"okx:{coin}", f"bybit:{coin}"]
+    if collect_bars_enabled():
+        task_names.append(f"okx-candle:{coin}")
+        if COLLECT_BYBIT_BARS:
+            task_names.append(f"bybit-kline:{coin}")
+    cancelled = supervisor.cancel_named(*task_names)
+    await supervisor.drain_named(cancelled)
+    del quotes[coin]
+    runtime_logger.info("hot_add_dropped | base_coin=%s", coin)
+
+
 async def main():
     global publisher, bars_publisher, recovery_worker, bars_recovery_worker
     global spool, bars_spool, _task_supervisor
@@ -1183,14 +1210,16 @@ async def main():
 
         hot_add_on = hot_add_enabled()
         runtime_logger.info(
-            "hot_add | enabled=%s | delta=%s | max_extra=%s",
+            "hot_add | enabled=%s | delta=%s | drop=%s | max_extra=%s",
             str(hot_add_on).lower(),
             hot_add_delta_path(),
+            hot_add_drop_path(),
             os.environ.get("SPREAD_HOT_ADD_MAX_EXTRA", "8"),
         )
         if hot_add_on:
             max_extra = hot_add_max_extra()
             delta_path = hot_add_delta_path()
+            drop_path = hot_add_drop_path()
             controller = HotAddController(
                 quotes=quotes,
                 spawn=spawn_coin,
@@ -1215,6 +1244,8 @@ async def main():
                     reload_event=hot_add_reload,
                     logger=runtime_logger,
                     supervisor=supervisor,
+                    drop_path=drop_path,
+                    drop_fn=drop_coin,
                 ),
                 name="hot-add-poller",
             )
