@@ -118,6 +118,7 @@ Use these as starting points. Add more targeted commands only when required by t
   - `app/utils/`
 - Validation logic belongs in `validation/`
 - Documentation and operational instructions belong in `docs/`
+- Human-facing contour diagrams: `docs/human/`
 - Strategy gear roadmap: `docs/strategy-gears.md`
 - Research and offline analysis belong in `research/`
 - Keep runtime code and offline research code separate
