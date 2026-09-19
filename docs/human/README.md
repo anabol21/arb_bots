@@ -13,12 +13,14 @@ From the **repository root** (Docker required):
 ```bash
 docker run --rm -it -p 8080:8080 \
   -v "$(pwd)/docs/human/c4:/usr/local/structurizr" \
-  structurizr/lite
+  structurizr/lite:2025.11.08
 ```
 
 Then open [http://localhost:8080](http://localhost:8080) and pick a view by its **title** (the six names below). Model file: [`c4/workspace.dsl`](c4/workspace.dsl).
 
-This environment had **no Docker**; Lite was not smoked here. Verify locally. See [`NOTES.md`](NOTES.md).
+Pin **`structurizr/lite:2025.11.08`**. Untagged `structurizr/lite` (`latest`) only prints a vNext deprecation banner and exits; it does not serve diagrams.
+
+This environment had **no Docker**; Lite was not smoked here. Verify locally with the pinned image. See [`NOTES.md`](NOTES.md).
 
 Without Docker, GitHub can render the mermaid overviews in [`exports/`](exports/).
 

@@ -1,3 +1,4 @@
+# Lite 2025.11.08 rejects containerDb inside group. Stores stay in groups as container + tags "Database" (cylinder style below). Do not restore containerDb.
 workspace "arb_bots — human contours" "Six process contours as coded. Human diagram layer. Not a running topology." {
 
     !impliedRelationships false
@@ -28,44 +29,74 @@ workspace "arb_bots — human contours" "Six process contours as coded. Human di
                 livePubQueue = container "Очередь записи" "очередь внутри сборщика; worker пишет файлы" "queue.Queue" {
                     tags "Queue"
                 }
-                liveTicks = containerDb "Тики" "первая запись /data/live" "parquet"
-                liveSpool = containerDb "Запас при сбое записи" "/data/spool" "spool"
-                liveGaps = containerDb "Пропуски связи" "/data/gaps" "jsonl"
+                liveTicks = container "Тики" "первая запись /data/live" "parquet" {
+                    tags "Database"
+                }
+                liveSpool = container "Запас при сбое записи" "/data/spool" "spool" {
+                    tags "Database"
+                }
+                liveGaps = container "Пропуски связи" "/data/gaps" "jsonl" {
+                    tags "Database"
+                }
                 liveCompactor = container "Уплотнение тиков" "spread-compactor.timer · app.storage.compactor" "Python oneshot"
-                liveCompacted = containerDb "Уплотнённые тики" "/data/compacted" "parquet"
+                liveCompacted = container "Уплотнённые тики" "/data/compacted" "parquet" {
+                    tags "Database"
+                }
                 liveBackup = container "Копия тиков" "spread-backup-transfer.timer · app.storage.backup_transfer" "Python oneshot"
-                liveBars = containerDb "Бары (писатель неизвестен)" "/data/bars; боевой сборщик бары не пишет" "parquet"
+                liveBars = container "Бары (писатель неизвестен)" "/data/bars; боевой сборщик бары не пишет" "parquet" {
+                    tags "Database"
+                }
                 liveBarsCompactor = container "Уплотнение баров" "spread-bars-compactor.timer · app.storage.bars_compactor" "Python oneshot"
-                liveBarsCompacted = containerDb "Уплотнённые бары" "/data/bars_compacted_v2" "parquet"
+                liveBarsCompacted = container "Уплотнённые бары" "/data/bars_compacted_v2" "parquet" {
+                    tags "Database"
+                }
                 liveBarsBackup = container "Копия баров" "таймеры копии баров · app.storage.backup_transfer" "Python oneshot"
             }
 
             group "Contour — Canary prices" {
                 canaryDiscovery = container "Поиск новых пар" "spread-discovery-hotadd-canary.timer · python -m app.discovery" "Python oneshot"
-                canaryDelta = containerDb "Список новинок" "delta-файл; не боевой список пар" "csv"
-                canaryDrop = containerDb "Список снятия" "drop-файл" "csv"
+                canaryDelta = container "Список новинок" "delta-файл; не боевой список пар" "csv" {
+                    tags "Database"
+                }
+                canaryDrop = container "Список снятия" "drop-файл" "csv" {
+                    tags "Database"
+                }
                 canaryCollector = container "Сбор цен (изолированный)" "spread-collector-hotadd-canary.service · app/screaner_b_o.py, другой каталог" "Python"
                 canaryPubQueue = container "Очередь записи (изолированная)" "очередь внутри изолированного сборщика" "queue.Queue" {
                     tags "Queue"
                 }
-                canaryTicks = containerDb "Тики (изолированные)" "/data/live-hotadd-canary" "parquet"
-                canarySpool = containerDb "Запас (изолированный)" "/data/spool-hotadd-canary" "spool"
-                canaryGaps = containerDb "Пропуски (изолированные)" "/data/gaps-hotadd-canary" "jsonl"
+                canaryTicks = container "Тики (изолированные)" "/data/live-hotadd-canary" "parquet" {
+                    tags "Database"
+                }
+                canarySpool = container "Запас (изолированный)" "/data/spool-hotadd-canary" "spool" {
+                    tags "Database"
+                }
+                canaryGaps = container "Пропуски (изолированные)" "/data/gaps-hotadd-canary" "jsonl" {
+                    tags "Database"
+                }
             }
 
             group "Contour — Stub B" {
                 stubBot = container "Решение без отправки" "spread-bbot.service · python -m app.bot" "Python"
-                stubJournal = containerDb "Журнал намерений" "/data/bbot" "jsonl"
+                stubJournal = container "Журнал намерений" "/data/bbot" "jsonl" {
+                    tags "Database"
+                }
                 stubBackup = container "Копия журнала" "spread-bbot-backup-transfer.timer · app.bot.backup" "Python oneshot"
                 gear2Bot = container "Решение без отправки (4 монеты)" "spread-bbot-gear2.service · python -m app.bot" "Python"
-                gear2Journal = containerDb "Журнал намерений (4 монеты)" "/data/bbot-gear2" "jsonl"
+                gear2Journal = container "Журнал намерений (4 монеты)" "/data/bbot-gear2" "jsonl" {
+                    tags "Database"
+                }
                 gear2Backup = container "Копия журнала (4 монеты)" "spread-bbot-gear2-backup-transfer.timer · app.bot.backup" "Python oneshot"
             }
 
             group "Contour — Canary B" {
                 thetaBot = container "Решение раз в секунду, без отправки" "VPS unit spread-bbot-theta-k1-canary · python -m app.bot · файла юнита нет в git" "Python"
-                thetaMetrics = containerDb "Метрики наблюдения" "floor / tw_p50 / theta jsonl" "jsonl"
-                thetaJournal = containerDb "Журнал намерений (1 Гц)" "theta_trades jsonl" "jsonl"
+                thetaMetrics = container "Метрики наблюдения" "floor / tw_p50 / theta jsonl" "jsonl" {
+                    tags "Database"
+                }
+                thetaJournal = container "Журнал намерений (1 Гц)" "theta_trades jsonl" "jsonl" {
+                    tags "Database"
+                }
             }
 
             group "Contour — Live send" {
@@ -73,20 +104,32 @@ workspace "arb_bots — human contours" "Six process contours as coded. Human di
                 walQueue = container "Очередь ордеров (2 монеты)" "asyncio.Queue внутри процесса" "asyncio.Queue" {
                     tags "Queue"
                 }
-                walJournal = containerDb "Журнал ордеров (2 монеты)" "/data/bbot-canary-wal-eden" "jsonl"
+                walJournal = container "Журнал ордеров (2 монеты)" "/data/bbot-canary-wal-eden" "jsonl" {
+                    tags "Database"
+                }
                 g22Bot = container "Решение и отправка (30 монет)" "spread-bbot-gear22-live-canary.service · python -m app.bot" "Python"
                 g22Queue = container "Очередь ордеров (30 монет)" "asyncio.Queue внутри процесса" "asyncio.Queue" {
                     tags "Queue"
                 }
-                g22Journal = containerDb "Журнал ордеров (30 монет)" "/data/bbot-gear22-live-canary" "jsonl"
-                g22Wire = containerDb "Журнал провода" "private/wire jsonl" "jsonl"
+                g22Journal = container "Журнал ордеров (30 монет)" "/data/bbot-gear22-live-canary" "jsonl" {
+                    tags "Database"
+                }
+                g22Wire = container "Журнал провода" "private/wire jsonl" "jsonl" {
+                    tags "Database"
+                }
             }
 
             group "Contour — Simulator" {
                 simReplay = container "Прогон истории" "model.ipynb / research/gear22_backtest/replay.py · без systemd" "Python offline"
-                histTicks = containerDb "Исторические тики" "parquet с диска; не живой сборщик" "parquet"
-                simFeatures = containerDb "Таблица признаков" "1 Гц, из исторических тиков" "table"
-                simTrades = containerDb "Сделки прогона" "не ордера на бирже" "table"
+                histTicks = container "Исторические тики" "parquet с диска; не живой сборщик" "parquet" {
+                    tags "Database"
+                }
+                simFeatures = container "Таблица признаков" "1 Гц, из исторических тиков" "table" {
+                    tags "Database"
+                }
+                simTrades = container "Сделки прогона" "не ордера на бирже" "table" {
+                    tags "Database"
+                }
             }
         }
 

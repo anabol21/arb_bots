@@ -2,7 +2,7 @@
 
 Date of this docs layer: 2026-09-19. Branch from `main` @ `bfc5a29`. No application code.
 
-Lite was **not** run here (no Docker). **Verify Structurizr Lite locally** with the command in [`README.md`](README.md) before treating the DSL as rendered-proof.
+Lite was **not** run in the agent VM (no Docker). **Verify Structurizr Lite locally** with the **pinned** command in [`README.md`](README.md) before treating the DSL as rendered-proof. Mac 2026-09-19: untagged `structurizr/lite` (`latest`) printed a deprecation banner and exited; `structurizr/lite:2025.11.08` served diagrams.
 
 ## What this snapshot is
 
@@ -50,6 +50,8 @@ Do not merge this PR with #53 or #55. When topology changes (new long-running pr
 
 ## DSL / Lite caveats
 
+- Pin **`structurizr/lite:2025.11.08`**. Do not use untagged `structurizr/lite` (`latest`): that image is a stub (deprecation banner, exit 0, no HTTP server).
+- Lite **2025.11.08 rejects `containerDb` inside `group`** (21 stores on this model). Journals stay **in** contour groups as `container` + `tags "Database"` so they still draw as cylinders. Do not restore `containerDb` in groups. No local overlay should be required after this file.
 - View **titles** are the six human names. View **keys** are contour-ids (`d-live`, …) for stable URLs.
 - Level 1 is the **union** of capabilities (including «отправка ордера»). It does not mean every contour sends.
 - Pipe shape = in-process queue, not a second systemd unit.
