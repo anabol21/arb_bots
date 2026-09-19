@@ -3,8 +3,17 @@
 No sockets, secrets, production writes, systemd or live broker access.
 EV2-03 adds a non-owning same-loop transport kernel; importing it does not
 connect sockets or place orders.
+EV2-04 adds private event adapters; importing them performs no I/O.
 """
 
+from app.bot.execution.adapters import (
+    SCHEMA_VERSION as ADAPTER_SCHEMA_VERSION,
+    AdapterBatch,
+    AdapterError,
+    AdapterIssue,
+    AdapterSource,
+    PrivateEventAdapter,
+)
 from app.bot.execution.contracts import (
     SCHEMA_VERSION,
     ContractValidationError,
@@ -50,8 +59,13 @@ from app.bot.execution.transport import (
 )
 
 __all__ = [
+    "ADAPTER_SCHEMA_VERSION",
     "SCHEMA_VERSION",
     "TRANSPORT_SCHEMA_VERSION",
+    "AdapterBatch",
+    "AdapterError",
+    "AdapterIssue",
+    "AdapterSource",
     "CachedInstrument",
     "ContractValidationError",
     "DispatchResult",
@@ -68,6 +82,7 @@ __all__ = [
     "LegStatus",
     "LoopOwnedTradeSocket",
     "PreparedDualLeg",
+    "PrivateEventAdapter",
     "SpreadDirection",
     "SpreadState",
     "SpreadStatus",

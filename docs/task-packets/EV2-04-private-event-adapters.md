@@ -273,3 +273,234 @@ Stop and report instead of widening scope if:
 
 Leave changes uncommitted for Codex review and an independent Cursor critic.
 Do not push, access the VPS or start any canary.
+
+## Implementation evidence (2026-09-19)
+
+Local worktree only. No VPS access, no live credentials, no commit, no push.
+No network services and no live exchanges.
+
+Added / amended (allowed paths only):
+
+- `app/bot/execution/adapters.py` (`bbot.execution.adapters.v1`)
+- `app/bot/execution/__init__.py` (EV2-04 public API export only)
+- `tests/test_execution_adapters.py`
+- this task packet (evidence appendix only)
+
+Existing private modules, `contracts.py`, `state_machine.py`, live broker,
+runtime, collector, systemd and VPS paths were not edited. Stop conditions
+were not reached: cumulative quantity uses `cumExecQty` / `accFillSz` or
+internally hashed per-fill ids; correlation uses only EV2 client ids and
+`(venue, instrument)`; REST completeness is an explicit caller flag plus
+payload failure/pagination markers; all required observations fit the
+frozen EV2-02 event types.
+
+Locked in this adapter:
+
+- One registered `TradeIntent` with exactly two `LegPlan` values; index
+  only derived `client_id` and unique `(venue, instrument)`.
+- Local receive monotonic time is the only EV2 clock; every valid row in
+  a multi-row frame is processed.
+- Bybit `reqId` / OKX `id` ACK accept or `venue_rejected`; OKX per-row
+  `sCode` overrides top-level success; id-less OKX errors require the
+  exact expected registered client id.
+- Cumulative partial/final fills, overfill preserved, stale lower qty
+  dropped, cross-channel duplicates emit once.
+- Stream positions never synthesize zero; complete current-generation
+  REST may; unknown-client open orders are counted and cannot hide
+  flatness; matched recon is venue/leg-scoped.
+- Lower generation is stale; higher generation emits one
+  `STREAM_GENERATION_MISMATCH` per intent, blocks ordinary evidence, and
+  re-enables only after complete REST observations plus matched recon.
+- Duplicate evidence does not consume sequence. Restart continues from
+  seeded last sequence/monotonic time.
+- Public views omit raw frames, secrets, account ids and venue order ids.
+  Import/construction performs no I/O.
+
+Commands and counts (local Python 3.9.6):
+
+```text
+PYTHONPYCACHEPREFIX=./.pycache python3 -m py_compile \
+  app/bot/execution/adapters.py tests/test_execution_adapters.py
+# pass
+
+PYTHONPYCACHEPREFIX=./.pycache python3 -m unittest \
+  tests.test_execution_adapters \
+  tests.test_execution_transport \
+  tests.test_execution_contracts \
+  tests.test_execution_state_machine -v
+# 159 tests, OK (adapters 20, transport 27, contracts+state machine 112)
+
+PYTHONPYCACHEPREFIX=./.pycache python3 -m unittest \
+  tests.test_warm_single_loop \
+  tests.test_warm_ws_place_threadsafe \
+  tests.test_dual_leg_ack \
+  tests.test_wire_transcript \
+  tests.test_sentry_integration -v
+# 57 tests, OK (warm loop 8, warm place threadsafe 18, ACK 13,
+# wire transcript 8, Sentry 10)
+
+python3 -m pytest tests/test_order_lease_sol_close.py -v
+# 3 passed
+
+git diff --check
+# pass (files left uncommitted for independent review)
+```
+
+New EV2-04 adapter tests: 20.
+EV2-03 transport tests: 27 preserved.
+EV2-02 contracts/state machine: 112 preserved.
+Private warm/ACK/wire/Sentry regression: 57.
+Lease close pytest: 3.
+Combined: 219.
+
+## Critic-blocker repair evidence (2026-09-19)
+
+Local worktree only. No VPS access, no live credentials, no commit, no push.
+No sockets, secrets, collector, or frozen `contracts.py` / `state_machine.py`
+edits. `__init__.py` was not amended in this repair.
+
+Independent-review blockers locked in `adapters.py`:
+
+1. Non-mapping rows still process sibling valid rows on ordinary stream
+   frames. On a complete REST snapshot they invalidate the whole snapshot:
+   no synthesized zero, no `matched=true`.
+2. REST position rows missing instrument fail closed (`malformed_frame`).
+   Absence-to-zero is not synthesized from an unidentifiable row.
+3. REST open-order rows missing instrument fail closed. They are not counted
+   as zero and cannot emit `matched=true`. Unknown-client rows that do have
+   an instrument remain counted and still block match.
+4. `_resolve_bound` rejects a client id bound to the other venue even when
+   instrument is missing or foreign. No event is emitted for the wrong leg.
+5. Explicit Bybit `retCode` not in `{0,"0"}` overrides `success=true` and
+   emits `ACK_REJECTED` / `venue_rejected`.
+6. Each REST half is replaced on a new snapshot. Failed, incomplete,
+   paginated, stale-generation, malformed, or conflicting snapshots break
+   the current pair so leftover/stale halves cannot emit `matched=true`.
+   A later clean complete current-generation positions+orders pair clears
+   that dirty state, emits `matched=true`, and unblocks.
+
+Critic residuals:
+
+- OKX execution row missing `state`: **fixed**. The packet emits `FILL` only
+  when the venue reports terminal filled or cumulative quantity
+  reaches/exceeds plan. Inventing `state=filled` on a fills row made a
+  sub-plan cumulative look terminal. Missing state is now empty; `FILL` vs
+  `PARTIAL_FILL` follows observed quantity only.
+- Seeded restart duplicate behavior: **not fixed**. Restart seed is only
+  last per-intent sequence, last monotonic time, and expected generation.
+  The packet requires dedupe state to be reconstructible from that seed.
+  The in-memory emitted-key / last-fill maps cannot be rebuilt from those
+  scalars without guessing. Widening the constructor to accept a dedupe
+  snapshot would expand the reviewed API. Treating the first post-restart
+  frame as a duplicate would drop real first evidence and weaken
+  fail-closed observation. Same-instance replay still does not consume
+  sequence; seeded restart still continues contiguously. Exact
+  cross-process frame idempotency belongs to later WAL replay (EV2-05).
+
+Commands and counts (local Python 3.9.6):
+
+```text
+PYTHONPYCACHEPREFIX=./.pycache python3 -m py_compile \
+  app/bot/execution/adapters.py tests/test_execution_adapters.py
+# pass
+
+PYTHONPYCACHEPREFIX=./.pycache python3 -m unittest \
+  tests.test_execution_adapters \
+  tests.test_execution_transport \
+  tests.test_execution_contracts \
+  tests.test_execution_state_machine -v
+# 166 tests, OK (adapters 27, transport 27, contracts+state machine 112)
+
+PYTHONPYCACHEPREFIX=./.pycache python3 -m unittest \
+  tests.test_warm_single_loop \
+  tests.test_warm_ws_place_threadsafe \
+  tests.test_dual_leg_ack \
+  tests.test_wire_transcript \
+  tests.test_sentry_integration -v
+# 57 tests, OK (warm loop 8, warm place threadsafe 18, ACK 13,
+# wire transcript 8, Sentry 10)
+
+python3 -m pytest tests/test_order_lease_sol_close.py -v
+# 3 passed
+
+git diff --check
+# pass (files left uncommitted)
+```
+
+New EV2-04 adapter tests: 27 (20 original + 7 critic-blocker/residual cases).
+EV2-03 transport tests: 27 preserved.
+EV2-02 contracts/state machine: 112 preserved.
+Private warm/ACK/wire/Sentry regression: 57.
+Lease close pytest: 3.
+Combined: 226.
+
+## Same-qty REST observation accounting (2026-09-19)
+
+Local worktree only. No VPS access, no live credentials, no commit, no push.
+No sockets, secrets, collector, or frozen `contracts.py` / `state_machine.py`
+edits. `__init__.py` was not amended in this repair.
+
+Remaining critic blocker:
+
+- `_adapt_rest_positions` resets `observed_position_legs` on every snapshot.
+  A valid explicit same-quantity retry then hit `_make_event` dedupe for
+  `POSITION_OBSERVED`, so the leg was not re-added. After a failed or
+  incomplete open-orders half, a later clean same-generation
+  positions+orders pair never emitted `matched=true` and never unblocked.
+
+Locked:
+
+- Validated explicit REST position accounting is independent of whether
+  duplicate `POSITION_OBSERVED` emission is suppressed.
+- Conflicting or malformed position rows still do not count.
+- Same-generation same-qty retry does not consume sequence.
+- Adversarial path: higher-generation mismatch → explicit nonzero
+  position → failed then incomplete orders → same explicit qty retry →
+  clean orders → `matched=true`, adapter unblocked, no second position
+  event.
+
+Commands and counts (local Python 3.9.6):
+
+```text
+PYTHONPYCACHEPREFIX=./.pycache python3 -m py_compile \
+  app/bot/execution/adapters.py tests/test_execution_adapters.py
+# pass
+
+PYTHONPYCACHEPREFIX=./.pycache python3 -m unittest \
+  tests.test_execution_adapters \
+  tests.test_execution_transport \
+  tests.test_execution_contracts \
+  tests.test_execution_state_machine -v
+# 167 tests, OK (adapters 28, transport 27, contracts+state machine 112)
+
+git diff --check
+# pass (files left uncommitted)
+```
+
+New EV2-04 adapter tests: 28 (20 original + 7 prior critic cases + 1
+same-qty REST retry).
+EV2-03 transport tests: 27 preserved.
+EV2-02 contracts/state machine: 112 preserved.
+Adapter + EV2 combined: 167.
+
+## Independent critic acceptance (2026-09-19)
+
+Final read-only Cursor critic verdict: `PASS`.
+
+The critic independently replayed the repaired reconnect path: generation
+mismatch, explicit nonzero REST position, failed and incomplete open-orders
+halves, same-generation same-quantity position retry, then a clean open-orders
+half. The retry consumed no sequence, the clean pair emitted
+`RECONCILIATION matched=true`, and the venue fence unblocked. Malformed and
+conflicting rows did not count as observations.
+
+The critic also rechecked the six earlier blockers: malformed REST rows and
+missing instruments cannot synthesize zero or matched reconciliation;
+unknown-client open orders remain visible; cross-venue client ids cannot bind
+the wrong leg; explicit Bybit `retCode` failure overrides `success=true`; and
+a later clean full REST pair can recover a previously dirty fence.
+
+Acceptance evidence remained local-only: 167 EV2 tests passed (28 adapters,
+27 transport, 112 contracts/state machine), 57 private regression tests
+passed, 3 lease tests passed, and `git diff --check` passed. No VPS, live
+venue, credentials, runtime wiring or canary authority was used.
