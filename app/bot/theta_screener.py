@@ -26,6 +26,7 @@ from pathlib import Path
 from typing import Any, Mapping, Optional, Sequence
 
 from app.bot.floor_watcher import LiveFloorObserver
+from app.bot.fsadvise import advise_dontneed
 from app.bot.paths import theta_metrics_jsonl_path
 from app.bot.tw_p50_watcher import LiveTwP50Observer, TwP50Snapshot
 
@@ -284,5 +285,6 @@ class ThetaJournalWriter:
                     fh.write("\n")
                 fh.flush()
                 os.fsync(fh.fileno())
+                advise_dontneed(fh.fileno())
             written.append(path)
         return written

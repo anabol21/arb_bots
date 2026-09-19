@@ -29,6 +29,7 @@ from typing import Any, Mapping, Optional, Sequence
 import numpy as np
 
 from app.bot.floor_watcher import tick_hold_weights_ms, time_weighted_quantile
+from app.bot.fsadvise import advise_dontneed
 from app.bot.paths import tw_p50_metrics_jsonl_path
 
 SCHEMA_VERSION = "bbot.tw_p50.v1"
@@ -390,5 +391,6 @@ class TwP50JournalWriter:
                     fh.write("\n")
                 fh.flush()
                 os.fsync(fh.fileno())
+                advise_dontneed(fh.fileno())
             written.append(path)
         return written
