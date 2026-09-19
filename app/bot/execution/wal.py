@@ -16,7 +16,7 @@ from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
 from types import MappingProxyType
-from typing import Any, Callable, Deque, Mapping, Optional, Tuple
+from typing import Any, Callable, Deque, Mapping, Optional, Sequence, Tuple
 
 from app.bot.execution.contracts import (
     SCHEMA_VERSION as CONTRACT_SCHEMA_VERSION,
@@ -36,6 +36,7 @@ SCHEMA_VERSION = "bbot.execution.wal.v2"
 GENESIS_HASH = "0" * 64
 WAL_FILENAME = "wal.jsonl"
 WAL_DIRNAME = "wal.v2"
+SUBMIT_WORST_CASE_EVENTS = 5
 RECORD_KEYS = (
     "schema_version",
     "wal_seq",
@@ -197,6 +198,46 @@ def _qualifying_recon_venue(event: ExecutionEvent) -> Optional[Venue]:
     if isinstance(event.leg_id, str) and event.leg_id:
         return venue
     return None
+
+
+def admission_capacity_ok(
+    *,
+    queue_depth: int,
+    max_queue: int,
+    reserved_tail: int,
+    count: int,
+    open_intent: bool,
+    scanned: bool,
+    hard_full: bool,
+    integrity_unhealthy: bool,
+) -> bool:
+    """Pure enqueue-admission check. No mutation, disk, or drain."""
+    if not scanned or hard_full or integrity_unhealthy:
+        return False
+    if isinstance(count, bool) or not isinstance(count, int) or count < 0:
+        return False
+    if (
+        isinstance(queue_depth, bool)
+        or not isinstance(queue_depth, int)
+        or queue_depth < 0
+    ):
+        return False
+    if isinstance(max_queue, bool) or not isinstance(max_queue, int) or max_queue < 1:
+        return False
+    if (
+        isinstance(reserved_tail, bool)
+        or not isinstance(reserved_tail, int)
+        or reserved_tail < 0
+        or reserved_tail >= max_queue
+    ):
+        return False
+    if count == 0:
+        return True
+    if queue_depth + count > max_queue:
+        return False
+    if open_intent and queue_depth + count > (max_queue - reserved_tail):
+        return False
+    return True
 
 
 def _denied_path(path: Path) -> bool:
@@ -733,64 +774,119 @@ class ExecutionWal:
     def run_id(self) -> str:
         return self._run_id
 
-    def enqueue(self, event: ExecutionEvent) -> WalAppendAck:
-        if not isinstance(event, ExecutionEvent):
+    def enqueue_batch(self, events: Sequence[ExecutionEvent]) -> Tuple[WalAppendAck, ...]:
+        """Atomically admit events. Mutates queue/seq/hash only on full success."""
+        if not isinstance(events, Sequence) or isinstance(events, (str, bytes)):
             raise WalError("invalid_event")
-        if event.run_id != self._run_id:
-            raise WalError("run_mismatch")
-        if event.schema_version != CONTRACT_SCHEMA_VERSION:
-            raise WalError("invalid_event_schema")
+        event_list = list(events)
+        if not event_list:
+            return ()
+        open_intent = False
+        for event in event_list:
+            if not isinstance(event, ExecutionEvent):
+                raise WalError("invalid_event")
+            if event.run_id != self._run_id:
+                raise WalError("run_mismatch")
+            if event.schema_version != CONTRACT_SCHEMA_VERSION:
+                raise WalError("invalid_event_schema")
+            if _is_open_intent_accepted(event):
+                open_intent = True
         if not self._scanned:
-            return WalAppendAck(
-                accepted=False,
-                durable=False,
-                wal_seq=None,
-                reason_code="replay_required",
+            return (
+                WalAppendAck(
+                    accepted=False,
+                    durable=False,
+                    wal_seq=None,
+                    reason_code="replay_required",
+                ),
             )
         if self._hard_full or self._integrity_unhealthy:
-            return WalAppendAck(
-                accepted=False,
-                durable=False,
-                wal_seq=None,
-                reason_code="hard_unhealthy",
+            return (
+                WalAppendAck(
+                    accepted=False,
+                    durable=False,
+                    wal_seq=None,
+                    reason_code="hard_unhealthy",
+                ),
             )
         depth = len(self._queue)
+        count = len(event_list)
         if depth >= self._max_queue:
             self._hard_full = True
+            return (
+                WalAppendAck(
+                    accepted=False,
+                    durable=False,
+                    wal_seq=None,
+                    reason_code="queue_full",
+                ),
+            )
+        reserved_floor = self._max_queue - self._reserved_tail
+        if not admission_capacity_ok(
+            queue_depth=depth,
+            max_queue=self._max_queue,
+            reserved_tail=self._reserved_tail,
+            count=count,
+            open_intent=open_intent,
+            scanned=self._scanned,
+            hard_full=self._hard_full,
+            integrity_unhealthy=self._integrity_unhealthy,
+        ):
+            reason = (
+                "reserved_tail"
+                if open_intent and depth + count > reserved_floor
+                else "queue_full"
+            )
+            return (
+                WalAppendAck(
+                    accepted=False,
+                    durable=False,
+                    wal_seq=None,
+                    reason_code=reason,
+                ),
+            )
+        local_seq = self._next_seq
+        local_hash = self._enqueue_prev_hash
+        encoded: list[_PendingRecord] = []
+        for event in event_list:
+            record, line = encode_wal_record(
+                event,
+                wal_seq=local_seq,
+                run_id=self._run_id,
+                prev_hash=local_hash,
+            )
+            encoded.append(
+                _PendingRecord(wal_seq=local_seq, event=event, record=record, line=line)
+            )
+            local_hash = record.record_hash
+            local_seq += 1
+        acks: list[WalAppendAck] = []
+        for pending in encoded:
+            self._queue.append(pending)
+            acks.append(
+                WalAppendAck(
+                    accepted=True,
+                    durable=False,
+                    wal_seq=pending.wal_seq,
+                    reason_code=None,
+                )
+            )
+        self._next_seq = local_seq
+        self._enqueue_prev_hash = local_hash
+        if len(self._queue) >= self._max_queue:
+            self._hard_full = True
+        return tuple(acks)
+
+    def enqueue(self, event: ExecutionEvent) -> WalAppendAck:
+        acks = self.enqueue_batch((event,))
+        if not acks:
             return WalAppendAck(
                 accepted=False,
                 durable=False,
                 wal_seq=None,
                 reason_code="queue_full",
             )
-        reserved_floor = self._max_queue - self._reserved_tail
-        if depth >= reserved_floor and _is_open_intent_accepted(event):
-            return WalAppendAck(
-                accepted=False,
-                durable=False,
-                wal_seq=None,
-                reason_code="reserved_tail",
-            )
-        wal_seq = self._next_seq
-        record, line = encode_wal_record(
-            event,
-            wal_seq=wal_seq,
-            run_id=self._run_id,
-            prev_hash=self._enqueue_prev_hash,
-        )
-        self._queue.append(
-            _PendingRecord(wal_seq=wal_seq, event=event, record=record, line=line)
-        )
-        self._next_seq = wal_seq + 1
-        self._enqueue_prev_hash = record.record_hash
-        if len(self._queue) >= self._max_queue:
-            self._hard_full = True
-        return WalAppendAck(
-            accepted=True,
-            durable=False,
-            wal_seq=wal_seq,
-            reason_code=None,
-        )
+        return acks[0]
 
     def drain_once(self) -> Optional[WalDurableAck]:
         if not self._queue:
@@ -895,6 +991,19 @@ class ExecutionWal:
             blocks_opens=blocks,
             torn_tail=self._torn_tail,
             fsync_count=self._fsync_count,
+        )
+
+    def can_admit(self, count: int, *, open_intent: bool = False) -> bool:
+        """Pure remaining-queue check for a future enqueue batch."""
+        return admission_capacity_ok(
+            queue_depth=len(self._queue),
+            max_queue=self._max_queue,
+            reserved_tail=self._reserved_tail,
+            count=count,
+            open_intent=open_intent,
+            scanned=self._scanned,
+            hard_full=self._hard_full,
+            integrity_unhealthy=self._integrity_unhealthy,
         )
 
     def mark_venue_reconciled(self, token: object) -> None:

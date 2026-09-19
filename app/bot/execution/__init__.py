@@ -6,6 +6,8 @@ connect sockets or place orders.
 EV2-04 adds private event adapters; importing them performs no I/O.
 EV2-05 adds the WAL/projector/exporter kernel; importing it does not open
 files, start threads/tasks, read env, or initialize Sentry.
+EV2-06 adds the execution engine and risk gate; importing it does not
+acquire locks, open sockets, drain the WAL, or place orders.
 """
 
 from app.bot.execution.adapters import (
@@ -66,8 +68,25 @@ from app.bot.execution.transport import (
     prepare_dual_leg,
     unsigned_frame_finalizer,
 )
+from app.bot.execution.engine import (
+    SCHEMA_VERSION as ENGINE_SCHEMA_VERSION,
+    MAX_NOTIONAL_USDT,
+    EngineError,
+    ExecutionEngine,
+    IngestResult,
+    ReadinessSnapshot,
+    RiskPolicy,
+    SubmitResult,
+    SubmitStatus,
+)
+from app.bot.execution.ownership import (
+    SCHEMA_VERSION as OWNERSHIP_SCHEMA_VERSION,
+    FileOwnershipFence,
+    OwnershipError,
+)
 from app.bot.execution.wal import (
     SCHEMA_VERSION as WAL_SCHEMA_VERSION,
+    SUBMIT_WORST_CASE_EVENTS,
     ExecutionWal,
     InMemoryProjector,
     ProjectionAck,
@@ -78,11 +97,16 @@ from app.bot.execution.wal import (
     WalHealth,
     WalIntegrityError,
     WalRecord,
+    admission_capacity_ok,
 )
 
 __all__ = [
     "ADAPTER_SCHEMA_VERSION",
+    "ENGINE_SCHEMA_VERSION",
+    "MAX_NOTIONAL_USDT",
+    "OWNERSHIP_SCHEMA_VERSION",
     "SCHEMA_VERSION",
+    "SUBMIT_WORST_CASE_EVENTS",
     "TRANSPORT_SCHEMA_VERSION",
     "WAL_SCHEMA_VERSION",
     "AdapterBatch",
@@ -93,13 +117,17 @@ __all__ = [
     "ContractValidationError",
     "DispatchResult",
     "DispatchStatus",
+    "EngineError",
+    "ExecutionEngine",
     "ExecutionEvent",
     "ExecutionEventType",
     "ExecutionTransport",
     "ExecutionWal",
+    "FileOwnershipFence",
     "FrozenStaticFrame",
     "InMemoryExporter",
     "InMemoryProjector",
+    "IngestResult",
     "InstrumentCache",
     "IntentAction",
     "InvalidTransition",
@@ -108,11 +136,16 @@ __all__ = [
     "LegStatus",
     "LoopOwnedTradeSocket",
     "MetricsSnapshot",
+    "OwnershipError",
     "PreparedDualLeg",
     "PrivateEventAdapter",
     "ProjectionAck",
+    "ReadinessSnapshot",
+    "RiskPolicy",
     "ReplayResult",
     "SentryEnvelope",
+    "SubmitResult",
+    "SubmitStatus",
     "SpreadDirection",
     "SpreadState",
     "SpreadStatus",
@@ -128,6 +161,7 @@ __all__ = [
     "WalIntegrityError",
     "WalRecord",
     "WriteOutcome",
+    "admission_capacity_ok",
     "apply_event",
     "apply_events",
     "assert_invariants",
