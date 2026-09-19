@@ -1,0 +1,5 @@
+{
+  "name": "arb_bots spread pipeline",
+  "user": "ubuntu",
+  "install": "python3 -m pip install --user --break-system-packages -r .cursor/requirements-dev.txt"
+}
