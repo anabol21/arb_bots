@@ -19,8 +19,9 @@ must compare the frozen Gear 2.2 decision with the execution-v2 bridge on
 equivalent slot state and exercise the execution transport hot path through a
 structurally network-incapable sink.
 
-This is EV2-09A only. It does not satisfy the six-hour/300-signal target-VPS
-gate, install or run a service, wire `BotRuntime`, open venue sockets, read
+This is EV2-09A only. It does not satisfy the 20-hour target-VPS soak or the
+separate 300-eligible-signal historical replay gate. It does not install or
+run a service, wire `BotRuntime`, open venue sockets, read
 credentials, submit live orders, write the old `theta_trades` root, or claim
 production latency. EV2-09B requires separate explicit approval.
 
@@ -266,7 +267,7 @@ git diff --check: passed
 independent critic: PASS before and after focused P2 fixes; no P0/P1
 ```
 
-EV2-09B remains blocked pending explicit user approval. It must supply the
-target-VPS six-hour/300-eligible-signal run, target-loop 10,000-sample report,
+EV2-09B was explicitly approved on 2026-09-21. It must supply the target-VPS
+20-hour soak, separate 300-eligible-signal replay, target-loop 10,000-sample report,
 CPU/RSS/event-loop lag, public reconnects, collector baseline and read-only
 would-send comparison. This patch does not install or start that run.

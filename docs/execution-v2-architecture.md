@@ -273,7 +273,8 @@ gross regression; it is not used to claim a statistically meaningful p99.
 
 1. replay/fault-injection test suite green;
 2. target-VPS no-order latency benchmark green;
-3. shadow for at least 6 hours and 300 eligible signals, with no collector
+3. shadow for at least 20 continuous hours, plus a separate deterministic
+   replay of at least 300 eligible signals, with no collector
    regression, unknown state, dropped lifecycle event or MCP/Sentry divergence;
 4. one bounded live round-trip at `$20` per leg and `K_live=1`;
 5. twenty bounded live round-trips at the same cap;

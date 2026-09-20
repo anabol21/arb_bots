@@ -1,0 +1,38 @@
+# EV2-09B authenticated private-stream reader. No trade socket and no sender.
+
+[Unit]
+Description=Spread B-bot EV2 private read-only stream (%i)
+After=network-online.target
+Wants=network-online.target
+PartOf=spread-bbot-ev2-shadow.service
+StartLimitIntervalSec=300
+StartLimitBurst=20
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/root/spread_ev2_shadow
+Environment=PYTHONPATH=/root/spread_ev2_shadow
+Environment=VENUE=live
+Environment=LIVE_ORDERS=0
+Environment=BBOT_PROFILE=gear22_live_canary
+Environment=BBOT_MODE=policy
+Environment=BBOT_PRIVATE_DATA_ROOT=/data/bbot-ev2-shadow/private-%i
+Environment=BBOT_PRIVATE_LOG_PATH=/var/log/spread/bbot-ev2-private-%i.log
+ExecStartPre=/usr/bin/mkdir -p /data/bbot-ev2-shadow/private-%i /var/log/spread
+ExecStart=/root/venv/bin/python -m app.bot.private --ws-readonly --exchange=%i --max-cycles=200000 --recv-timeout-sec=5 --heartbeat-every-sec=10 --silence-timeout-sec=45 --coins=KAITO,HOME,WAL,RVN,ONT,2Z,BICO,HMSTR,CAP,BLEND,EDEN,KMNO,GPS,ME,ZBT,MOVE,COAI,AZTEC,APR,YB,ICX,AT,H,MUBARAK,ACU,LA,BEAT,PARTI,SIGN,GIGGLE
+Restart=always
+RestartSec=5
+KillSignal=SIGTERM
+TimeoutStopSec=15
+StandardOutput=append:/var/log/spread/bbot-ev2-private-%i.log
+StandardError=append:/var/log/spread/bbot-ev2-private-%i.log
+MemoryMax=256M
+CPUQuota=20%
+LimitNOFILE=2048
+Nice=10
+ReadWritePaths=/data/bbot-ev2-shadow /var/log/spread
+InaccessiblePaths=/data/live /data/bars /data/compacted /data/spool /data/bbot-theta-k1-canary /data/bbot-gear22-live-canary
+
+[Install]
+WantedBy=multi-user.target

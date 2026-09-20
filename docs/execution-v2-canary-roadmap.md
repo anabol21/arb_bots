@@ -169,8 +169,12 @@ Run the complete 30-coin pipeline with order capability physically disabled.
 Deliverables:
 
 - target-VPS shadow using the same event loop and 30-coin workload;
-- at least six hours and 300 eligible signals with no dropped lifecycle event,
-  unknown state, collector regression or decision divergence;
+- at least 20 continuous hours with no dropped lifecycle event, unknown state,
+  collector regression or decision divergence; live eligible-signal count is
+  reported but is not a wall-clock acceptance minimum because the strategy may
+  produce no signal for a day;
+- deterministic historical replay covers at least 300 eligible signals with
+  exact ``would_sent`` / execution-v2 decision parity;
 - at least 10,000 no-order instrumented dispatches after warm-up;
 - latency report for both venues and the slower dual-leg write;
 - CPU, memory, event-loop lag, queue depth and reconnect evidence.

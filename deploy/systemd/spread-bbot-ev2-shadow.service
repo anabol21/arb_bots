@@ -1,0 +1,54 @@
+# EV2-09B no-order target-VPS shadow. This unit must never carry credentials.
+# Private authenticated reads run in the two read-only companion units below.
+
+[Unit]
+Description=Spread B-bot EV2 shadow parity and latency (no orders)
+After=network-online.target
+Wants=network-online.target spread-bbot-ev2-private@bybit.service spread-bbot-ev2-private@okx.service
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/root/spread_ev2_shadow
+Environment=PYTHONPATH=/root/spread_ev2_shadow
+Environment=VENUE=live
+Environment=LIVE_ORDERS=0
+Environment=BBOT_MODE=policy
+Environment=BBOT_PROFILE=gear22_would_send
+Environment=BBOT_BROKER=stub
+Environment=BBOT_EV2_SHADOW=1
+Environment=BBOT_THETA_LIVE_SEND=0
+Environment=BBOT_THETA_TRADE=1
+Environment=BBOT_NOTIONAL_USDT=20
+Environment=BBOT_FILL_DELAY_MS=70
+Environment=BBOT_SLOT_K=1
+Environment=BBOT_FLOOR_WATCH=1
+Environment=BBOT_TW_P50_WATCH=1
+Environment=BBOT_THETA_WATCH=1
+Environment=BBOT_FLOOR_WARM=1
+Environment=BBOT_EV2_PROBE_DELAY_SEC=60
+Environment=BBOT_EV2_WARMUP_N=100
+Environment=BBOT_EV2_COUNTED_N=10000
+Environment=BBOT_DATA_ROOT=/data/bbot-ev2-shadow
+Environment=BBOT_LOG_PATH=/var/log/spread/bbot-ev2-shadow.log
+Environment=BBOT_FLOOR_WARM_PATH=/data/bbot-ev2-shadow/state/floor_warm.pkl
+Environment=BBOT_COINS=KAITO,HOME,WAL,RVN,ONT,2Z,BICO,HMSTR,CAP,BLEND,EDEN,KMNO,GPS,ME,ZBT,MOVE,COAI,AZTEC,APR,YB,ICX,AT,H,MUBARAK,ACU,LA,BEAT,PARTI,SIGN,GIGGLE
+ExecStartPre=/usr/bin/mkdir -p /data/bbot-ev2-shadow/state /var/log/spread
+ExecStart=/root/venv/bin/python -m app.bot
+Restart=on-failure
+RestartSec=10
+KillSignal=SIGTERM
+TimeoutStopSec=30
+StandardOutput=append:/var/log/spread/bbot-ev2-shadow.log
+StandardError=append:/var/log/spread/bbot-ev2-shadow.log
+MemoryMax=1G
+CPUQuota=100%
+LimitNOFILE=8192
+Nice=10
+ReadWritePaths=/data/bbot-ev2-shadow /var/log/spread
+InaccessiblePaths=/data/live /data/bars /data/compacted /data/spool /data/bbot-theta-k1-canary /data/bbot-gear22-live-canary
+
+[Install]
+WantedBy=multi-user.target

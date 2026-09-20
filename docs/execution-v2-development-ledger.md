@@ -50,7 +50,9 @@ Live-order authority: disabled for the new contour
 - One-leg policy: reconcile, then reduce-only flatten to zero; never chase the
   peer leg to preserve the trade.
 - Persistence: local append-only WAL plus asynchronous PostgreSQL projection.
-- Canary: >=6 hours and >=300 eligible shadow signals, then 1 and 20 live
+- Canary: >=20 continuous hours of target-VPS shadow stability; eligible live
+  signals are all compared but not used as a duration substitute. A separate
+  deterministic replay must cover >=300 eligible signals before 1 and 20 live
   round-trips at `$20` per leg and `K_live=1`.
 - Production promotion: explicit user approval.
 - Sentry: preserve existing event semantics for Grok compatibility, move

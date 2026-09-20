@@ -16,7 +16,10 @@ from typing import Any, Mapping, Optional, Sequence
 
 from app.bot.private.journal_v1 import PrivateJournalWriter, new_opaque_id
 from app.bot.private.order_sign import LiveCredentials
-from app.bot.private.order_symbols import allowed_native_symbol
+from app.bot.private.order_symbols import (
+    allowed_native_symbol,
+    resolve_private_subscribe_pool,
+)
 from app.bot.private.paths import resolve_data_root
 from app.bot.private.secrets import LiveSecrets, load_live_secrets
 from app.bot.private.venue import endpoints_for_venue
@@ -114,6 +117,7 @@ def run_ws_readonly_preflight(
     load_secrets: bool = True,
     credentials: Optional[LiveCredentials] = None,
     journal: Optional[PrivateJournalWriter] = None,
+    coins: Optional[Sequence[str]] = None,
 ) -> WsReadonlyReport:
     """Auth → one-symbol subscribe → REST reseed → heartbeat/silence loop.
 
@@ -135,7 +139,16 @@ def run_ws_readonly_preflight(
             extras={"gate_error": type(exc).__name__},
         )
 
-    symbol = allowed_native_symbol(f"{exchange}_live")
+    subscribe_symbols: tuple[str, ...]
+    if coins:
+        pool = resolve_private_subscribe_pool(e, coins=coins)
+        subscribe_symbols = (
+            pool.bybit_symbols if exchange == "bybit" else pool.okx_symbols
+        )
+        symbol = subscribe_symbols[0]
+    else:
+        symbol = allowed_native_symbol(f"{exchange}_live")
+        subscribe_symbols = (symbol,)
     root = data_root if data_root is not None else resolve_data_root(e)
     j = journal if journal is not None else PrivateJournalWriter(root, run_id=new_opaque_id("run"))
 
@@ -171,6 +184,7 @@ def run_ws_readonly_preflight(
         credentials=credentials,
         env=e,
         rest_reseed=reseed_port,
+        subscribe_symbols=subscribe_symbols,
     )
 
     bound_factory = False
@@ -323,6 +337,7 @@ def _report_from_runtime(
         silence_timeouts=silence_timeouts,
         journal_events=int(getattr(journal, "_seq", 0) or 0),
         error_code=error_code,
+        extras={"subscription_count": len(runtime.subscribed_natives)},
     )
 
 
@@ -334,10 +349,39 @@ def main_ws_readonly(
     """CLI entry for ``--ws-readonly`` (exchange via ``--exchange=bybit|okx``)."""
     argv = list(argv or [])
     exchange = "bybit"
+    max_cycles = 3
+    silence_timeout_sec = DEFAULT_SILENCE_TIMEOUT_SEC
+    recv_timeout_sec = DEFAULT_RECV_TIMEOUT_SEC
+    heartbeat_every_sec = DEFAULT_HEARTBEAT_EVERY_SEC
+    coins: tuple[str, ...] = ()
     for arg in argv:
         if arg.startswith("--exchange="):
             exchange = arg.split("=", 1)[1].strip().lower()
-    report = run_ws_readonly_preflight(exchange=exchange, env=env)
+        elif arg.startswith("--max-cycles="):
+            max_cycles = int(arg.split("=", 1)[1])
+        elif arg.startswith("--silence-timeout-sec="):
+            silence_timeout_sec = float(arg.split("=", 1)[1])
+        elif arg.startswith("--recv-timeout-sec="):
+            recv_timeout_sec = float(arg.split("=", 1)[1])
+        elif arg.startswith("--heartbeat-every-sec="):
+            heartbeat_every_sec = float(arg.split("=", 1)[1])
+        elif arg.startswith("--coins="):
+            coins = tuple(
+                item.strip().upper()
+                for item in arg.split("=", 1)[1].split(",")
+                if item.strip()
+            )
+    if max_cycles < 1:
+        raise ValueError("--max-cycles must be >= 1")
+    report = run_ws_readonly_preflight(
+        exchange=exchange,
+        env=env,
+        max_cycles=max_cycles,
+        silence_timeout_sec=silence_timeout_sec,
+        recv_timeout_sec=recv_timeout_sec,
+        heartbeat_every_sec=heartbeat_every_sec,
+        coins=coins or None,
+    )
     print(json.dumps(report.as_public_dict(), ensure_ascii=False, indent=2, sort_keys=True))
     if report.status == "ok":
         return 0

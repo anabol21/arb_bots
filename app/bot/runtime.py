@@ -227,6 +227,9 @@ class BotRuntime:
         if self.profile == "canary":
             self.profile = "canary_wal_eden"
 
+        from app.bot.execution.shadow_runtime import assert_shadow_runtime_gates
+
+        assert_shadow_runtime_gates(self.profile)
         # Fail closed before broker/sentry when live canary is armed without LIVE_ORDERS.
         assert_theta_live_send_gates(self.profile)
         
@@ -365,6 +368,7 @@ class BotRuntime:
         # Contour B place_fn; stub would_send never calls broker.place.
         self.theta_trade_enabled = theta_trade_enabled(self.profile)
         self.theta_trade: ThetaTradeManager | None = None
+        self.execution_shadow: Any = None
         self._theta_trade_warned = False
         if self.theta_trade_enabled:
             live_send = theta_live_send_requested(self.profile)
@@ -378,6 +382,16 @@ class BotRuntime:
                 live_send=live_send,
                 place_fn=self.broker.place if live_send else None,
                 meta_fn=self._meta if live_send else None,
+            )
+        from app.bot.execution.shadow_runtime import (
+            ExecutionShadowRuntime,
+            shadow_runtime_enabled,
+        )
+
+        if shadow_runtime_enabled():
+            self.execution_shadow = ExecutionShadowRuntime(
+                data_root=self.data_root,
+                log=lambda m: self.log.info(m),
             )
         # Floor warm-start (standard for gear22 / when pickle present).
         self._floor_warm_path = resolve_floor_warm_path(self.data_root)
@@ -903,13 +917,28 @@ class BotRuntime:
         """K=1 would_send decide+fill off the theta emit (never tick WAL)."""
         if self.theta_trade is None or not theta_snaps:
             return
+        pending_shadow: Any = None
         try:
-            await self.theta_trade.on_theta_snapshots_async(
+            if self.execution_shadow is not None:
+                pending_shadow = await self.execution_shadow.before_trade(
+                    theta_snaps,
+                    self.quotes,
+                    self.theta_trade.slot,
+                )
+            rows = await self.theta_trade.on_theta_snapshots_async(
                 theta_snaps,
                 quotes=self.quotes,
                 coin_order=self.coins,
             )
+            if self.execution_shadow is not None and pending_shadow is not None:
+                await self.execution_shadow.after_trade(
+                    pending_shadow,
+                    rows,
+                    self.quotes,
+                )
         except Exception as exc:  # noqa: BLE001 — never stall the public book path
+            if self.execution_shadow is not None:
+                await self.execution_shadow.after_error(pending_shadow)
             if not self._theta_trade_warned:
                 self._theta_trade_warned = True
                 self.log.warning(
@@ -1294,6 +1323,13 @@ class BotRuntime:
                 "policy_missing | continuing WS-only; will not open intents"
             )
 
+        if self.execution_shadow is not None:
+            await self.execution_shadow.start()
+            self.log.info(
+                "ev2_shadow_started | run_id=%s | orders_sent=0 | trade_socket_bound=false",
+                self.execution_shadow.run_id,
+            )
+
         # Private WS: process-lifetime like public L1 when live private send is on.
         try:
             self._private_warm = self.start_private_warm_if_live_send(
@@ -1382,6 +1418,8 @@ class BotRuntime:
 
             clear_process_warm_session(stop=True)
             self._private_warm = None
+            if self.execution_shadow is not None:
+                await self.execution_shadow.stop()
 
 
 def main() -> int:
