@@ -96,12 +96,17 @@ class ShadowRuntimeGateTests(unittest.TestCase):
                 json.dumps({"op": "auth", "success": True, "retCode": 0})
             )
             private.push_inbound(json.dumps({"op": "subscribe", "success": True}))
+            reseed_calls: list[str] = []
+
+            def probe_fn(**kwargs):
+                reseed_calls.append(str(kwargs.get("symbol_alias") or ""))
+                return RestReseedResult(matched=True)
 
             report = run_ws_readonly_preflight(
                 exchange="bybit",
                 env={"VENUE": "live", "LIVE_ORDERS": "0"},
                 private_socket=private,
-                rest_probe_fn=lambda **_kwargs: RestReseedResult(matched=True),
+                rest_probe_fn=probe_fn,
                 credentials=LiveCredentials(api_key="k", api_secret="s"),
                 journal=journal,
                 load_secrets=False,
@@ -111,6 +116,7 @@ class ShadowRuntimeGateTests(unittest.TestCase):
             )
             public = report.as_public_dict()
             self.assertEqual(public["subscription_count"], 2)
+            self.assertEqual(reseed_calls, ["KAITOUSDT"])
             self.assertEqual(public["orders_sent"], 0)
             self.assertFalse(public["trade_ws_bound"])
 

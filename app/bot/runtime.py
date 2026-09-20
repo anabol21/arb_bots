@@ -334,6 +334,7 @@ class BotRuntime:
             c: (None, None) for c in self.coins
         }
         self._private_warm: Any = None
+        self._runtime_tasks: list[asyncio.Task[Any]] = []
         self._l1_ring_warned = False
         # Gear 2.2 floor observer (5m bar metrics). Off critical decide/send path.
         self.floor_enabled = floor_watch_enabled(self.profile)
@@ -1284,6 +1285,9 @@ class BotRuntime:
             # WS tasks may not unwind to finally before systemd timeout.
             self._save_floor_warm_pickle()
             self.stop_event.set()
+            if self.execution_shadow is not None:
+                for task in self._runtime_tasks:
+                    task.cancel()
         
         for sig in (signal.SIGTERM, signal.SIGHUP):
             loop.add_signal_handler(
@@ -1388,6 +1392,7 @@ class BotRuntime:
                     name=f"okx-{coin}",
                 )
             )
+
             tasks.append(
                 asyncio.create_task(
                     run_bybit_orderbook1(
@@ -1402,6 +1407,8 @@ class BotRuntime:
                 )
             )
 
+        self._runtime_tasks = tasks
+
         self.log.info(
             f"ws_tasks_started | n={len(tasks) - 1} | expect={2 * len(self.coins)}"
         )
@@ -1409,7 +1416,8 @@ class BotRuntime:
             await asyncio.gather(*tasks)
         except asyncio.CancelledError:
             self.stop_event.set()
-            raise
+            if self.execution_shadow is None:
+                raise
         finally:
             # Persist floor warm pickle for next start (B path only).
             self._save_floor_warm_pickle()
@@ -1420,6 +1428,7 @@ class BotRuntime:
             self._private_warm = None
             if self.execution_shadow is not None:
                 await self.execution_shadow.stop()
+            self._runtime_tasks = []
 
 
 def main() -> int:

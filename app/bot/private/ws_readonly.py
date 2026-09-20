@@ -238,7 +238,16 @@ def run_ws_readonly_preflight(
             )
 
         # REST seed/reseed (categorical)
-        reseed_ev = runtime.run_rest_reseed()
+        reseed_pool = getattr(reseed_port, "reseed_pool", None)
+        if len(subscribe_symbols) > 1 and callable(reseed_pool):
+            reseed_result = reseed_pool(
+                venue=exchange,
+                environment="live",
+                symbol_aliases=subscribe_symbols,
+            )
+            reseed_ev = runtime.confirm_rest_reseed(reseed_result)
+        else:
+            reseed_ev = runtime.run_rest_reseed()
         reseed_matched = (
             reseed_ev.get("reconciliation_state") == "matched"
             and not runtime.reseed_required

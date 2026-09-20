@@ -150,6 +150,40 @@ class SignedRestReseedAdapter:
             return RestReseedResult(matched=True, inconclusive=False)
         return RestReseedResult(matched=False, inconclusive=True)
 
+    def reseed_pool(
+        self,
+        *,
+        venue: str,
+        environment: str,
+        symbol_aliases: tuple[str, ...],
+    ) -> RestReseedResult:
+        """Categorical account/pool seed without 3*N signed GET amplification.
+
+        Private subscriptions already validate the concrete symbol pool.  This
+        read-only seed establishes account, position and instrument endpoint
+        health once for the subscribed perpetual pool; it never reads values
+        into execution state and never exposes an order surface.
+        """
+        if venue != self.exchange or environment != "live":
+            return RestReseedResult(matched=False, inconclusive=True)
+        if self.endpoints.venue != "live" or not symbol_aliases:
+            return RestReseedResult(matched=False, inconclusive=True)
+        if self._probe_fn is not None:
+            return self._probe_fn(
+                venue=venue,
+                environment=environment,
+                symbol_alias=symbol_aliases[0],
+            )
+        try:
+            account_ok = self._account_ok()
+            position_ok = self._position_pool_ok()
+            instrument_ok = self._instrument_pool_ok()
+        except Exception:  # noqa: BLE001 — categorical and redacted
+            return RestReseedResult(matched=False, inconclusive=True)
+        if account_ok and position_ok and instrument_ok:
+            return RestReseedResult(matched=True, inconclusive=False)
+        return RestReseedResult(matched=False, inconclusive=True)
+
     def _account_ok(self) -> bool:
         if self._account_probe_fn is not None:
             res = self._account_probe_fn()
@@ -216,6 +250,48 @@ class SignedRestReseedAdapter:
             timeout_sec=self.timeout_sec,
             http_get=self._http_get_fn,
         )
+        _ = normalize_http_outcome(http_status=status, exchange_code=code, ok=ok)
+        return ok
+
+    def _position_pool_ok(self) -> bool:
+        if self.exchange == "bybit":
+            ok, status, code = _bybit_get(
+                credentials=self.credentials,
+                endpoints=self.endpoints,
+                path=BYBIT_POSITION_PATH,
+                query="category=linear&settleCoin=USDT",
+                timeout_sec=self.timeout_sec,
+                http_get=self._http_get_fn,
+            )
+        else:
+            ok, status, code = _okx_get(
+                credentials=self.credentials,
+                endpoints=self.endpoints,
+                path=OKX_POSITION_PATH,
+                timeout_sec=self.timeout_sec,
+                http_get=self._http_get_fn,
+            )
+        _ = normalize_http_outcome(http_status=status, exchange_code=code, ok=ok)
+        return ok
+
+    def _instrument_pool_ok(self) -> bool:
+        if self.exchange == "bybit":
+            ok, status, code = _bybit_get(
+                credentials=self.credentials,
+                endpoints=self.endpoints,
+                path=BYBIT_INSTRUMENT_PATH,
+                query="category=linear",
+                timeout_sec=self.timeout_sec,
+                http_get=self._http_get_fn,
+            )
+        else:
+            ok, status, code = _okx_get(
+                credentials=self.credentials,
+                endpoints=self.endpoints,
+                path=f"{OKX_INSTRUMENT_PATH}?instType=SWAP",
+                timeout_sec=self.timeout_sec,
+                http_get=self._http_get_fn,
+            )
         _ = normalize_http_outcome(http_status=status, exchange_code=code, ok=ok)
         return ok
 
