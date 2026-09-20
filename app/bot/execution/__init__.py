@@ -12,6 +12,8 @@ EV2-07 adds recovery/restart orchestration; importing it does not
 open sockets, drain the WAL, or place orders.
 EV2-08 adds the Gear 2.2 strategy bridge; importing it does not
 submit intents, write journals, initialize Sentry, or place orders.
+EV2-09A adds the local shadow parity/latency harness; importing it
+does not connect venues, submit intents, start tasks, or place orders.
 """
 
 from app.bot.execution.adapters import (
@@ -107,6 +109,17 @@ from app.bot.execution.strategy_bridge import (
     project_slot,
     restore_context,
 )
+from app.bot.execution.shadow import (
+    SCHEMA_VERSION as SHADOW_SCHEMA_VERSION,
+    HEALTH_SCHEMA_VERSION as SHADOW_HEALTH_SCHEMA_VERSION,
+    LatencyHistogram,
+    NullTradeSink,
+    ShadowHealth,
+    ShadowHotPath,
+    ShadowParityLane,
+    WouldSentDecisionReplica,
+    canonical_bridge_config,
+)
 from app.bot.execution.recovery import (
     SCHEMA_VERSION as RECOVERY_SCHEMA_VERSION,
     MAX_RECOVERY_STEPS,
@@ -152,6 +165,8 @@ __all__ = [
     "CONTEXT_SCHEMA_VERSION",
     "INTENT_TTL_NS",
     "PARITY_SCHEMA_VERSION",
+    "SHADOW_HEALTH_SCHEMA_VERSION",
+    "SHADOW_SCHEMA_VERSION",
     "STRATEGY_BRIDGE_SCHEMA_VERSION",
     "SCHEMA_VERSION",
     "SUBMIT_WORST_CASE_EVENTS",
@@ -183,11 +198,13 @@ __all__ = [
     "InstrumentCache",
     "IntentAction",
     "InvalidTransition",
+    "LatencyHistogram",
     "LegPlan",
     "LegState",
     "LegStatus",
     "LoopOwnedTradeSocket",
     "MetricsSnapshot",
+    "NullTradeSink",
     "OpenTradeContext",
     "OwnershipError",
     "PreparedDualLeg",
@@ -205,8 +222,12 @@ __all__ = [
     "RiskPolicy",
     "ReplayResult",
     "SentryEnvelope",
+    "ShadowHealth",
+    "ShadowHotPath",
+    "ShadowParityLane",
     "SlotProjection",
     "StrategyBridgeError",
+    "WouldSentDecisionReplica",
     "SubmitResult",
     "SubmitStatus",
     "SpreadDirection",
@@ -231,6 +252,7 @@ __all__ = [
     "apply_events",
     "assert_invariants",
     "build_trade_intent",
+    "canonical_bridge_config",
     "commit_open_context",
     "declared_owner_loop",
     "derive_client_id",
