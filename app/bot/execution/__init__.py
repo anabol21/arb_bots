@@ -10,6 +10,8 @@ EV2-06 adds the execution engine and risk gate; importing it does not
 acquire locks, open sockets, drain the WAL, or place orders.
 EV2-07 adds recovery/restart orchestration; importing it does not
 open sockets, drain the WAL, or place orders.
+EV2-08 adds the Gear 2.2 strategy bridge; importing it does not
+submit intents, write journals, initialize Sentry, or place orders.
 """
 
 from app.bot.execution.adapters import (
@@ -88,6 +90,23 @@ from app.bot.execution.ownership import (
     FileOwnershipFence,
     OwnershipError,
 )
+from app.bot.execution.strategy_bridge import (
+    SCHEMA_VERSION as STRATEGY_BRIDGE_SCHEMA_VERSION,
+    CONTEXT_SCHEMA_VERSION,
+    INTENT_TTL_NS,
+    PARITY_SCHEMA_VERSION,
+    BridgeTick,
+    ContextRestoreResult,
+    DivergenceClass,
+    Gear22StrategyBridge,
+    OpenTradeContext,
+    SlotProjection,
+    StrategyBridgeError,
+    build_trade_intent,
+    commit_open_context,
+    project_slot,
+    restore_context,
+)
 from app.bot.execution.recovery import (
     SCHEMA_VERSION as RECOVERY_SCHEMA_VERSION,
     MAX_RECOVERY_STEPS,
@@ -130,6 +149,10 @@ __all__ = [
     "OWNERSHIP_SCHEMA_VERSION",
     "RECOVERY_SCHEMA_VERSION",
     "RECOVERY_WORST_CASE_EVENTS",
+    "CONTEXT_SCHEMA_VERSION",
+    "INTENT_TTL_NS",
+    "PARITY_SCHEMA_VERSION",
+    "STRATEGY_BRIDGE_SCHEMA_VERSION",
     "SCHEMA_VERSION",
     "SUBMIT_WORST_CASE_EVENTS",
     "TRANSPORT_SCHEMA_VERSION",
@@ -138,7 +161,11 @@ __all__ = [
     "AdapterError",
     "AdapterIssue",
     "AdapterSource",
+    "BridgeTick",
     "CachedInstrument",
+    "ContextRestoreResult",
+    "DivergenceClass",
+    "Gear22StrategyBridge",
     "ContractValidationError",
     "DispatchResult",
     "DispatchStatus",
@@ -161,6 +188,7 @@ __all__ = [
     "LegStatus",
     "LoopOwnedTradeSocket",
     "MetricsSnapshot",
+    "OpenTradeContext",
     "OwnershipError",
     "PreparedDualLeg",
     "PreparedVenueAction",
@@ -177,6 +205,8 @@ __all__ = [
     "RiskPolicy",
     "ReplayResult",
     "SentryEnvelope",
+    "SlotProjection",
+    "StrategyBridgeError",
     "SubmitResult",
     "SubmitStatus",
     "SpreadDirection",
@@ -200,6 +230,8 @@ __all__ = [
     "apply_event",
     "apply_events",
     "assert_invariants",
+    "build_trade_intent",
+    "commit_open_context",
     "declared_owner_loop",
     "derive_client_id",
     "exposure_qty",
@@ -210,6 +242,8 @@ __all__ = [
     "opens_allowed",
     "plan_recovery",
     "prepare_dual_leg",
+    "project_slot",
+    "restore_context",
     "prepare_venue_action",
     "restart_correlation_id",
     "unsigned_cancel_finalizer",
