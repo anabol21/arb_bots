@@ -19,6 +19,7 @@ Environment=BBOT_MODE=policy
 Environment=BBOT_PROFILE=gear22_would_send
 Environment=BBOT_BROKER=stub
 Environment=BBOT_EV2_SHADOW=1
+Environment=BBOT_EV2_TARGET_VPS=1
 Environment=BBOT_THETA_LIVE_SEND=0
 Environment=BBOT_THETA_TRADE=1
 Environment=BBOT_NOTIONAL_USDT=20

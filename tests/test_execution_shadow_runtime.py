@@ -131,6 +131,7 @@ class ShadowRuntimeLifecycleTests(unittest.IsolatedAsyncioTestCase):
                     "BBOT_EV2_WARMUP_N": "0",
                     "BBOT_EV2_COUNTED_N": "1",
                     "BBOT_EV2_PROBE_DELAY_SEC": "0",
+                    "BBOT_EV2_TARGET_VPS": "1",
                 },
             )
             await runtime.start()
@@ -178,6 +179,10 @@ class ShadowRuntimeLifecycleTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(runtime.state.status, SpreadStatus.FLAT)
                 self.assertEqual(runtime.summary["orders_sent"], 0)
                 self.assertFalse(runtime.summary["trade_socket_bound"])
+                self.assertTrue(runtime.summary["target_vps_gate_eligible"])
+                self.assertTrue(
+                    runtime.summary["histogram"]["target_vps_gate_eligible"]
+                )
             finally:
                 await runtime.stop()
 

@@ -53,6 +53,7 @@ from app.bot.theta_trade_manager import POLICY_ID, SlotState
 
 SCHEMA_VERSION = "bbot.execution.shadow_runtime.v1"
 ENV_ENABLED = "BBOT_EV2_SHADOW"
+ENV_TARGET_VPS = "BBOT_EV2_TARGET_VPS"
 ENV_PROBE_DELAY_SEC = "BBOT_EV2_PROBE_DELAY_SEC"
 ENV_COUNTED_N = "BBOT_EV2_COUNTED_N"
 ENV_WARMUP_N = "BBOT_EV2_WARMUP_N"
@@ -282,6 +283,7 @@ class ExecutionShadowRuntime:
         env: Optional[Mapping[str, str]] = None,
     ) -> None:
         self.env = dict(env or os.environ)
+        self.target_vps = _truthy(self.env.get(ENV_TARGET_VPS))
         self.run_id = f"shadow_{uuid.uuid4().hex}"
         self.log = log
         self.writer = _JsonlQueue(Path(data_root) / "execution-v2-shadow.jsonl")
@@ -301,7 +303,7 @@ class ExecutionShadowRuntime:
     def summary(self) -> dict[str, Any]:
         histogram = None
         if self.hot_path is not None:
-            histogram = self.hot_path.histogram.gate().to_public_dict()
+            histogram = self._qualified_gate()
         return {
             "schema_version": SCHEMA_VERSION,
             "event": "summary",
@@ -314,7 +316,16 @@ class ExecutionShadowRuntime:
             "histogram": histogram,
             "orders_sent": 0,
             "trade_socket_bound": False,
+            "target_vps_gate_eligible": self.target_vps,
         }
+
+    def _qualified_gate(self) -> dict[str, Any]:
+        if self.hot_path is None:
+            raise ShadowRuntimeGateError("EV2 shadow hot path not started")
+        gate = self.hot_path.histogram.gate().to_public_dict()
+        gate["local_descriptive_only"] = not self.target_vps
+        gate["target_vps_gate_eligible"] = self.target_vps
+        return gate
 
     async def start(self) -> None:
         if self._started:
@@ -343,6 +354,7 @@ class ExecutionShadowRuntime:
                 "orders_sent": 0,
                 "trade_socket_bound": False,
                 "live_orders": False,
+                "target_vps_gate_eligible": self.target_vps,
             }
         )
         self._tasks = [
@@ -475,7 +487,7 @@ class ExecutionShadowRuntime:
                 "schema_version": SCHEMA_VERSION,
                 "event": "latency_report",
                 "run_id": self.run_id,
-                "report": self.hot_path.histogram.gate().to_public_dict(),
+                "report": self._qualified_gate(),
                 "orders_sent": 0,
             }
         )
@@ -509,6 +521,8 @@ class ExecutionShadowRuntime:
                     "journal_queue_depth": self.writer.queue.qsize(),
                     "journal_drops": self.writer.dropped,
                     "orders_sent": 0,
+                    "local_descriptive_only": not self.target_vps,
+                    "target_vps_gate_eligible": self.target_vps,
                 }
             )
             self.writer.emit(health)
@@ -516,6 +530,7 @@ class ExecutionShadowRuntime:
 
 __all__ = [
     "ENV_ENABLED",
+    "ENV_TARGET_VPS",
     "ExecutionShadowRuntime",
     "PendingShadowTick",
     "ShadowRuntimeGateError",
