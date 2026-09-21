@@ -2,9 +2,10 @@
 
 [Unit]
 Description=Spread B-bot EV2-10 private read-only stream (%i)
-After=network-online.target
+After=network-online.target spread-bbot-ev2-10-synthetic.service
 Wants=network-online.target
 PartOf=spread-bbot-ev2-10-synthetic.service
+BindsTo=spread-bbot-ev2-10-synthetic.service
 StartLimitIntervalSec=300
 StartLimitBurst=20
 
@@ -31,7 +32,7 @@ MemoryMax=256M
 CPUQuota=20%
 LimitNOFILE=2048
 Nice=10
-ReadWritePaths=/data/bbot-ev2-10-synthetic /var/log/spread
+ReadWritePaths=-/data/bbot-ev2-10-synthetic /var/log/spread
 InaccessiblePaths=/data/live /data/bars /data/compacted /data/spool /data/bbot-ev2-shadow /data/bbot-theta-k1-canary /data/bbot-gear22-live-canary
 
 [Install]

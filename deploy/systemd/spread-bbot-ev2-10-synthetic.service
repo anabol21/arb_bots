@@ -50,7 +50,7 @@ MemoryMax=1G
 CPUQuota=100%
 LimitNOFILE=8192
 Nice=10
-ReadWritePaths=/data/bbot-ev2-10-synthetic /var/log/spread
+ReadWritePaths=-/data/bbot-ev2-10-synthetic /var/log/spread
 InaccessiblePaths=/data/live /data/bars /data/compacted /data/spool /data/bbot-ev2-shadow /data/bbot-theta-k1-canary /data/bbot-gear22-live-canary
 
 [Install]
