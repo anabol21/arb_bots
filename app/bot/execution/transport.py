@@ -45,6 +45,7 @@ TRANSPORT_REASON_CODES = frozenset(
         "missing_venue",
         "mixed_loop_ownership",
         "rejected_before_write",
+        "readiness_changed",
         "stale_metadata",
         "unknown_loop_ownership",
         "write_failed",
@@ -143,6 +144,7 @@ class LoopOwnedTradeSocket(Protocol):
 
 
 FrameFinalizer = Callable[..., str]
+DispatchGuard = Callable[[], bool]
 
 
 def declared_owner_loop(socket: object) -> Optional[asyncio.AbstractEventLoop]:
@@ -1153,7 +1155,12 @@ class ExecutionTransport:
             return result
         return fallback
 
-    async def dispatch(self, prepared: PreparedDualLeg) -> DispatchResult:
+    async def dispatch(
+        self,
+        prepared: PreparedDualLeg,
+        *,
+        pre_send_guard: Optional[DispatchGuard] = None,
+    ) -> DispatchResult:
         """Schedule both ``asend`` calls before waiting for either result.
 
         Never receives, never waits for ACK, never retries.
@@ -1173,6 +1180,19 @@ class ExecutionTransport:
             return self._reject(prepared, exc.reason_code, entry_ns=entry_ns)
         except Exception:
             return self._reject(prepared, "rejected_before_write", entry_ns=entry_ns)
+
+        # There is deliberately no await between this final guard and scheduling
+        # both writes. On the socket-owning event loop a readiness publisher
+        # therefore cannot invalidate the lease between the two create_task calls.
+        if pre_send_guard is not None:
+            try:
+                allowed = pre_send_guard()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                allowed = False
+            if allowed is not True:
+                return self._reject(prepared, "readiness_changed", entry_ns=entry_ns)
 
         bybit_task = self._loop.create_task(
             self._write_one(

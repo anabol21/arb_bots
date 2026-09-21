@@ -1,12 +1,12 @@
-# EV2-09C task packet: reproducible synthetic-signal canary
+# EV2-10 task packet: reproducible synthetic-signal readiness canary
 
 Owner: Codex/operator
 
 ## Goal
 
 Exercise the 30-coin Gear 2.2 trade manager, K=1 occupancy, strategy bridge,
-execution-v2 shadow FSM and latency path without waiting for rare alpha
-signals and without exposing an order surface.
+execution-v2 FSM and the EV2-09C/09D dual-readiness path without waiting for
+rare alpha signals and without exposing an order surface.
 
 ## Policy
 
@@ -24,7 +24,7 @@ candidate in a second.
 
 The synthetic policy replaces only alpha eligibility. Book completeness,
 coin ordering, size checks, pending/slot behavior, fill modelling, strategy
-bridge, FSM and transport gates remain unchanged.
+bridge, FSM, readiness fence and transport gates remain unchanged.
 
 ## Safety boundary
 
@@ -39,6 +39,13 @@ The mode fails closed unless all of the following are true:
 The frozen `gear22_frozen_v1` path is still the default. The synthetic mode is
 never selected by a missing or unknown environment value.
 
+## Initial experiment
+
+Run a separate target-VPS unit for two hours with its own run id, data root and
+log root. Keep the collector, the current `would_sent` contour and completed
+EV2-09 evidence untouched. Inject controlled private disconnect/reconnect
+events only after the readiness publisher and fault matrix are green.
+
 ## Evidence gates
 
 - the same second and seed produce the same roll in live observation and
@@ -49,11 +56,15 @@ never selected by a missing or unknown environment value.
 - legacy manager and execution-v2 bridge remain exact parity;
 - journal and intent rows are labelled `gear22_synthetic_roll_v1`;
 - zero real order sends and no trade websocket binding;
-- later readiness-fence fault injection proves disconnect-before-dispatch
-  produces zero writes.
+- disconnect-before-dispatch produces zero writes and invalidates the old
+  readiness lease;
+- reconnect does not reopen the gate until auth/subscription/reseed is proven
+  for both venues in their current generations;
+- disconnect after send start is classified as uncertain and enters bounded
+  reconciliation rather than attempting a blind second lifecycle action.
 
 ## Deployment note
 
-This patch prepares the policy and no-order shadow wiring only. It does not
-modify or restart the active target-VPS EV2-09B run. A separate experiment
-unit/data root must be reviewed after EV2-09B evidence is closed.
+The policy code is prepared but is not deployed by this packet. Installing or
+starting the separate EV2-10 unit requires a reviewed deployment patch and
+explicit operator approval.

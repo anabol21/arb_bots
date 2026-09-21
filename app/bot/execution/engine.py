@@ -92,6 +92,7 @@ ENGINE_REASON_CODES = frozenset(
         "pause",
         "trade_socket_not_ready",
         "private_stream_not_ready",
+        "readiness_changed",
         "stale_metadata",
         "ownership_not_held",
         "invalid_plan_set",
@@ -280,6 +281,106 @@ class ReadinessSnapshot:
         }
         _assert_public(out)
         return out
+
+    def connectivity_reason(self) -> Optional[str]:
+        if not self.bybit_trade_ready or not self.okx_trade_ready:
+            return "trade_socket_not_ready"
+        if not self.bybit_private_ready or not self.okx_private_ready:
+            return "private_stream_not_ready"
+        return None
+
+
+@dataclass(frozen=True)
+class ReadinessLease:
+    """Immutable permission for one normal dual-venue dispatch."""
+
+    revision: int
+    connectivity_revision: int
+    snapshot: ReadinessSnapshot
+    require_controls: bool
+
+
+class DualReadinessFence:
+    """Same-loop readiness publication with generation/revision invalidation.
+
+    Publication is synchronous so a disconnect callback can invalidate an
+    outstanding lease even while ``ExecutionEngine.submit`` is awaiting socket
+    writes under its lifecycle lock. Identical health refreshes do not churn the
+    revision.
+    """
+
+    def __init__(self, snapshot: ReadinessSnapshot) -> None:
+        if not isinstance(snapshot, ReadinessSnapshot):
+            raise EngineError("invalid_intent")
+        self._snapshot = snapshot
+        self._revision = 0
+        self._connectivity_revision = 0
+
+    @property
+    def snapshot(self) -> ReadinessSnapshot:
+        return self._snapshot
+
+    @property
+    def revision(self) -> int:
+        return self._revision
+
+    def publish(self, snapshot: ReadinessSnapshot) -> bool:
+        if not isinstance(snapshot, ReadinessSnapshot):
+            raise EngineError("invalid_intent")
+        if snapshot == self._snapshot:
+            return False
+        prior_connectivity = self._connectivity_key(self._snapshot)
+        next_connectivity = self._connectivity_key(snapshot)
+        self._snapshot = snapshot
+        self._revision += 1
+        if next_connectivity != prior_connectivity:
+            self._connectivity_revision += 1
+        return True
+
+    @staticmethod
+    def _connectivity_key(
+        snapshot: ReadinessSnapshot,
+    ) -> tuple[bool, bool, bool, bool, int, int]:
+        return (
+            snapshot.bybit_trade_ready,
+            snapshot.okx_trade_ready,
+            snapshot.bybit_private_ready,
+            snapshot.okx_private_ready,
+            snapshot.bybit_generation,
+            snapshot.okx_generation,
+        )
+
+    def acquire(self, *, require_controls: bool) -> tuple[Optional[ReadinessLease], Optional[str]]:
+        snapshot = self._snapshot
+        if require_controls:
+            if snapshot.pause:
+                return None, "pause"
+            if snapshot.kill_switch:
+                return None, "kill_switch"
+        reason = snapshot.connectivity_reason()
+        if reason is not None:
+            return None, reason
+        return ReadinessLease(
+            self._revision,
+            self._connectivity_revision,
+            snapshot,
+            require_controls,
+        ), None
+
+    def validate(self, lease: ReadinessLease) -> bool:
+        if not isinstance(lease, ReadinessLease):
+            return False
+        if lease.connectivity_revision != self._connectivity_revision:
+            return False
+        if self._snapshot.connectivity_reason() is not None:
+            return False
+        if lease.require_controls:
+            return (
+                lease.revision == self._revision
+                and not self._snapshot.pause
+                and not self._snapshot.kill_switch
+            )
+        return True
 
 
 @dataclass(frozen=True)
@@ -485,7 +586,7 @@ class ExecutionEngine:
         self._plan_resolver = plan_resolver
         self._cache = instrument_cache
         self._policy = risk_policy
-        self._readiness = readiness
+        self._readiness_fence = DualReadinessFence(readiness)
         self._ownership = ownership
         self._ownership_claim = ownership.claim_engine()
         self._monotonic_ns = monotonic_ns
@@ -516,16 +617,21 @@ class ExecutionEngine:
 
     @property
     def readiness(self) -> ReadinessSnapshot:
-        return self._readiness
+        return self._readiness_fence.snapshot
+
+    @property
+    def readiness_revision(self) -> int:
+        return self._readiness_fence.revision
 
     def adapter_last_sequences(self) -> Mapping[str, int]:
         return MappingProxyType(dict(self._adapter_seeds))
 
     async def update_readiness(self, snapshot: ReadinessSnapshot) -> None:
-        async with self._lock:
-            if not isinstance(snapshot, ReadinessSnapshot):
-                raise EngineError("invalid_intent")
-            self._readiness = snapshot
+        self.publish_readiness(snapshot)
+
+    def publish_readiness(self, snapshot: ReadinessSnapshot) -> bool:
+        """Publish from a same-loop socket callback without waiting on submit."""
+        return self._readiness_fence.publish(snapshot)
 
     def _note_seeds(
         self, events: Sequence[ExecutionEvent], state: Optional[SpreadState]
@@ -620,7 +726,9 @@ class ExecutionEngine:
             self._commit_events((fault,), folded)
         return self._recovery(intent, reason_code)
 
-    def _open_gate(self, intent: TradeIntent) -> Optional[str]:
+    def _open_gate(
+        self, intent: TradeIntent, readiness: ReadinessSnapshot
+    ) -> Optional[str]:
         now = self._now()
         if now >= intent.expiry_mono_ns:
             return "ttl_expired"
@@ -630,17 +738,13 @@ class ExecutionEngine:
             return "notional_invalid"
         if intent.notional_usdt > self._policy.max_notional_usdt:
             return "notional_exceeds_cap"
-        if self._readiness.pause:
+        if readiness.pause:
             return "pause"
-        if self._readiness.kill_switch:
+        if readiness.kill_switch:
             return "kill_switch"
-        if not self._readiness.bybit_trade_ready or not self._readiness.okx_trade_ready:
-            return "trade_socket_not_ready"
-        if (
-            not self._readiness.bybit_private_ready
-            or not self._readiness.okx_private_ready
-        ):
-            return "private_stream_not_ready"
+        connectivity_reason = readiness.connectivity_reason()
+        if connectivity_reason is not None:
+            return connectivity_reason
         if self._restart_unproven:
             return "opens_not_allowed"
         if not opens_allowed(self._state):
@@ -721,6 +825,7 @@ class ExecutionEngine:
         evidence: Optional[VenueWriteEvidence],
         seq: int,
         mono: int,
+        readiness: ReadinessSnapshot,
     ) -> ExecutionEvent:
         return self._build_event(
             intent=intent,
@@ -735,7 +840,7 @@ class ExecutionEngine:
                 "instrument": plan.instrument,
                 "side": plan.side,
                 "client_id": plan.client_id,
-                "stream_generation": self._readiness.generation_for(plan.venue),
+                "stream_generation": readiness.generation_for(plan.venue),
             },
             dedupe=f"request_sent:{plan.venue.value}:{plan.leg_id}",
         )
@@ -833,13 +938,14 @@ class ExecutionEngine:
         okx: LegPlan,
         accept_seq: int,
         accept_mono: int,
+        readiness: ReadinessSnapshot,
     ) -> Optional[SpreadState]:
         accepted = self._accepted_event(intent, accept_seq, accept_mono)
         bybit_sent = self._request_sent_event(
-            intent, bybit, None, accept_seq + 1, accept_mono
+            intent, bybit, None, accept_seq + 1, accept_mono, readiness
         )
         okx_sent = self._request_sent_event(
-            intent, okx, None, accept_seq + 2, accept_mono
+            intent, okx, None, accept_seq + 2, accept_mono, readiness
         )
         return self._fold((accepted, bybit_sent, okx_sent))
 
@@ -900,6 +1006,7 @@ class ExecutionEngine:
         result: DispatchResult,
         start_seq: int,
         last_mono: int,
+        readiness: ReadinessSnapshot,
     ) -> tuple[list[ExecutionEvent], str]:
         seq = start_seq
         mono = last_mono
@@ -912,11 +1019,16 @@ class ExecutionEngine:
             and result.bybit.outcome is WriteOutcome.NOT_ATTEMPTED
             and result.okx.outcome is WriteOutcome.NOT_ATTEMPTED
         )
+        no_start_reason = (
+            "readiness_changed"
+            if result.reason_code == "readiness_changed"
+            else "transport_rejected"
+        )
         if no_starts and intent.action is IntentAction.OPEN:
             seq += 1
             mono = self._mono_at_least(mono)
             events.append(self._rejected_event(intent, seq, mono))
-            return events, "transport_rejected"
+            return events, no_start_reason
         if no_starts and intent.action is IntentAction.CLOSE:
             seq += 1
             mono = self._mono_at_least(mono)
@@ -925,7 +1037,7 @@ class ExecutionEngine:
                     intent, seq, mono, halt=False, reason_code="recovery_required"
                 )
             )
-            return events, "transport_rejected"
+            return events, no_start_reason
 
         ambiguous = False
         for _venue, _plan, evidence in plans:
@@ -951,7 +1063,11 @@ class ExecutionEngine:
                 mono = stamp if stamp is not None and stamp >= mono else self._mono_at_least(mono)
                 if stamp is not None and stamp >= mono:
                     mono = stamp
-                events.append(self._request_sent_event(intent, plan, evidence, seq, mono))
+                events.append(
+                    self._request_sent_event(
+                        intent, plan, evidence, seq, mono, readiness
+                    )
+                )
 
         for _venue, plan, evidence in plans:
             if _write_representable(evidence) and _write_uncertain(evidence):
@@ -998,14 +1114,22 @@ class ExecutionEngine:
         except OwnershipError:
             return self._reject(intent, "ownership_not_held")
 
+        readiness_lease: Optional[ReadinessLease] = None
+        readiness_reason: Optional[str] = None
         if intent.action is IntentAction.OPEN:
-            reason = self._open_gate(intent)
+            readiness_lease, readiness_reason = self._readiness_fence.acquire(
+                require_controls=True
+            )
+            reason = self._open_gate(intent, self.readiness)
             if reason is not None:
                 return self._reject(intent, reason)
         elif intent.action is IntentAction.CLOSE:
             reason = self._close_gate(intent)
             if reason is not None:
                 return self._reject(intent, reason)
+            readiness_lease, readiness_reason = self._readiness_fence.acquire(
+                require_controls=False
+            )
         else:
             return self._reject(intent, "invalid_intent")
 
@@ -1049,7 +1173,17 @@ class ExecutionEngine:
         last_mono = self._state.last_monotonic_ns
         accept_mono = last_mono if now < last_mono else now
         accepted_event = self._accepted_event(intent, accept_seq, accept_mono)
-        if self._prefold_request_shapes(intent, bybit, okx, accept_seq, accept_mono) is None:
+        readiness_for_events = (
+            readiness_lease.snapshot if readiness_lease is not None else self.readiness
+        )
+        if self._prefold_request_shapes(
+            intent,
+            bybit,
+            okx,
+            accept_seq,
+            accept_mono,
+            readiness_for_events,
+        ) is None:
             return self._reject(intent, "invalid_plan_set")
         accepted_state = self._fold((accepted_event,))
         if accepted_state is None:
@@ -1070,8 +1204,21 @@ class ExecutionEngine:
         except OwnershipError:
             return self._rollback_accepted_without_send(intent, "ownership_not_held")
 
+        if readiness_lease is None:
+            return self._rollback_accepted_without_send(
+                intent, readiness_reason or "readiness_changed"
+            )
+        if not self._readiness_fence.validate(readiness_lease):
+            current_reason = self.readiness.connectivity_reason()
+            return self._rollback_accepted_without_send(
+                intent, current_reason or "readiness_changed"
+            )
+
         try:
-            dispatch = await self._transport.dispatch(prepared)
+            dispatch = await self._transport.dispatch(
+                prepared,
+                pre_send_guard=lambda: self._readiness_fence.validate(readiness_lease),
+            )
         except asyncio.CancelledError:
             fault = self._fault_event(
                 intent,
@@ -1104,6 +1251,7 @@ class ExecutionEngine:
             dispatch,
             start_seq=self._state.last_sequence,
             last_mono=self._state.last_monotonic_ns,
+            readiness=readiness_lease.snapshot,
         )
         if derived:
             if not self._commit_derived(derived, intent):
@@ -1133,7 +1281,7 @@ class ExecutionEngine:
             and intent.action is IntentAction.OPEN
             and not self._state.recovery_required
         ):
-            return self._reject(intent, "transport_rejected", dispatch=dispatch)
+            return self._reject(intent, derived_reason, dispatch=dispatch)
         return self._recovery(intent, derived_reason, dispatch=dispatch)
 
     async def ingest_adapter_batch(self, batch: AdapterBatch) -> IngestResult:
@@ -1211,11 +1359,11 @@ class ExecutionEngine:
 
     def _trade_ready(self, venue: Venue) -> bool:
         if venue is Venue.BYBIT:
-            return self._readiness.bybit_trade_ready
-        return self._readiness.okx_trade_ready
+            return self.readiness.bybit_trade_ready
+        return self.readiness.okx_trade_ready
 
     def _both_private_ready(self) -> bool:
-        return self._readiness.bybit_private_ready and self._readiness.okx_private_ready
+        return self.readiness.bybit_private_ready and self.readiness.okx_private_ready
 
     def _recovery_event(
         self,
@@ -1252,7 +1400,7 @@ class ExecutionEngine:
     def _plan_recovery_locked(self) -> RecoveryPlan:
         return plan_recovery(
             self._state,
-            self._readiness,
+            self.readiness,
             attempts=self._recovery_attempts,
             wal_blocks_opens=self._wal.health().blocks_opens or self._restart_unproven,
         )
@@ -1743,7 +1891,7 @@ class ExecutionEngine:
                 "instrument": plan.instrument,
                 "side": plan.side,
                 "client_id": plan.client_id,
-                "stream_generation": self._readiness.generation_for(plan.venue),
+                "stream_generation": self.readiness.generation_for(plan.venue),
             },
             dedupe=f"request_sent:{plan.venue.value}:{plan.leg_id}:recovery",
         )

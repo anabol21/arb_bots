@@ -396,6 +396,42 @@ class ImportConstructTests(unittest.TestCase):
 
 
 class DispatchKernelTests(unittest.IsolatedAsyncioTestCase):
+    async def test_final_guard_rejects_before_either_write_is_scheduled(self) -> None:
+        loop = asyncio.get_running_loop()
+        bybit = FakeSocket(loop)
+        okx = FakeSocket(loop)
+        transport = _transport(loop, bybit, okx)
+        calls = 0
+
+        def guard() -> bool:
+            nonlocal calls
+            calls += 1
+            return False
+
+        result = await transport.dispatch(_prepare(), pre_send_guard=guard)
+        self.assertEqual(result.status, DispatchStatus.REJECTED)
+        self.assertEqual(result.reason_code, "readiness_changed")
+        self.assertEqual(result.bybit.outcome, WriteOutcome.NOT_ATTEMPTED)
+        self.assertEqual(result.okx.outcome, WriteOutcome.NOT_ATTEMPTED)
+        self.assertEqual(calls, 1)
+        self.assertEqual(bybit.asend_calls, 0)
+        self.assertEqual(okx.asend_calls, 0)
+
+    async def test_final_guard_exception_fails_closed_before_write(self) -> None:
+        loop = asyncio.get_running_loop()
+        bybit = FakeSocket(loop)
+        okx = FakeSocket(loop)
+        transport = _transport(loop, bybit, okx)
+
+        def guard() -> bool:
+            raise RuntimeError("readiness source failed")
+
+        result = await transport.dispatch(_prepare(), pre_send_guard=guard)
+        self.assertEqual(result.status, DispatchStatus.REJECTED)
+        self.assertEqual(result.reason_code, "readiness_changed")
+        self.assertEqual(bybit.asend_calls, 0)
+        self.assertEqual(okx.asend_calls, 0)
+
     async def test_both_sockets_owned_by_active_loop(self) -> None:
         loop = asyncio.get_running_loop()
         bybit = FakeSocket(loop)

@@ -28,6 +28,7 @@ from app.bot.execution.contracts import (
 )
 from app.bot.execution.engine import (
     SCHEMA_VERSION as ENGINE_SCHEMA,
+    DualReadinessFence,
     EngineError,
     ExecutionEngine,
     IngestResult,
@@ -487,6 +488,40 @@ class EngineHarness(unittest.IsolatedAsyncioTestCase):
 
 
 class AdmissionApiTests(unittest.TestCase):
+    def test_dual_readiness_lease_invalidates_on_disconnect_or_generation_change(self) -> None:
+        fence = DualReadinessFence(_ready())
+        lease, reason = fence.acquire(require_controls=True)
+        assert lease is not None
+        self.assertIsNone(reason)
+        self.assertTrue(fence.validate(lease))
+        self.assertFalse(fence.publish(_ready()))
+        self.assertTrue(fence.validate(lease))
+
+        self.assertTrue(
+            fence.publish(_ready(okx_private_ready=False, okx_generation=2))
+        )
+        self.assertFalse(fence.validate(lease))
+        blocked, reason = fence.acquire(require_controls=True)
+        self.assertIsNone(blocked)
+        self.assertEqual(reason, "private_stream_not_ready")
+
+        self.assertTrue(fence.publish(_ready(okx_generation=2)))
+        replacement, reason = fence.acquire(require_controls=True)
+        assert replacement is not None
+        self.assertIsNone(reason)
+        self.assertTrue(fence.validate(replacement))
+        self.assertFalse(fence.validate(lease))
+
+    def test_close_lease_ignores_control_change_but_open_lease_does_not(self) -> None:
+        fence = DualReadinessFence(_ready())
+        open_lease, _ = fence.acquire(require_controls=True)
+        close_lease, _ = fence.acquire(require_controls=False)
+        assert open_lease is not None and close_lease is not None
+
+        self.assertTrue(fence.publish(_ready(pause=True, kill_switch=True)))
+        self.assertFalse(fence.validate(open_lease))
+        self.assertTrue(fence.validate(close_lease))
+
     def test_admission_capacity_ok_is_pure(self) -> None:
         self.assertFalse(
             admission_capacity_ok(
@@ -784,6 +819,127 @@ class RiskGateTests(EngineHarness):
         stream = self._engine(readiness=_ready(okx_private_ready=False), wal=_ready_wal(self.wal_path))
         self.assertEqual((await stream.submit(_intent())).reason_code, "private_stream_not_ready")
         self.assertEqual(self.bybit.asend_calls, 0)
+
+    async def test_disconnected_private_stream_turns_normal_close_into_recovery(self) -> None:
+        engine = self._engine(
+            readiness=_ready(okx_private_ready=False, okx_generation=2),
+            state=_open_state(),
+        )
+        result = await engine.submit(
+            _intent(intent_id=CLOSE_ID, action=IntentAction.CLOSE)
+        )
+        self.assertEqual(result.status, SubmitStatus.RECOVERY_REQUIRED)
+        self.assertEqual(result.reason_code, "private_stream_not_ready")
+        self.assertTrue(result.recovery_required)
+        self.assertIn(
+            engine.state.status,
+            {SpreadStatus.RECOVERING, SpreadStatus.EXPOSURE_UNKNOWN},
+        )
+        self.assertTrue(engine.state.recovery_required)
+        self.assertEqual(self.bybit.asend_calls, 0)
+        self.assertEqual(self.okx.asend_calls, 0)
+
+    async def test_readiness_change_during_frame_finalize_blocks_both_writes(self) -> None:
+        holder: dict[str, ExecutionEngine] = {}
+        finalize_calls = 0
+
+        def finalize(*args: Any, **kwargs: Any) -> str:
+            nonlocal finalize_calls
+            finalize_calls += 1
+            text = unsigned_frame_finalizer(*args, **kwargs)
+            if finalize_calls == 2:
+                holder["engine"].publish_readiness(
+                    _ready(bybit_generation=2, okx_generation=2)
+                )
+            return text
+
+        engine = ExecutionEngine(
+            run_id=RUN_ID,
+            wal=_ready_wal(self.wal_path),
+            transport=self._transport(finalize=finalize),
+            plan_resolver=_resolver,
+            instrument_cache=_cache("BTC"),
+            risk_policy=_policy("BTC"),
+            readiness=_ready(),
+            ownership=self.fence,
+            monotonic_ns=self.clock,
+        )
+        holder["engine"] = engine
+        result = await engine.submit(_intent())
+        self.assertEqual(result.status, SubmitStatus.REJECTED)
+        self.assertEqual(result.reason_code, "readiness_changed")
+        self.assertEqual(engine.state.status, SpreadStatus.IDLE)
+        self.assertEqual(self.bybit.asend_calls, 0)
+        self.assertEqual(self.okx.asend_calls, 0)
+
+    async def test_disconnect_at_close_send_boundary_starts_recovery_without_writes(self) -> None:
+        holder: dict[str, ExecutionEngine] = {}
+        finalize_calls = 0
+
+        def finalize(*args: Any, **kwargs: Any) -> str:
+            nonlocal finalize_calls
+            finalize_calls += 1
+            text = unsigned_frame_finalizer(*args, **kwargs)
+            if finalize_calls == 2:
+                holder["engine"].publish_readiness(
+                    _ready(bybit_private_ready=False, bybit_generation=2)
+                )
+            return text
+
+        engine = ExecutionEngine(
+            run_id=RUN_ID,
+            wal=_ready_wal(self.wal_path),
+            transport=self._transport(finalize=finalize),
+            plan_resolver=_resolver,
+            instrument_cache=_cache("BTC"),
+            risk_policy=_policy("BTC"),
+            readiness=_ready(),
+            ownership=self.fence,
+            monotonic_ns=self.clock,
+            state=_open_state(),
+        )
+        holder["engine"] = engine
+        result = await engine.submit(
+            _intent(intent_id=CLOSE_ID, action=IntentAction.CLOSE)
+        )
+        self.assertEqual(result.status, SubmitStatus.RECOVERY_REQUIRED)
+        self.assertEqual(result.reason_code, "readiness_changed")
+        self.assertTrue(engine.state.recovery_required)
+        self.assertEqual(self.bybit.asend_calls, 0)
+        self.assertEqual(self.okx.asend_calls, 0)
+
+    async def test_readiness_publish_is_not_starved_by_inflight_submit(self) -> None:
+        self.bybit.block = True
+        self.okx.block = True
+        self.bybit.release.clear()
+        self.okx.release.clear()
+        engine = self._engine()
+        task = asyncio.create_task(engine.submit(_intent()))
+        await asyncio.wait_for(
+            asyncio.gather(self.bybit.started.wait(), self.okx.started.wait()),
+            timeout=1,
+        )
+
+        await asyncio.wait_for(
+            engine.update_readiness(
+                _ready(okx_private_ready=False, bybit_generation=2, okx_generation=2)
+            ),
+            timeout=0.1,
+        )
+        self.assertEqual(engine.readiness_revision, 1)
+        self.bybit.release.set()
+        self.okx.release.set()
+        result = await task
+        self.assertEqual(result.status, SubmitStatus.ACCEPTED)
+        sent = [
+            item.event
+            for item in engine._wal._queue
+            if item.event.event_type is ExecutionEventType.REQUEST_SENT
+        ]
+        self.assertEqual(len(sent), 2)
+        self.assertEqual(
+            {event.payload["stream_generation"] for event in sent}, {1}
+        )
 
     async def test_ownership_required(self) -> None:
         engine = self._engine()

@@ -188,7 +188,34 @@ Gate:
 
 The shadow run validates parity and latency mechanics, not profitability.
 
-#### EV2-09C — synthetic-signal manager exercise
+#### EV2-09C — dual-readiness fence
+
+Protect every normal two-venue dispatch with one immutable readiness lease.
+Both trade sockets and both authenticated private streams must be ready; any
+disconnect or venue-generation change invalidates the lease. The engine checks
+the lease once at admission and again after frame finalization immediately
+before both same-loop writes are scheduled, with no await between that final
+check and the two `create_task` calls.
+
+OPEN fails closed without changing lifecycle state. A normal strategy CLOSE
+that loses readiness performs zero dual-leg writes and moves into mandatory
+reconciliation/recovery; pause and kill-switch changes do not block close or
+reduce-only recovery. Request-sent evidence retains the generation frozen in
+the dispatch lease rather than reading a possibly newer post-send generation.
+
+#### EV2-09D — readiness wiring and disconnect fault matrix
+
+Wire private auth/subscription/reseed and trade-socket state from both venue
+runtimes into the dual-readiness fence. Reconnect publication must first set
+the affected component false, advance its venue generation, and only return to
+ready after the required auth/subscription/reseed proof. Fault injection covers
+disconnect before admission, during preparation, immediately before dispatch,
+after one/both writes have started, and during recovery.
+
+Gate: no normal dual-leg write starts while either venue is unready; a stale
+lease cannot become valid again merely because all booleans return to true.
+
+### EV2-10 — synthetic-signal readiness canary
 
 An explicit no-order policy mode may replace rare alpha eligibility with one
 replayable 1..100 roll per second across the whole 30-coin universe: `17`
@@ -198,7 +225,12 @@ live-order configuration and terminate only in the shadow `NullTradeSink`.
 It is test coverage for manager lifecycle and reconnect/readiness experiments,
 not strategy or profitability evidence.
 
-### EV2-10 — immutable canary release and control plane
+Run it for an initial two-hour target-VPS window with a separate unit, data
+root, log root and run id. Order capability remains physically absent. The run
+must exercise repeated OPEN/CLOSE lifecycle cycles plus controlled private
+disconnect/reconnect cases through the EV2-09C/09D readiness path.
+
+### EV2-11 — immutable canary release and control plane
 
 Prepare a reviewable release without starting it.
 
@@ -217,15 +249,17 @@ Deliverables:
 Gate: deployment dry-run and rollback rehearsal succeed. Creating the unit
 file does not authorize installing, enabling or starting it.
 
-### EV2-11 — bounded live canary ladder
+### EV2-12 — bounded live canary ladder
 
 Live steps require explicit user approval at every stage:
 
 1. preflight with live credentials but order sends disabled;
-2. one `$20/leg`, `K_live=1` round trip, with the 30-coin universe loaded;
+2. an isolated one-round-trip real-order experiment at `$20/leg`, outside the
+   continuing contour;
 3. independent flatness proof on both venues and full WAL/Sentry/Grok parity;
-4. twenty bounded `$20/leg` round trips, still global `K_live=1`;
-5. only then start the continuing 30-coin canary window.
+4. a bounded live synthetic-policy contour, still global `K_live=1`, with an
+   explicit round-trip cap and stop conditions;
+5. only then enable the frozen real strategy in the continuing 30-coin canary.
 
 Any unknown exposure, late uncorrelated fill, failed WAL, missing private
 stream, ownership conflict, latency gate failure or collector regression stops
@@ -246,7 +280,7 @@ a correctness gate; it is not used to claim a statistically meaningful p99.
 
 ## Canary-ready definition
 
-The branch is ready to request a live canary only when EV2-03 through EV2-10
+The branch is ready to request a live canary only when EV2-03 through EV2-11
 are reviewed and green, the 30-coin universe and frozen strategy manifest
 match the existing `would_sent` contour, the shadow/latency gates pass on the
 target VPS, recovery fault injection is green, and the Grok/MCP handoff can
