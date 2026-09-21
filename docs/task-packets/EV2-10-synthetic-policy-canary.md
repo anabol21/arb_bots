@@ -65,6 +65,17 @@ events only after the readiness publisher and fault matrix are green.
 
 ## Deployment note
 
-The policy code is prepared but is not deployed by this packet. Installing or
-starting the separate EV2-10 unit requires a reviewed deployment patch and
-explicit operator approval.
+The bounded deployment uses:
+
+- `spread-bbot-ev2-10-synthetic.service`;
+- `spread-bbot-ev2-10-private@bybit.service`;
+- `spread-bbot-ev2-10-private@okx.service`;
+- `/root/spread_ev2_10` at the reviewed EV2 commit;
+- `/data/bbot-ev2-10-synthetic` and dedicated log files;
+- seed `7`, `RuntimeMaxSec=7200`, `Restart=no` for the main unit.
+
+The two private companions remain authenticated read-only processes and expose
+no trade socket. Consequently, the two-hour VPS run is evidence for synthetic
+manager/parity/shadow-FSM behavior and private reconnect observation. The
+EV2-09D final-send readiness fence is covered by its deterministic fault matrix,
+not by a real trade-WebSocket send in this no-order deployment.

@@ -1,0 +1,57 @@
+# EV2-10 two-hour synthetic-policy canary. Structurally no live orders.
+# Authenticated private reads run in separate read-only companion units.
+
+[Unit]
+Description=Spread B-bot EV2-10 synthetic policy canary (no orders)
+After=network-online.target
+Wants=network-online.target spread-bbot-ev2-10-private@bybit.service spread-bbot-ev2-10-private@okx.service
+StartLimitIntervalSec=300
+StartLimitBurst=1
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/root/spread_ev2_10
+Environment=PYTHONPATH=/root/spread_ev2_10
+Environment=VENUE=live
+Environment=LIVE_ORDERS=0
+Environment=BBOT_MODE=policy
+Environment=BBOT_PROFILE=gear22_would_send
+Environment=BBOT_BROKER=stub
+Environment=BBOT_POLICY_MODE=synthetic_roll_v1
+Environment=BBOT_SYNTHETIC_ROLL_SEED=7
+Environment=BBOT_EV2_SHADOW=1
+Environment=BBOT_EV2_TARGET_VPS=1
+Environment=BBOT_THETA_LIVE_SEND=0
+Environment=BBOT_THETA_TRADE=1
+Environment=BBOT_NOTIONAL_USDT=20
+Environment=BBOT_FILL_DELAY_MS=70
+Environment=BBOT_SLOT_K=1
+Environment=BBOT_FLOOR_WATCH=1
+Environment=BBOT_TW_P50_WATCH=1
+Environment=BBOT_THETA_WATCH=1
+Environment=BBOT_FLOOR_WARM=1
+Environment=BBOT_EV2_PROBE_DELAY_SEC=60
+Environment=BBOT_EV2_WARMUP_N=100
+Environment=BBOT_EV2_COUNTED_N=10000
+Environment=BBOT_DATA_ROOT=/data/bbot-ev2-10-synthetic
+Environment=BBOT_LOG_PATH=/var/log/spread/bbot-ev2-10-synthetic.log
+Environment=BBOT_FLOOR_WARM_PATH=/data/bbot-ev2-10-synthetic/state/floor_warm.pkl
+Environment=BBOT_COINS=KAITO,HOME,WAL,RVN,ONT,2Z,BICO,HMSTR,CAP,BLEND,EDEN,KMNO,GPS,ME,ZBT,MOVE,COAI,AZTEC,APR,YB,ICX,AT,H,MUBARAK,ACU,LA,BEAT,PARTI,SIGN,GIGGLE
+ExecStartPre=/usr/bin/mkdir -p /data/bbot-ev2-10-synthetic/state /var/log/spread
+ExecStart=/root/venv/bin/python -m app.bot
+Restart=no
+RuntimeMaxSec=7200
+KillSignal=SIGTERM
+TimeoutStopSec=30
+StandardOutput=append:/var/log/spread/bbot-ev2-10-synthetic.log
+StandardError=append:/var/log/spread/bbot-ev2-10-synthetic.log
+MemoryMax=1G
+CPUQuota=100%
+LimitNOFILE=8192
+Nice=10
+ReadWritePaths=/data/bbot-ev2-10-synthetic /var/log/spread
+InaccessiblePaths=/data/live /data/bars /data/compacted /data/spool /data/bbot-ev2-shadow /data/bbot-theta-k1-canary /data/bbot-gear22-live-canary
+
+[Install]
+WantedBy=multi-user.target
