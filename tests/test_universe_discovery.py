@@ -25,6 +25,7 @@ from app.discovery.intersection import (  # noqa: E402
     run_discovery,
 )
 from app.utils.universe_delta import read_delta_rows  # noqa: E402
+from research.is_crypto import is_crypto, is_hot_add_crypto  # noqa: E402
 
 
 def _okx_item(
@@ -55,6 +56,7 @@ def _bybit_item(
     settle: str = "USDT",
     category: str = "linear",
     symbol: str | None = None,
+    symbol_type: str = "",
 ) -> dict[str, Any]:
     return {
         "symbol": symbol or f"{base}USDT",
@@ -63,6 +65,7 @@ def _bybit_item(
         "settleCoin": settle,
         "category": category,
         "status": status,
+        "symbolType": symbol_type,
         "priceFilter": {"tickSize": "0.01"},
         "lotSizeFilter": {
             "qtyStep": "1",
@@ -118,6 +121,31 @@ class FilterJoinTests(unittest.TestCase):
         self.assertEqual(rows[0]["bybit_symbol"], "AAAUSDT")
         self.assertEqual(rows[0]["okx_lot_size"], "1")
         self.assertEqual(rows[0]["bybit_qty_step"], "1")
+
+    def test_normalize_bybit_keeps_symbol_type(self) -> None:
+        row = normalize_bybit_item(_bybit_item("HUT", symbol_type="stock"))
+        self.assertEqual(row["symbol_type"], "stock")
+        self.assertEqual(normalize_bybit_item(_bybit_item("BTC"))["symbol_type"], "")
+
+
+class HotAddCryptoGateTests(unittest.TestCase):
+    def test_is_crypto_defaults_unknown_true(self) -> None:
+        self.assertTrue(is_crypto("HUT"))
+        self.assertTrue(is_crypto("TEAM"))
+        self.assertTrue(is_crypto("TEM"))
+        self.assertFalse(is_crypto("AAPL"))
+        self.assertTrue(is_crypto("BTC"))
+
+    def test_is_hot_add_crypto_rejects_stock_keeps_btc(self) -> None:
+        for coin in ("HUT", "TEAM", "TEM"):
+            self.assertFalse(is_hot_add_crypto(coin, symbol_type="stock"), coin)
+            self.assertFalse(is_hot_add_crypto(coin, symbol_type="STOCK"), coin)
+        self.assertTrue(is_hot_add_crypto("BTC", symbol_type=""))
+        self.assertTrue(is_hot_add_crypto("BTC", symbol_type="crypto"))
+        self.assertFalse(is_hot_add_crypto("AAPL", symbol_type=""))
+        self.assertFalse(is_hot_add_crypto("NEWCOIN", symbol_type="forex"))
+        self.assertFalse(is_hot_add_crypto("NEWCOIN", symbol_type="mystery"))
+        self.assertTrue(is_hot_add_crypto("NEWCOIN", symbol_type=""))
 
 
 class RunDiscoveryMockHttpTests(unittest.TestCase):
@@ -233,6 +261,57 @@ class RunDiscoveryMockHttpTests(unittest.TestCase):
         )
         self.assertEqual(summary["coins"], ["NEWCOIN"])
         self.assertGreaterEqual(summary["skipped_non_crypto"], 1)
+
+    def test_run_discovery_stock_listings_not_in_delta_btc_can(self) -> None:
+        universe = self.root / "bybit_okx_universe.csv"
+        delta = self.root / "hot_add_delta.csv"
+        self._write_universe(universe, ["KEEP"])
+
+        def http_get_json(url: str, params: Mapping[str, str]) -> dict[str, Any]:
+            parsed = urlparse(url)
+            if "bybit.com" in parsed.netloc:
+                return {
+                    "retCode": 0,
+                    "result": {
+                        "list": [
+                            _bybit_item("KEEP"),
+                            _bybit_item("BTC"),
+                            _bybit_item("HUT", symbol_type="stock"),
+                            _bybit_item("TEAM", symbol_type="stock"),
+                            _bybit_item("TEM", symbol_type="stock"),
+                            _bybit_item("AAPL"),
+                        ],
+                        "nextPageCursor": "",
+                    },
+                }
+            if "okx.com" in parsed.netloc:
+                return {
+                    "code": "0",
+                    "data": [
+                        _okx_item("KEEP"),
+                        _okx_item("BTC"),
+                        _okx_item("HUT"),
+                        _okx_item("TEAM"),
+                        _okx_item("TEM"),
+                        _okx_item("AAPL"),
+                    ],
+                }
+            raise AssertionError(f"unexpected url {url}")
+
+        summary = run_discovery(
+            universe_path=universe,
+            delta_path=delta,
+            max_new=8,
+            http_get_json=http_get_json,
+        )
+        self.assertEqual(summary["coins"], ["BTC"])
+        self.assertNotIn("HUT", summary["coins"])
+        self.assertNotIn("TEAM", summary["coins"])
+        self.assertNotIn("TEM", summary["coins"])
+        self.assertNotIn("AAPL", summary["coins"])
+        self.assertGreaterEqual(summary["skipped_non_crypto"], 4)
+        rows = read_delta_rows(delta)
+        self.assertEqual([r["base_coin"] for r in rows], ["BTC"])
 
     def test_run_discovery_writes_capped_delta_not_universe(self) -> None:
         universe = self.root / "bybit_okx_universe.csv"

@@ -1,18 +1,21 @@
 """Classify base_coin as crypto vs equity/ETF/commodity-like perpetual.
 
-Offline helper for universe screening (research / notebooks). Not wired into
-the collector runtime.
-
-Rule: ``is_crypto`` is True unless ``base_coin`` is in the curated denylist
+``is_crypto`` is True unless ``base_coin`` is in the curated denylist
 (``research/data/non_crypto_base_coins.txt``), optionally overridden by an
 allowlist. Default-True means unknown new equity tickers stay crypto until
 added to the denylist — see false-positive/negative notes in that file.
 
+Hot-add discovery must not use that default. ``is_hot_add_crypto`` requires a
+crypto-yes signal (denylist pass + Bybit ``symbolType`` not TradFi). Empty
+``symbolType`` is Bybit's crypto-linear default; ``stock`` / ``forex`` /
+``commodity`` / ``xstocks`` are not crypto even if the denylist missed them.
+
 Usage (from repo root)::
 
-  from research.is_crypto import is_crypto
+  from research.is_crypto import is_crypto, is_hot_add_crypto
   is_crypto("BTC")   # True
   is_crypto("AAPL")  # False
+  is_hot_add_crypto("HUT", symbol_type="stock")  # False
 
   ./venv/bin/python research/is_crypto.py --base-coin BTC
   ./venv/bin/python research/is_crypto.py --universe bybit_okx_universe.csv --counts
@@ -164,6 +167,52 @@ def is_crypto(
         else load_non_crypto_denylist(denylist_path)
     )
     return coin not in deny
+
+
+# Bybit linear instruments-info: crypto perps use empty symbolType; TradFi
+# uses stock / forex / commodity / xstocks (docs v5 tradfi-integration).
+NON_CRYPTO_SYMBOL_TYPES = frozenset({"stock", "forex", "commodity", "xstocks"})
+CRYPTO_SYMBOL_TYPES = frozenset({"", "crypto"})
+
+
+def normalize_symbol_type(symbol_type: Optional[str] = None) -> str:
+    return str(symbol_type or "").strip().lower()
+
+
+def is_hot_add_crypto(
+    base_coin: str,
+    *,
+    symbol_type: Optional[str] = None,
+    denylist: Optional[Iterable[str]] = None,
+    allowlist: Optional[Iterable[str]] = None,
+    denylist_path: Optional[Union[str, Path]] = None,
+) -> bool:
+    """True only when a listing is a known crypto perpetual (fail closed).
+
+    Used by discovery/hot-add so the live pool expands with cryptocurrencies
+    only. Does not change ``is_crypto`` (still denylist-default-True).
+
+    Order:
+    1. Empty name → False.
+    2. Bybit TradFi ``symbolType`` (stock/forex/commodity/xstocks) → False.
+    3. Unknown non-empty ``symbolType`` → False.
+    4. Else ``is_crypto`` (allowlist yes, denylist no, unknown name yes only
+       when the venue type is the crypto default).
+    """
+    coin = normalize_base_coin(base_coin)
+    if not coin:
+        return False
+    st = normalize_symbol_type(symbol_type)
+    if st in NON_CRYPTO_SYMBOL_TYPES:
+        return False
+    if st not in CRYPTO_SYMBOL_TYPES:
+        return False
+    return is_crypto(
+        coin,
+        denylist=denylist,
+        allowlist=allowlist,
+        denylist_path=denylist_path,
+    )
 
 
 def classify_base_coins(

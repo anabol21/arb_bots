@@ -30,11 +30,17 @@ Logic (from `screaner.ipynb`, not notebook cells):
 2. OKX `GET /api/v5/public/instruments?instType=SWAP`.
 3. Filters: OKX live USDT-settled SWAP; Bybit linear trading quote+settle USDT.
 4. Inner join on `symbol_norm`.
-5. Diff against **the universe CSV path you pass** (VPS staging CSV is 188
+5. Crypto-yes gate (`research.is_crypto.is_hot_add_crypto`): skip denylist
+   names; skip Bybit `symbolType` in `stock` / `forex` / `commodity` /
+   `xstocks` (HUT/TEAM/TEM-style stock perps). Empty `symbolType` is Bybit's
+   crypto-linear default. Unknown non-empty types are **not** added.
+   `is_crypto` itself still defaults unknown names to True — discovery must
+   not use that default.
+6. Diff against **the universe CSV path you pass** (VPS staging CSV is 188
    `take=yes`; a local Desktop CSV may differ — do not mix them).
-6. Atomic replace of the delta file. Hard cap `--max-new` /
+7. Atomic replace of the delta file. Hard cap `--max-new` /
    `SPREAD_DISCOVERY_MAX_NEW` (default 8).
-7. **Does not rewrite** `take=yes` rows. The universe CSV is opened read-only.
+8. **Does not rewrite** `take=yes` rows. The universe CSV is opened read-only.
    Delta path must not equal the universe path and must not sit under
    `/data/live`, `/data/bars`, `/data/compacted`, or `/data/spool`.
 
@@ -105,7 +111,8 @@ Separate systemd unit — **not** `spread-collector.service`:
 - Universe: `/root/spread_hotadd_canary/bybit_okx_universe_canary10.csv` — **full**
   prod copy + REST backfill (`take=no` for missing intersection rows), then
   `take=yes` on exactly **10 crypto** pairs (`research/is_crypto.py`). Discovery
-  and hot-add skip `is_crypto=no` tickers.
+  requires **crypto-yes** (`is_hot_add_crypto`: denylist pass **and** Bybit
+  `symbolType` not TradFi). Hot-add still skips denylist `is_crypto=no` names.
 
 Never run a second writer on `/data/live`. Do not restart production
 `spread-collector` for these experiments. Do not fan-out `spread-bbot-theta-k1-canary`.
@@ -215,6 +222,7 @@ python3 -m py_compile app/screaner_b_o.py app/utils/hot_add.py \
 python3 -m unittest tests/test_universe_delta.py \
   tests/test_hot_add_supervisor.py tests/test_universe_discovery.py \
   tests/test_canary10_universe.py
+# crypto-yes gate: HUT/TEAM/TEM stock symbolType out of delta; BTC in
 python3 -m py_compile validation/prep_canary10_universe.py \
   app/utils/canary10_universe.py app/utils/canary10_guards.py
 python3 validation/check_hot_add.py

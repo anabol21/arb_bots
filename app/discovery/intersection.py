@@ -20,7 +20,7 @@ from app.utils.universe_delta import (
     diff_intersection_against_csv,
     write_delta_atomic,
 )
-from research.is_crypto import is_crypto
+from research.is_crypto import is_hot_add_crypto
 
 logger = logging.getLogger("discovery")
 
@@ -131,6 +131,7 @@ def normalize_bybit_item(item: Mapping[str, Any]) -> dict[str, str]:
         "base_coin": base,
         "quote_coin": str(item.get("quoteCoin") or "").strip(),
         "settle_coin": str(item.get("settleCoin") or "").strip(),
+        "symbol_type": str(item.get("symbolType") or "").strip(),
         "tick_size": str(price_filter.get("tickSize") or "").strip(),
         "qty_step": str(lot_filter.get("qtyStep") or "").strip(),
         "min_order_qty": str(lot_filter.get("minOrderQty") or "").strip(),
@@ -273,13 +274,18 @@ def run_discovery(
     bybit_f = filter_bybit_live_usdt_linear(bybit_norm)
     okx_f = filter_okx_live_usdt_swap(okx_norm)
     intersection = build_intersection_rows(okx_f, bybit_f)
+    bybit_symbol_type = {
+        str(row.get("symbol_norm", "")).strip(): str(row.get("symbol_type") or "")
+        for row in bybit_f
+        if str(row.get("symbol_norm", "")).strip()
+    }
     crypto_intersection: list[dict[str, str]] = []
     skipped_non_crypto: list[str] = []
     for row in intersection:
         coin = str(row.get("base_coin", "")).strip()
         if not coin:
             continue
-        if not is_crypto(coin):
+        if not is_hot_add_crypto(coin, symbol_type=bybit_symbol_type.get(coin, "")):
             skipped_non_crypto.append(coin)
             continue
         crypto_intersection.append(row)
