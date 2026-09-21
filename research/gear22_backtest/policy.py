@@ -31,6 +31,7 @@ is fail-closed.
 
 from __future__ import annotations
 
+import hashlib
 import math
 from dataclasses import dataclass
 from typing import Literal, Optional
@@ -45,6 +46,12 @@ _BELOW_MIN_PROFIT_REASON = "hold_below_min_profit"
 _BELOW_MIN_THETA_REASON = "hold_below_min_theta"
 _OPEN_OVERLAP_REASON = "hold_open_overlap"
 _CLOSE_REASON = "close_min_profit"
+
+SYNTHETIC_ROLL_POLICY_ID = "gear22_synthetic_roll_v1"
+SYNTHETIC_OPEN_ROLL = 17
+SYNTHETIC_CLOSE_ROLL = 32
+SYNTHETIC_ROLL_MIN = 1
+SYNTHETIC_ROLL_MAX = 100
 
 
 @dataclass(frozen=True)
@@ -87,6 +94,11 @@ class PolicyParams:
     fee_round_trip_pp: float = 0.30  # 4 taker legs × 0.00075 × 100
     min_spread_open: Optional[float] = None  # unified |spread_last| threshold, both sides
     min_theta_close: Optional[float] = None  # close-side theta_1m_*; None = off
+    # Opt-in no-order canary. ``None`` preserves the frozen production policy.
+    # A stable seed makes every per-second roll exactly replayable.
+    synthetic_roll_seed: Optional[int] = None
+    synthetic_open_roll: int = SYNTHETIC_OPEN_ROLL
+    synthetic_close_roll: int = SYNTHETIC_CLOSE_ROLL
 
 
 DummyParams = PolicyParams
@@ -117,9 +129,83 @@ def decide(
     if state.held_coin is not None and state.held_coin != row.coin:
         return Decision(action="hold", reason="hold_coin_mismatch")
 
+    if synthetic_roll_enabled(params):
+        return decide_synthetic_roll(row, state, params)
+
     if state.position_side is None:
         return decide_open(row, params)
     return decide_close(row, state, params)
+
+
+def synthetic_roll_enabled(params: PolicyParams) -> bool:
+    """Whether the explicitly configured deterministic canary policy is on."""
+    return params.synthetic_roll_seed is not None
+
+
+def synthetic_roll(ts_s: int, seed: int) -> int:
+    """Return one stable 1..100 roll for the whole contour at ``ts_s``.
+
+    The coin is intentionally absent from the input: all 30 coins observe the
+    same draw in a second, so K=1/coin ordering chooses at most one candidate.
+    """
+    if isinstance(ts_s, bool) or not isinstance(ts_s, int) or ts_s < 0:
+        raise ValueError("ts_s must be a non-negative int")
+    if isinstance(seed, bool) or not isinstance(seed, int):
+        raise ValueError("synthetic roll seed must be an int")
+    raw = hashlib.blake2s(
+        f"{seed}:{ts_s}".encode("ascii"),
+        digest_size=8,
+        person=b"ev2roll1",
+    ).digest()
+    return int.from_bytes(raw, "big") % SYNTHETIC_ROLL_MAX + SYNTHETIC_ROLL_MIN
+
+
+def _synthetic_open_side(ts_s: int, seed: int) -> Side:
+    """Exercise both directional paths without consuming a second roll."""
+    raw = hashlib.blake2s(
+        f"{seed}:{ts_s}:side".encode("ascii"),
+        digest_size=1,
+        person=b"ev2side1",
+    ).digest()
+    return "long" if raw[0] % 2 == 0 else "short"
+
+
+def decide_synthetic_roll(
+    row: FeatureSnapshot,
+    state: PolicyState,
+    params: PolicyParams,
+) -> Decision:
+    """No-alpha canary: roll 17 opens and roll 32 closes.
+
+    This replaces only the signal policy. Book completeness, K=1 occupancy,
+    size checks, fill modelling, execution FSM and transport gates remain in
+    their normal callers.
+    """
+    seed = params.synthetic_roll_seed
+    if seed is None:
+        raise ValueError("synthetic roll policy is not enabled")
+    open_roll = params.synthetic_open_roll
+    close_roll = params.synthetic_close_roll
+    for name, value in (("open", open_roll), ("close", close_roll)):
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise ValueError(f"synthetic {name} roll must be an int")
+        if not SYNTHETIC_ROLL_MIN <= value <= SYNTHETIC_ROLL_MAX:
+            raise ValueError(f"synthetic {name} roll must be in 1..100")
+    if open_roll == close_roll:
+        raise ValueError("synthetic open and close rolls must differ")
+
+    roll = synthetic_roll(row.ts_s, seed)
+    if state.position_side is None:
+        if roll != open_roll:
+            return Decision(action="hold", reason=f"synthetic_hold_{roll}")
+        side = _synthetic_open_side(row.ts_s, seed)
+        return Decision(
+            action="open_long" if side == "long" else "open_short",
+            reason=f"synthetic_open_{roll}",
+        )
+    if roll == close_roll:
+        return Decision(action="close", reason=f"synthetic_close_{roll}")
+    return Decision(action="hold", reason=f"synthetic_hold_{roll}")
 
 
 def decide_open(

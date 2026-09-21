@@ -36,8 +36,12 @@ from research.gear22_backtest.policy import (
     FeatureSnapshot,
     PolicyParams,
     PolicyState,
+    SYNTHETIC_CLOSE_ROLL,
+    SYNTHETIC_OPEN_ROLL,
+    SYNTHETIC_ROLL_POLICY_ID,
     decide as policy_decide,
     potential_profit_pp,
+    synthetic_roll_enabled,
 )
 from research.gear22_backtest.params_frozen import DEFAULT_OBSERVE_PARAMS
 
@@ -56,6 +60,8 @@ DEFAULT_NOTIONAL_USDT = 100.0
 DEFAULT_LIVE_CANARY_NOTIONAL_USDT = 20.0
 DEFAULT_BOOK_DEPTH = 1
 POLICY_ID = "gear22_frozen_v1"
+SYNTHETIC_POLICY_MODE = "synthetic_roll_v1"
+DEFAULT_SYNTHETIC_ROLL_SEED = 20260921
 
 # August-std HTML top30 — same universe as VPS unit spread-bbot-theta-k1-canary.
 GEAR22_HTML_TOP30: tuple[str, ...] = (
@@ -101,6 +107,10 @@ _GEAR22_TRADE_PROFILES = frozenset(
 
 class ThetaLiveSendError(RuntimeError):
     """Fail-closed live canary: missing LIVE_ORDERS / private_live / VENUE=live."""
+
+
+class SyntheticPolicyGateError(RuntimeError):
+    """Synthetic signal policy must remain structurally unable to send orders."""
 
 
 PlaceFn = Callable[..., Optional[str]]
@@ -158,6 +168,34 @@ def assert_theta_live_send_gates(
         raise ThetaLiveSendError(
             "theta live send requires LIVE_ORDERS=1 (fail closed)"
         )
+
+
+def synthetic_policy_requested(env: Optional[Mapping[str, str]] = None) -> bool:
+    e = env if env is not None else os.environ
+    mode = str(e.get("BBOT_POLICY_MODE") or "").strip().lower()
+    return mode in {SYNTHETIC_POLICY_MODE, SYNTHETIC_ROLL_POLICY_ID}
+
+
+def assert_synthetic_policy_gates(
+    env: Optional[Mapping[str, str]] = None,
+) -> None:
+    """Synthetic canary is stub/no-order only, even under a live-data venue."""
+    e = env if env is not None else os.environ
+    if not synthetic_policy_requested(e):
+        return
+    broker = str(e.get("BBOT_BROKER") or "stub").strip().lower()
+    profile = normalize_gear22_profile(str(e.get("BBOT_PROFILE") or ""))
+    live_orders = str(e.get("LIVE_ORDERS") or "0").strip().lower()
+    live_send = str(e.get("BBOT_THETA_LIVE_SEND") or "0").strip().lower()
+    truthy = {"1", "true", "on", "yes"}
+    if broker != "stub":
+        raise SyntheticPolicyGateError("synthetic policy requires BBOT_BROKER=stub")
+    if profile in GEAR22_LIVE_CANARY_PROFILES:
+        raise SyntheticPolicyGateError("synthetic policy rejects live-canary profile")
+    if live_orders in truthy:
+        raise SyntheticPolicyGateError("synthetic policy requires LIVE_ORDERS=0")
+    if live_send in truthy:
+        raise SyntheticPolicyGateError("synthetic policy requires BBOT_THETA_LIVE_SEND=0")
 
 LogFn = Callable[[str], None]
 
@@ -437,10 +475,25 @@ class ThetaTradeConfig:
     notional_usdt: float = DEFAULT_NOTIONAL_USDT
     book_depth: int = DEFAULT_BOOK_DEPTH
     policy_params: Optional[PolicyParams] = None
+    policy_id: str = POLICY_ID
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.policy_id, str) or not self.policy_id:
+            raise ValueError("policy_id must be non-empty")
+        params = self.policy_params
+        if params is None:
+            return
+        synthetic = synthetic_roll_enabled(params)
+        if synthetic and self.policy_id != SYNTHETIC_ROLL_POLICY_ID:
+            raise ValueError("synthetic policy params require synthetic policy_id")
+        if not synthetic and self.policy_id == SYNTHETIC_ROLL_POLICY_ID:
+            raise ValueError("synthetic policy_id requires synthetic policy params")
 
     @classmethod
     def from_env(cls, env: Optional[Mapping[str, str]] = None) -> "ThetaTradeConfig":
         e = env if env is not None else os.environ
+        assert_synthetic_policy_gates(e)
+        synthetic = synthetic_policy_requested(e)
         
         frozen = DEFAULT_OBSERVE_PARAMS
         policy_params = PolicyParams(
@@ -452,6 +505,13 @@ class ThetaTradeConfig:
             min_theta_close=_env_float(e, "BBOT_MIN_THETA_CLOSE", frozen.min_theta_close or 0.0)
             if "BBOT_MIN_THETA_CLOSE" in e or frozen.min_theta_close is not None
             else None,
+            synthetic_roll_seed=(
+                _env_int(e, "BBOT_SYNTHETIC_ROLL_SEED", DEFAULT_SYNTHETIC_ROLL_SEED)
+                if synthetic
+                else None
+            ),
+            synthetic_open_roll=SYNTHETIC_OPEN_ROLL,
+            synthetic_close_roll=SYNTHETIC_CLOSE_ROLL,
         )
         
         return cls(
@@ -461,6 +521,7 @@ class ThetaTradeConfig:
             notional_usdt=_env_float(e, "BBOT_NOTIONAL_USDT", DEFAULT_NOTIONAL_USDT),
             book_depth=max(1, _env_int(e, "BBOT_BOOK_DEPTH", DEFAULT_BOOK_DEPTH)),
             policy_params=policy_params,
+            policy_id=SYNTHETIC_ROLL_POLICY_ID if synthetic else POLICY_ID,
         )
 
 
@@ -514,6 +575,7 @@ def decide_theta_k1(
     book_depth: int = 1,
     coin_order: Optional[Sequence[str]] = None,
     policy_params: Optional[PolicyParams] = None,
+    decision_ts_s: Optional[int] = None,
 ) -> ThetaDecision:
     """Pure K=1 entry/exit decide using gear 2.2 policy (no I/O, no sleep).
     
@@ -525,7 +587,7 @@ def decide_theta_k1(
         (s.base_coin, s.side): s for s in snapshots
     }
     
-    now_s = int(time.time())
+    now_s = int(time.time()) if decision_ts_s is None else int(decision_ts_s)
     
     if slot.position is not None and not slot.pending:
         pos = slot.position
@@ -885,7 +947,7 @@ class ThetaTradeManager:
         if live_abort:
             row["live_abort"] = live_abort
         if policy_decision is not None:
-            row["policy_id"] = POLICY_ID
+            row["policy_id"] = self.config.policy_id
             row["policy_action"] = getattr(policy_decision, "action", None)
             row["policy_reason"] = getattr(policy_decision, "reason", None)
         return row
@@ -1077,7 +1139,7 @@ class ThetaTradeManager:
                     "open_signal_ts_ms": pos.open_signal_ts_ms,
                     "open_fill_ts_ms": pos.open_fill_ts_ms,
                     "potential_pp": decision.potential_pp,
-                    "policy_id": POLICY_ID,
+                    "policy_id": self.config.policy_id,
                 }
                 row = self.build_event_row(
                     trade_id=trade_id,
@@ -1200,7 +1262,7 @@ class ThetaTradeManager:
             "trade_id": trade_id,
             "intent_id": intent_id,
             "theta_live_canary": True,
-            "policy_id": POLICY_ID,
+            "policy_id": self.config.policy_id,
         }
         self.slot.pending = True
         abort: Optional[str] = None
@@ -1287,7 +1349,7 @@ class ThetaTradeManager:
                     "open_signal_ts_ms": pos.open_signal_ts_ms if pos is not None else None,
                     "open_fill_ts_ms": pos.open_fill_ts_ms if pos is not None else None,
                     "potential_pp": decision.potential_pp,
-                    "policy_id": POLICY_ID,
+                    "policy_id": self.config.policy_id,
                     "close_intent_id": intent_id,
                 }
 
@@ -1375,6 +1437,7 @@ class ThetaTradeManager:
         now_ms: Optional[int] = None,
     ) -> list[dict[str, Any]]:
         """Sync entry (unit tests / offline). Prefer ``on_theta_snapshots_async`` live."""
+        decision_now_ms = int(now_ms if now_ms is not None else time.time() * 1000)
         decision = decide_theta_k1(
             snapshots,
             slot=self.slot,
@@ -1384,9 +1447,10 @@ class ThetaTradeManager:
             book_depth=self.config.book_depth,
             coin_order=coin_order,
             policy_params=self.config.policy_params,
+            decision_ts_s=decision_now_ms // 1000,
         )
         return self.execute_decision(
-            decision, snapshots=snapshots, quotes=quotes, now_ms=now_ms
+            decision, snapshots=snapshots, quotes=quotes, now_ms=decision_now_ms
         )
 
     async def on_theta_snapshots_async(
@@ -1400,6 +1464,7 @@ class ThetaTradeManager:
         """Async emit-loop entry: ``fill_ts = signal_ts + BBOT_FILL_DELAY_MS``."""
         import asyncio
 
+        decision_now_ms = int(now_ms if now_ms is not None else time.time() * 1000)
         decision = decide_theta_k1(
             snapshots,
             slot=self.slot,
@@ -1409,6 +1474,7 @@ class ThetaTradeManager:
             book_depth=self.config.book_depth,
             coin_order=coin_order,
             policy_params=self.config.policy_params,
+            decision_ts_s=decision_now_ms // 1000,
         )
 
         async def _async_sleep(seconds: float) -> None:
@@ -1419,7 +1485,7 @@ class ThetaTradeManager:
         try:
             # execute_decision may call sleep_fn — support awaitable.
             return await self._execute_decision_async(
-                decision, snapshots=snapshots, quotes=quotes, now_ms=now_ms
+                decision, snapshots=snapshots, quotes=quotes, now_ms=decision_now_ms
             )
         finally:
             self._sleep_fn = prev
@@ -1552,7 +1618,7 @@ class ThetaTradeManager:
                     "open_signal_ts_ms": pos.open_signal_ts_ms,
                     "open_fill_ts_ms": pos.open_fill_ts_ms,
                     "potential_pp": decision.potential_pp,
-                    "policy_id": POLICY_ID,
+                    "policy_id": self.config.policy_id,
                 }
                 row = self.build_event_row(
                     trade_id=trade_id,
@@ -1615,4 +1681,3 @@ class ThetaTradeManager:
             return [row]
         finally:
             self.slot.pending = False
-

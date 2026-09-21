@@ -48,8 +48,9 @@ from app.bot.execution.strategy_bridge import (
     DEFAULT_NOTIONAL_USDT,
     INTENT_TTL_NS,
     RISK_POLICY_REVISION,
+    BridgeConfig,
 )
-from app.bot.theta_trade_manager import POLICY_ID, SlotState
+from app.bot.theta_trade_manager import POLICY_ID, SlotState, ThetaTradeConfig
 
 SCHEMA_VERSION = "bbot.execution.shadow_runtime.v1"
 ENV_ENABLED = "BBOT_EV2_SHADOW"
@@ -287,7 +288,14 @@ class ExecutionShadowRuntime:
         self.run_id = f"shadow_{uuid.uuid4().hex}"
         self.log = log
         self.writer = _JsonlQueue(Path(data_root) / "execution-v2-shadow.jsonl")
-        self.lane = ShadowParityLane(run_id=self.run_id)
+        policy_config = ThetaTradeConfig.from_env(self.env)
+        bridge_config = BridgeConfig(
+            run_id=self.run_id,
+            policy_version=policy_config.policy_id,
+            policy_params=policy_config.policy_params,
+        )
+        self.lane = ShadowParityLane(run_id=self.run_id, config=bridge_config)
+        self.policy_id = policy_config.policy_id
         self.state: SpreadState = initial_spread_state(run_id=self.run_id)
         self.events = _EventFactory(self.run_id)
         self.hot_path: Optional[ShadowHotPath] = None
@@ -316,6 +324,7 @@ class ExecutionShadowRuntime:
             "histogram": histogram,
             "orders_sent": 0,
             "trade_socket_bound": False,
+            "policy_id": self.policy_id,
             "target_vps_gate_eligible": self.target_vps,
         }
 
@@ -354,6 +363,7 @@ class ExecutionShadowRuntime:
                 "orders_sent": 0,
                 "trade_socket_bound": False,
                 "live_orders": False,
+                "policy_id": self.policy_id,
                 "target_vps_gate_eligible": self.target_vps,
             }
         )
@@ -377,10 +387,18 @@ class ExecutionShadowRuntime:
         snapshots: Sequence[Any],
         quotes: Mapping[str, Mapping[str, Mapping[str, Any]]],
         slot: SlotState,
+        *,
+        decision_ts_s: Optional[int] = None,
     ) -> PendingShadowTick:
         if not self._started or self.hot_path is None:
             raise ShadowRuntimeGateError("EV2 shadow runtime not started")
-        tick = self.lane.tick(snapshots, quotes, self.state, slot=slot)
+        tick = self.lane.tick(
+            snapshots,
+            quotes,
+            self.state,
+            slot=slot,
+            decision_ts_s=decision_ts_s,
+        )
         self._parity_ticks += 1
         if tick.divergence.value != "match":
             self._divergences += 1
@@ -459,7 +477,7 @@ class ExecutionShadowRuntime:
             schema_version=CONTRACT_SCHEMA_VERSION,
             intent_id=f"shadowprobe{index:022d}",
             run_id=self.run_id,
-            policy_version=POLICY_ID,
+            policy_version=self.policy_id,
             action=IntentAction.OPEN,
             spread_direction=SpreadDirection.LONG,
             coin="KAITO",

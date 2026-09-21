@@ -9,6 +9,7 @@ import inspect
 import socket
 import time
 import unittest
+from dataclasses import replace
 from decimal import Decimal
 from pathlib import Path
 from unittest.mock import patch
@@ -36,6 +37,8 @@ from app.bot.execution.shadow import (
     canonical_bridge_config,
     classify_dispatch,
     config_is_canonical,
+    config_is_shadow_supported,
+    config_is_synthetic_canary,
 )
 from app.bot.execution.state_machine import initial_spread_state
 from app.bot.execution.strategy_bridge import (
@@ -55,6 +58,11 @@ from app.bot.execution.transport import (
 from app.bot.theta_screener import ThetaSnapshot
 from app.bot.theta_trade_manager import GEAR22_HTML_TOP30, POLICY_ID
 from research.gear22_backtest.params_frozen import DEFAULT_OBSERVE_PARAMS, PREVIOUS
+from research.gear22_backtest.policy import (
+    SYNTHETIC_OPEN_ROLL,
+    SYNTHETIC_ROLL_POLICY_ID,
+    synthetic_roll,
+)
 
 RUN_ID = "run_shadow_09a"
 
@@ -146,6 +154,10 @@ def _sample(value: int, *, warmup: bool = False) -> ProbeSample:
     )
 
 
+def _ts_for_roll(target: int, *, seed: int = 7) -> int:
+    return next(ts for ts in range(1_000_000, 1_100_000) if synthetic_roll(ts, seed) == target)
+
+
 def _intent(
     *,
     signal_mono_ns: int = 900,
@@ -216,6 +228,35 @@ def _dispatch(
 
 
 class CanonicalParityTests(unittest.TestCase):
+    def test_synthetic_policy_is_explicitly_supported_and_matches(self) -> None:
+        params = replace(DEFAULT_OBSERVE_PARAMS, synthetic_roll_seed=7)
+        config = BridgeConfig(
+            run_id=RUN_ID,
+            policy_version=SYNTHETIC_ROLL_POLICY_ID,
+            policy_params=params,
+        )
+        self.assertFalse(config_is_canonical(config))
+        self.assertTrue(config_is_synthetic_canary(config))
+        self.assertTrue(config_is_shadow_supported(config))
+        seq = SeqIds()
+        lane = ShadowParityLane(
+            run_id=RUN_ID,
+            config=config,
+            clocks=BridgeClocks(monotonic_ns=time.monotonic_ns, wall_ns=time.time_ns),
+            ids=BridgeIds(new_intent_id=seq.next),
+        )
+        tick = lane.tick(
+            _qualify(),
+            {"KAITO": _books()},
+            initial_spread_state(run_id=RUN_ID),
+            decision_ts_s=_ts_for_roll(SYNTHETIC_OPEN_ROLL),
+        )
+        self.assertEqual(tick.divergence, DivergenceClass.MATCH)
+        self.assertEqual(tick.bridge.decision.reason, "synthetic_open_17")
+        self.assertIsNotNone(tick.intent)
+        assert tick.intent is not None
+        self.assertEqual(tick.intent.policy_version, SYNTHETIC_ROLL_POLICY_ID)
+
     def test_config_pins_all_shadow_inputs(self) -> None:
         config = canonical_bridge_config(RUN_ID)
         self.assertTrue(config_is_canonical(config))

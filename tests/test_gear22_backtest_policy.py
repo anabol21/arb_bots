@@ -16,6 +16,11 @@ from research.gear22_backtest import (
     decide_open,
     potential_profit_pp,
 )
+from research.gear22_backtest.policy import (
+    SYNTHETIC_CLOSE_ROLL,
+    SYNTHETIC_OPEN_ROLL,
+    synthetic_roll,
+)
 
 
 def _row(**overrides: object) -> FeatureSnapshot:
@@ -57,6 +62,44 @@ def _long_state(**overrides: object) -> PolicyState:
     )
     fields.update(overrides)
     return PolicyState(**fields)  # type: ignore[arg-type]
+
+
+def _ts_for_roll(target: int, *, seed: int = 7) -> int:
+    return next(ts for ts in range(1_000_000, 1_100_000) if synthetic_roll(ts, seed) == target)
+
+
+class TestSyntheticRollPolicy(unittest.TestCase):
+    def test_one_replayable_roll_per_second(self) -> None:
+        ts = _ts_for_roll(SYNTHETIC_OPEN_ROLL)
+        self.assertEqual(synthetic_roll(ts, 7), SYNTHETIC_OPEN_ROLL)
+        self.assertEqual(synthetic_roll(ts, 7), synthetic_roll(ts, 7))
+
+    def test_roll_17_opens_and_roll_32_closes(self) -> None:
+        params = PolicyParams(synthetic_roll_seed=7)
+        open_ts = _ts_for_roll(SYNTHETIC_OPEN_ROLL)
+        opened = decide(_row(ts_s=open_ts), PolicyState(), params)
+        self.assertIn(opened.action, {"open_long", "open_short"})
+        self.assertEqual(opened.reason, "synthetic_open_17")
+
+        close_ts = _ts_for_roll(SYNTHETIC_CLOSE_ROLL)
+        closed = decide(_row(ts_s=close_ts), _long_state(), params)
+        self.assertEqual(closed.action, "close")
+        self.assertEqual(closed.reason, "synthetic_close_32")
+
+    def test_non_trigger_holds_and_coin_mismatch_stays_fail_closed(self) -> None:
+        params = PolicyParams(synthetic_roll_seed=7)
+        ts = next(
+            value
+            for value in range(1_000_000, 1_100_000)
+            if synthetic_roll(value, 7) not in {SYNTHETIC_OPEN_ROLL, SYNTHETIC_CLOSE_ROLL}
+        )
+        self.assertEqual(decide(_row(ts_s=ts), PolicyState(), params).action, "hold")
+        mismatch = decide(
+            _row(ts_s=_ts_for_roll(SYNTHETIC_CLOSE_ROLL), coin="BTC"),
+            _long_state(),
+            params,
+        )
+        self.assertEqual(mismatch.reason, "hold_coin_mismatch")
 
 
 class TestGear22DummyPolicyOpen(unittest.TestCase):

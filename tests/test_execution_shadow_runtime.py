@@ -21,6 +21,11 @@ from app.bot.private.order_sign import LiveCredentials
 from app.bot.private.ws_private import RestReseedResult
 from app.bot.private.ws_readonly import run_ws_readonly_preflight
 from app.bot.private.ws_socket import FakePrivateWsSocket
+from research.gear22_backtest.policy import (
+    SYNTHETIC_OPEN_ROLL,
+    SYNTHETIC_ROLL_POLICY_ID,
+    synthetic_roll,
+)
 
 
 def _snap(coin: str, side: str, theta: float, *, floor: float = 0.2, p50: float | None = None) -> ThetaSnapshot:
@@ -122,6 +127,48 @@ class ShadowRuntimeGateTests(unittest.TestCase):
 
 
 class ShadowRuntimeLifecycleTests(unittest.IsolatedAsyncioTestCase):
+    async def test_synthetic_policy_runtime_is_no_order_and_replayable(self) -> None:
+        seed = 7
+        decision_ts_s = next(
+            ts
+            for ts in range(1_000_000, 1_100_000)
+            if synthetic_roll(ts, seed) == SYNTHETIC_OPEN_ROLL
+        )
+        with tempfile.TemporaryDirectory() as td:
+            runtime = ExecutionShadowRuntime(
+                data_root=Path(td),
+                log=lambda _message: None,
+                env={
+                    "BBOT_POLICY_MODE": "synthetic_roll_v1",
+                    "BBOT_SYNTHETIC_ROLL_SEED": str(seed),
+                    "BBOT_PROFILE": "gear22_would_send",
+                    "BBOT_BROKER": "stub",
+                    "LIVE_ORDERS": "0",
+                    "BBOT_THETA_LIVE_SEND": "0",
+                    "BBOT_EV2_WARMUP_N": "0",
+                    "BBOT_EV2_COUNTED_N": "1",
+                    "BBOT_EV2_PROBE_DELAY_SEC": "3600",
+                },
+            )
+            self.assertEqual(runtime.policy_id, SYNTHETIC_ROLL_POLICY_ID)
+            await runtime.start()
+            try:
+                tick = await runtime.before_trade(
+                    [
+                        _snap("KAITO", "long", 0.01),
+                        _snap("KAITO", "short", 0.01),
+                    ],
+                    _quotes(),
+                    SlotState(),
+                    decision_ts_s=decision_ts_s,
+                )
+                self.assertIsNotNone(tick.tick.intent)
+                self.assertEqual(tick.tick.bridge.decision.reason, "synthetic_open_17")
+                self.assertEqual(runtime.summary["orders_sent"], 0)
+                self.assertFalse(runtime.summary["trade_socket_bound"])
+            finally:
+                await runtime.stop()
+
     async def test_open_close_mirror_and_no_order_probe(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             runtime = ExecutionShadowRuntime(

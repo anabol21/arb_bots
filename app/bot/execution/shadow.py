@@ -63,6 +63,12 @@ from app.bot.theta_trade_manager import (
     decide_theta_k1,
 )
 from research.gear22_backtest.params_frozen import DEFAULT_OBSERVE_PARAMS
+from research.gear22_backtest.policy import (
+    SYNTHETIC_CLOSE_ROLL,
+    SYNTHETIC_OPEN_ROLL,
+    SYNTHETIC_ROLL_POLICY_ID,
+    synthetic_roll_enabled,
+)
 
 SCHEMA_VERSION = "bbot.execution.shadow.v1"
 HEALTH_SCHEMA_VERSION = "bbot.execution.shadow_health.v1"
@@ -208,12 +214,45 @@ def config_is_canonical(config: BridgeConfig) -> bool:
     )
 
 
-def _intent_is_canonical(intent: TradeIntent) -> bool:
+def config_is_synthetic_canary(config: BridgeConfig) -> bool:
+    """Exact no-order synthetic policy shape; seed may vary per experiment."""
+    if not isinstance(config, BridgeConfig):
+        return False
+    params = config.policy_params
+    frozen = DEFAULT_OBSERVE_PARAMS
+    return (
+        tuple(config.coin_order) == GEAR22_HTML_TOP30
+        and config.policy_version == SYNTHETIC_ROLL_POLICY_ID
+        and synthetic_roll_enabled(params)
+        and isinstance(params.synthetic_roll_seed, int)
+        and not isinstance(params.synthetic_roll_seed, bool)
+        and params.synthetic_open_roll == SYNTHETIC_OPEN_ROLL
+        and params.synthetic_close_roll == SYNTHETIC_CLOSE_ROLL
+        and params.theta_open == frozen.theta_open
+        and params.p50_open == frozen.p50_open
+        and params.min_profit_pp == frozen.min_profit_pp
+        and params.fee_round_trip_pp == frozen.fee_round_trip_pp
+        and params.min_spread_open == frozen.min_spread_open
+        and params.min_theta_close == frozen.min_theta_close
+        and config.notional_usdt == DEFAULT_NOTIONAL_USDT
+        and config.canary_stage == CANARY_STAGE
+        and config.risk_policy_revision == RISK_POLICY_REVISION
+        and config.intent_ttl_ns == INTENT_TTL_NS
+        and config.book_depth == DEFAULT_BOOK_DEPTH
+        and config.theta_thr == DEFAULT_THETA_THR
+    )
+
+
+def config_is_shadow_supported(config: BridgeConfig) -> bool:
+    return config_is_canonical(config) or config_is_synthetic_canary(config)
+
+
+def _intent_is_shadow_supported(intent: TradeIntent) -> bool:
     if not isinstance(intent, TradeIntent):
         return False
     ttl = intent.expiry_mono_ns - intent.signal_mono_ns
     return (
-        intent.policy_version == POLICY_ID
+        intent.policy_version in {POLICY_ID, SYNTHETIC_ROLL_POLICY_ID}
         and intent.notional_usdt == DEFAULT_NOTIONAL_USDT
         and intent.canary_stage == CANARY_STAGE
         and intent.risk_policy_revision == RISK_POLICY_REVISION
@@ -357,25 +396,33 @@ class NullTradeSink:
 
 
 class WouldSentDecisionReplica:
-    """Frozen Gear 2.2 would-send replica. Canonical params only. No manager."""
+    """Would-send replica for the selected frozen or synthetic policy."""
+
+    def __init__(self, config: BridgeConfig) -> None:
+        if not config_is_shadow_supported(config):
+            raise ShadowError("noncanonical_config")
+        self._config = config
 
     def decide(
         self,
         snapshots: Sequence[ThetaSnapshot],
         quotes: Mapping[str, Mapping[str, Mapping[str, Any]]],
         slot: SlotState,
+        *,
+        decision_ts_s: Optional[int] = None,
     ) -> ThetaDecision:
         if not isinstance(slot, SlotState):
             raise ShadowError("invalid_slot")
         return decide_theta_k1(
             snapshots,
             slot=slot,
-            thr=DEFAULT_THETA_THR,
+            thr=self._config.theta_thr,
             quotes=quotes,
-            notional_usdt=float(DEFAULT_NOTIONAL_USDT),
-            book_depth=DEFAULT_BOOK_DEPTH,
-            coin_order=GEAR22_HTML_TOP30,
-            policy_params=DEFAULT_OBSERVE_PARAMS,
+            notional_usdt=float(self._config.notional_usdt),
+            book_depth=self._config.book_depth,
+            coin_order=self._config.coin_order,
+            policy_params=self._config.policy_params,
+            decision_ts_s=decision_ts_s,
         )
 
 
@@ -413,23 +460,29 @@ class ShadowParityLane:
         *,
         run_id: str,
         bridge: Optional[Gear22StrategyBridge] = None,
+        config: Optional[BridgeConfig] = None,
         clocks: Optional[BridgeClocks] = None,
         ids: Optional[BridgeIds] = None,
     ) -> None:
         if bridge is not None:
             if not isinstance(bridge, Gear22StrategyBridge):
                 raise ShadowError("invalid_intent")
-            if not config_is_canonical(bridge.config):
+            if config is not None:
+                raise ShadowError("noncanonical_config")
+            if not config_is_shadow_supported(bridge.config):
                 raise ShadowError("noncanonical_config")
             self._bridge = bridge
         else:
+            selected = config or canonical_bridge_config(run_id)
+            if not config_is_shadow_supported(selected):
+                raise ShadowError("noncanonical_config")
             self._bridge = Gear22StrategyBridge(
                 run_id=run_id,
-                config=canonical_bridge_config(run_id),
+                config=selected,
                 clocks=clocks,
                 ids=ids,
             )
-        self._replica = WouldSentDecisionReplica()
+        self._replica = WouldSentDecisionReplica(self._bridge.config)
 
     @property
     def bridge(self) -> Gear22StrategyBridge:
@@ -444,14 +497,18 @@ class ShadowParityLane:
         *,
         fill_model_diverged: bool = False,
         on_unsent_intent: Optional[Callable[[TradeIntent], None]] = None,
+        decision_ts_s: Optional[int] = None,
     ) -> ShadowParityTick:
         replica_slot = SlotState() if slot is None else slot
-        replica = self._replica.decide(snapshots, quotes, replica_slot)
+        replica = self._replica.decide(
+            snapshots, quotes, replica_slot, decision_ts_s=decision_ts_s
+        )
         bridge_tick = self._bridge.observe(
             snapshots,
             quotes,
             spread_state,
             fill_model_diverged=fill_model_diverged,
+            decision_ts_s=decision_ts_s,
         )
         same = _decision_identity(replica) == _decision_identity(bridge_tick.decision)
         if same:
@@ -463,8 +520,8 @@ class ShadowParityLane:
 
         intent = bridge_tick.intent
         inflight_cleared = False
-        canonical = config_is_canonical(self._bridge.config)
-        if intent is not None and not canonical:
+        supported = config_is_shadow_supported(self._bridge.config)
+        if intent is not None and not supported:
             self._bridge.clear_inflight_on_reject(intent.intent_id)
             inflight_cleared = self._bridge.inflight is None
             intent = None
@@ -864,7 +921,7 @@ class ShadowHotPath:
         return self._lifecycle_drops
 
     async def probe(self, intent: TradeIntent) -> ProbeSample:
-        if not _intent_is_canonical(intent):
+        if not _intent_is_shadow_supported(intent):
             raise ShadowError("noncanonical_intent")
         self._attempt += 1
         warmup = self._attempt <= self._warmup_n
@@ -1058,4 +1115,6 @@ __all__ = [
     "canonical_instrument_cache",
     "classify_dispatch",
     "config_is_canonical",
+    "config_is_shadow_supported",
+    "config_is_synthetic_canary",
 ]

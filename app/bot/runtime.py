@@ -919,17 +919,20 @@ class BotRuntime:
         if self.theta_trade is None or not theta_snaps:
             return
         pending_shadow: Any = None
+        decision_now_ms = int(time.time() * 1000)
         try:
             if self.execution_shadow is not None:
                 pending_shadow = await self.execution_shadow.before_trade(
                     theta_snaps,
                     self.quotes,
                     self.theta_trade.slot,
+                    decision_ts_s=decision_now_ms // 1000,
                 )
             rows = await self.theta_trade.on_theta_snapshots_async(
                 theta_snaps,
                 quotes=self.quotes,
                 coin_order=self.coins,
+                now_ms=decision_now_ms,
             )
             if self.execution_shadow is not None and pending_shadow is not None:
                 await self.execution_shadow.after_trade(

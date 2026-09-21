@@ -47,7 +47,13 @@ from app.bot.theta_trade_manager import (
     spread_for_side,
 )
 from research.gear22_backtest.params_frozen import DEFAULT_OBSERVE_PARAMS
-from research.gear22_backtest.policy import PolicyParams
+from research.gear22_backtest.policy import (
+    SYNTHETIC_CLOSE_ROLL,
+    SYNTHETIC_OPEN_ROLL,
+    SYNTHETIC_ROLL_POLICY_ID,
+    PolicyParams,
+    synthetic_roll_enabled,
+)
 
 SCHEMA_VERSION = "bbot.execution.strategy_bridge.v1"
 CONTEXT_SCHEMA_VERSION = "bbot.execution.strategy_context.v1"
@@ -969,6 +975,9 @@ def redacted_snapshot_hash(
             "fee_round_trip_pp": _canon_num(params.fee_round_trip_pp),
             "min_spread_open": _canon_num(params.min_spread_open),
             "min_theta_close": _canon_num(params.min_theta_close),
+            "synthetic_roll_seed": params.synthetic_roll_seed,
+            "synthetic_open_roll": params.synthetic_open_roll,
+            "synthetic_close_roll": params.synthetic_close_roll,
         },
         "coins": coins,
     }
@@ -1026,7 +1035,26 @@ def _open_signal_ts_ms(
 
 def _config_divergence_flags(config: BridgeConfig) -> tuple[bool, bool, bool]:
     coin_order = tuple(config.coin_order) != GEAR22_HTML_TOP30
-    params = config.policy_params != DEFAULT_OBSERVE_PARAMS
+    if config.policy_version == POLICY_ID:
+        params = config.policy_params != DEFAULT_OBSERVE_PARAMS
+    elif config.policy_version == SYNTHETIC_ROLL_POLICY_ID:
+        candidate = config.policy_params
+        frozen = DEFAULT_OBSERVE_PARAMS
+        params = not (
+            synthetic_roll_enabled(candidate)
+            and isinstance(candidate.synthetic_roll_seed, int)
+            and not isinstance(candidate.synthetic_roll_seed, bool)
+            and candidate.synthetic_open_roll == SYNTHETIC_OPEN_ROLL
+            and candidate.synthetic_close_roll == SYNTHETIC_CLOSE_ROLL
+            and candidate.theta_open == frozen.theta_open
+            and candidate.p50_open == frozen.p50_open
+            and candidate.min_profit_pp == frozen.min_profit_pp
+            and candidate.fee_round_trip_pp == frozen.fee_round_trip_pp
+            and candidate.min_spread_open == frozen.min_spread_open
+            and candidate.min_theta_close == frozen.min_theta_close
+        )
+    else:
+        params = True
     notional = config.notional_usdt != DEFAULT_NOTIONAL_USDT
     return coin_order, params, notional
 
@@ -1341,6 +1369,7 @@ class Gear22StrategyBridge:
         spread_state: SpreadState,
         *,
         fill_model_diverged: bool = False,
+        decision_ts_s: Optional[int] = None,
     ) -> BridgeTick:
         if not isinstance(spread_state, SpreadState):
             raise StrategyBridgeError("invalid_spread_state")
@@ -1369,6 +1398,7 @@ class Gear22StrategyBridge:
             book_depth=self._config.book_depth,
             coin_order=self._config.coin_order,
             policy_params=self._config.policy_params,
+            decision_ts_s=decision_ts_s,
         )
         inflight_blocked = bool(
             had_inflight

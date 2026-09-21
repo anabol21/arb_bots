@@ -19,6 +19,8 @@ from app.bot.paths import resolve_data_root
 from app.bot.theta_screener import ThetaSnapshot
 from app.bot.theta_trade_manager import (
     SCHEMA_VERSION,
+    SYNTHETIC_POLICY_MODE,
+    SyntheticPolicyGateError,
     SlotState,
     ThetaTradeConfig,
     ThetaTradeJournalWriter,
@@ -26,6 +28,13 @@ from app.bot.theta_trade_manager import (
     decide_theta_k1,
     slip_spread,
     theta_trade_enabled,
+)
+from research.gear22_backtest.policy import (
+    SYNTHETIC_CLOSE_ROLL,
+    SYNTHETIC_OPEN_ROLL,
+    SYNTHETIC_ROLL_POLICY_ID,
+    PolicyParams,
+    synthetic_roll,
 )
 
 
@@ -84,6 +93,10 @@ def _books(
     }
 
 
+def _ts_for_roll(target: int, *, seed: int = 7) -> int:
+    return next(ts for ts in range(1_000_000, 1_100_000) if synthetic_roll(ts, seed) == target)
+
+
 class ThetaTradeFlagTests(unittest.TestCase):
     def test_default_on_for_gear22(self) -> None:
         self.assertTrue(theta_trade_enabled("gear22_would_send", {}))
@@ -100,8 +113,83 @@ class ThetaTradeFlagTests(unittest.TestCase):
             theta_trade_enabled("gear2_would_send", {"BBOT_THETA_TRADE": "1"})
         )
 
+    def test_synthetic_policy_is_explicit_stub_only(self) -> None:
+        safe = {
+            "BBOT_POLICY_MODE": SYNTHETIC_POLICY_MODE,
+            "BBOT_PROFILE": "gear22_would_send",
+            "BBOT_BROKER": "stub",
+            "LIVE_ORDERS": "0",
+            "BBOT_THETA_LIVE_SEND": "0",
+            "BBOT_SYNTHETIC_ROLL_SEED": "7",
+        }
+        config = ThetaTradeConfig.from_env(safe)
+        self.assertEqual(config.policy_id, SYNTHETIC_ROLL_POLICY_ID)
+        self.assertEqual(config.policy_params.synthetic_roll_seed, 7)
+
+        for override in (
+            {"BBOT_BROKER": "private_live"},
+            {"LIVE_ORDERS": "1"},
+            {"BBOT_THETA_LIVE_SEND": "1"},
+            {"BBOT_PROFILE": "gear22_live_canary"},
+        ):
+            with self.assertRaises(SyntheticPolicyGateError):
+                ThetaTradeConfig.from_env({**safe, **override})
+
 
 class DecideK1Tests(unittest.TestCase):
+    def test_synthetic_roll_drives_k1_open_and_close(self) -> None:
+        seed = 7
+        params = PolicyParams(synthetic_roll_seed=seed)
+        snaps = [
+            _snap("BTC", "long", 0.01),
+            _snap("BTC", "short", 0.01),
+            _snap("ETH", "long", 0.01),
+            _snap("ETH", "short", 0.01),
+        ]
+        quotes = {"BTC": _books(), "ETH": _books()}
+        opened = decide_theta_k1(
+            snaps,
+            slot=SlotState(),
+            thr=0.2,
+            quotes=quotes,
+            notional_usdt=20.0,
+            coin_order=("ETH", "BTC"),
+            policy_params=params,
+            decision_ts_s=_ts_for_roll(SYNTHETIC_OPEN_ROLL, seed=seed),
+        )
+        self.assertEqual(opened.action, "open")
+        self.assertEqual(opened.base_coin, "ETH")
+        self.assertEqual(opened.reason, "synthetic_open_17")
+
+        from app.bot.theta_trade_manager import OpenPosition
+
+        slot = SlotState(
+            position=OpenPosition(
+                trade_id="t1",
+                base_coin="ETH",
+                side=opened.side,
+                open_signal_ts_ms=1,
+                open_fill_ts_ms=71,
+                open_fill_spread=0.1,
+                open_notional=20.0,
+                open_theta_1m=0.01,
+                fill_spread_pp=0.1,
+            )
+        )
+        closed = decide_theta_k1(
+            snaps,
+            slot=slot,
+            thr=0.2,
+            quotes=quotes,
+            notional_usdt=20.0,
+            coin_order=("ETH", "BTC"),
+            policy_params=params,
+            decision_ts_s=_ts_for_roll(SYNTHETIC_CLOSE_ROLL, seed=seed),
+        )
+        self.assertEqual(closed.action, "close")
+        self.assertEqual(closed.base_coin, "ETH")
+        self.assertEqual(closed.reason, "synthetic_close_32")
+
     def test_entry_when_policy_qualifies(self) -> None:
         from research.gear22_backtest.policy import PolicyParams
         

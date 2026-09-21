@@ -188,6 +188,16 @@ Gate:
 
 The shadow run validates parity and latency mechanics, not profitability.
 
+#### EV2-09C — synthetic-signal manager exercise
+
+An explicit no-order policy mode may replace rare alpha eligibility with one
+replayable 1..100 roll per second across the whole 30-coin universe: `17`
+opens while flat and `32` closes the held position. This mode must retain all
+book/size/K=1/FSM gates, carry a distinct policy id, fail closed under any
+live-order configuration and terminate only in the shadow `NullTradeSink`.
+It is test coverage for manager lifecycle and reconnect/readiness experiments,
+not strategy or profitability evidence.
+
 ### EV2-10 — immutable canary release and control plane
 
 Prepare a reviewable release without starting it.
