@@ -191,6 +191,7 @@ class ParsedStreamEvent:
     dedupe_key: Optional[str] = None
     req_id: Optional[str] = None
     ack_ok: Optional[bool] = None
+    subscription_required: bool = True
 
 
 @dataclass
@@ -274,6 +275,7 @@ class PrivateStreamRuntime:
     sequence_state: SequenceHealth = SequenceHealth.RESEED_REQUIRED
     subscription_readiness: SubscriptionReadiness = SubscriptionReadiness.NOT_READY
     authenticated: bool = False
+    trade_authenticated: bool = False
     last_recv_mono_ns: Optional[int] = None
     last_trade_recv_mono_ns: Optional[int] = None
     _last_seq: Optional[int] = None
@@ -286,6 +288,30 @@ class PrivateStreamRuntime:
     # Keepalive may drain trade noise (pong); non-noise frames are stashed so
     # place/ack recv cannot lose them to the supervisor thread.
     _trade_inbound_stash: list[str] = field(default_factory=list)
+    _readiness_listeners: list[Callable[[], None]] = field(
+        default_factory=list, repr=False
+    )
+
+    def add_readiness_listener(self, listener: Callable[[], None]) -> None:
+        if not callable(listener):
+            raise TypeError("readiness listener must be callable")
+        if listener not in self._readiness_listeners:
+            self._readiness_listeners.append(listener)
+
+    def remove_readiness_listener(self, listener: Callable[[], None]) -> None:
+        if listener in self._readiness_listeners:
+            self._readiness_listeners.remove(listener)
+
+    def notify_readiness(self) -> None:
+        for listener in tuple(self._readiness_listeners):
+            try:
+                listener()
+            except Exception as exc:  # noqa: BLE001
+                _safe_log(
+                    "readiness_listener_failed",
+                    exchange=self.exchange,
+                    err=type(exc).__name__,
+                )
 
     @property
     def sends_blocked(self) -> bool:
@@ -335,6 +361,7 @@ class PrivateStreamRuntime:
         sock.connect()
         self.private_socket = sock
         self.last_recv_mono_ns = time.monotonic_ns()
+        self.notify_readiness()
         _safe_log("connect", exchange=self.exchange, channel="private", gen=self.reconnect_generation)
 
     def connect_trade(self, url: str, *, env: Optional[Mapping[str, str]] = None) -> None:
@@ -345,6 +372,8 @@ class PrivateStreamRuntime:
         self.trade_socket = sock
         self.last_trade_recv_mono_ns = time.monotonic_ns()
         self._trade_inbound_stash.clear()
+        self.trade_authenticated = False
+        self.notify_readiness()
         _safe_log("connect", exchange=self.exchange, channel="trade", gen=self.reconnect_generation)
 
     def bind_sockets(
@@ -364,6 +393,8 @@ class PrivateStreamRuntime:
             self.trade_socket = trade
             self.last_trade_recv_mono_ns = time.monotonic_ns()
             self._trade_inbound_stash.clear()
+            self.trade_authenticated = False
+        self.notify_readiness()
 
     @classmethod
     def create_gated(
@@ -406,6 +437,7 @@ class PrivateStreamRuntime:
     def mark_reconnect(self) -> None:
         self.reconnect_generation += 1
         self.authenticated = False
+        self.trade_authenticated = False
         self.subscription_readiness = SubscriptionReadiness.NOT_READY
         self.sequence_state = SequenceHealth.RESEED_REQUIRED
         self._sends_blocked = True
@@ -418,6 +450,7 @@ class PrivateStreamRuntime:
             recon_state="inconclusive",
         )
         _safe_log("reconnect", exchange=self.exchange, gen=self.reconnect_generation)
+        self.notify_readiness()
 
     def build_auth_message(self) -> WsOutboundMessage:
         if self.exchange == "bybit":
@@ -584,11 +617,15 @@ class PrivateStreamRuntime:
         if parsed.kind == "auth_ack":
             self.authenticated = True
             self.journal_auth(success=True)
+            self.notify_readiness()
         elif parsed.kind == "auth_reject":
             self.authenticated = False
             self.journal_auth(success=False, error_code="auth_failed")
+            self.notify_readiness()
         elif parsed.kind == "sub_ack":
-            self._on_subscribe_ack(ok=bool(parsed.ack_ok))
+            self._on_subscribe_ack(
+                ok=bool(parsed.ack_ok), required=parsed.subscription_required
+            )
         elif parsed.kind == "gap":
             self._on_sequence_gap()
         elif parsed.kind == "duplicate":
@@ -600,7 +637,7 @@ class PrivateStreamRuntime:
             _safe_log("heartbeat_ack", exchange=self.exchange, gen=self.reconnect_generation)
         return parsed
 
-    def _on_subscribe_ack(self, *, ok: bool) -> None:
+    def _on_subscribe_ack(self, *, ok: bool, required: bool = True) -> None:
         recv = time.monotonic_ns()
         # Late/duplicate successful ACK after matched REST reseed must not
         # re-arm the send gate or downgrade healthy/ready stream state.
@@ -615,7 +652,7 @@ class PrivateStreamRuntime:
             outcome = "success"
             readiness = "ready"
             ack_state = "received"
-        elif self.subscription_readiness == SubscriptionReadiness.READY:
+        elif not required and self.subscription_readiness == SubscriptionReadiness.READY:
             # Extra channel/inst nack (e.g. leftover OKX fills / 64003)
             # must not tear down a ready orders subscription.
             outcome = "failure"
@@ -644,14 +681,21 @@ class PrivateStreamRuntime:
         self.journal.append(body)
         if already_reseed_cleared:
             # Preserve healthy/ready/unblocked after matched reseed.
+            self.notify_readiness()
             return
-        if not ok and self.subscription_readiness == SubscriptionReadiness.READY:
+        if (
+            not ok
+            and not required
+            and self.subscription_readiness == SubscriptionReadiness.READY
+        ):
             # Supplemental channel/inst nack after orders ACK: keep the pool feed.
+            self.notify_readiness()
             return
         # First subscribe / reconnect / failed ACK: fail-closed until REST reseed.
         self._sends_blocked = True
         if not ok:
             self.sequence_state = SequenceHealth.RESEED_REQUIRED
+        self.notify_readiness()
 
     def _on_sequence_gap(self) -> None:
         self.sequence_state = SequenceHealth.GAP
@@ -664,6 +708,7 @@ class PrivateStreamRuntime:
             recon_state="inconclusive",
         )
         _safe_log("seq_gap", exchange=self.exchange, gen=self.reconnect_generation)
+        self.notify_readiness()
 
     def _journal_stream_recon(
         self,
@@ -697,23 +742,27 @@ class PrivateStreamRuntime:
             self.sequence_state = SequenceHealth.HEALTHY
             self.subscription_readiness = SubscriptionReadiness.READY
             self._sends_blocked = False
-            return self._journal_stream_recon(
+            event = self._journal_stream_recon(
                 sequence_state=SequenceHealth.HEALTHY,
                 observation_source="rest_reconcile",
                 outcome="success",
                 recon_state="matched",
                 transport="rest",
             )
+            self.notify_readiness()
+            return event
         self.sequence_state = SequenceHealth.RESEED_REQUIRED
         self.subscription_readiness = SubscriptionReadiness.NOT_READY
         self._sends_blocked = True
-        return self._journal_stream_recon(
+        event = self._journal_stream_recon(
             sequence_state=SequenceHealth.RESEED_REQUIRED,
             observation_source="rest_reconcile",
             outcome="observed",
             recon_state="inconclusive",
             transport="rest",
         )
+        self.notify_readiness()
+        return event
 
     def run_rest_reseed(self) -> dict[str, Any]:
         if self.rest_reseed is None:
@@ -861,7 +910,7 @@ class PrivateStreamRuntime:
         return build_okx_trade_cancel(plan, req_id=req_id, inst_id_code=code)
 
     def send_trade_place(self, plan: OrderPlan, *, req_id: str) -> WsOutboundMessage:
-        if self.sends_blocked:
+        if self.sends_blocked or not self.trade_authenticated:
             raise RuntimeError("WS trade place blocked until REST reseed confirmation")
         assert self.trade_socket is not None
         msg = self.build_trade_place(plan, req_id=req_id)
@@ -872,7 +921,7 @@ class PrivateStreamRuntime:
         return msg
 
     def send_trade_cancel(self, plan: OrderPlan, *, req_id: str) -> WsOutboundMessage:
-        if self.sends_blocked:
+        if self.sends_blocked or not self.trade_authenticated:
             raise RuntimeError("WS trade cancel blocked until REST reseed confirmation")
         assert self.trade_socket is not None
         msg = self.build_trade_cancel(plan, req_id=req_id)
@@ -884,6 +933,8 @@ class PrivateStreamRuntime:
     def send_trade_auth(self) -> WsOutboundMessage:
         """Authenticate trade socket (Bybit trade auth / OKX private login on trade conn)."""
         assert self.trade_socket is not None
+        self.trade_authenticated = False
+        self.notify_readiness()
         if self.exchange == "bybit":
             msg = build_bybit_private_auth(self.credentials)
         else:
@@ -1017,12 +1068,20 @@ class PrivateStreamRuntime:
             if self.exchange == "bybit":
                 if str(obj.get("op") or "") != "auth":
                     continue
-                return obj.get("success") is True or str(obj.get("retCode", "")) == "0"
+                ok = obj.get("success") is True or str(obj.get("retCode", "")) == "0"
+                self.trade_authenticated = bool(ok)
+                self.notify_readiness()
+                return bool(ok)
             event = str(obj.get("event") or "")
             if event and event != "login":
                 continue
             if event == "login" or "code" in obj:
-                return str(obj.get("code", "")) == "0"
+                ok = str(obj.get("code", "")) == "0"
+                self.trade_authenticated = bool(ok)
+                self.notify_readiness()
+                return bool(ok)
+        self.trade_authenticated = False
+        self.notify_readiness()
         raise TimeoutError("trade auth timeout")
 
     def observe_trade_ack(self, obs: TradeAckObservation) -> dict[str, Any]:
@@ -1164,7 +1223,9 @@ class PrivateStreamRuntime:
             # Never treat that as auth_reject — that un-auths the warm session
             # and starts the ~10s private login reconnect storm.
             if is_okx_fee_tier_channel_error(data):
-                return ParsedStreamEvent(kind="sub_ack", ack_ok=False)
+                return ParsedStreamEvent(
+                    kind="sub_ack", ack_ok=False, subscription_required=False
+                )
             # Distinguish auth vs sub via arg channel when present.
             arg = data.get("arg") if isinstance(data.get("arg"), Mapping) else {}
             if not arg:

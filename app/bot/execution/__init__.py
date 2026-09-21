@@ -14,6 +14,8 @@ EV2-08 adds the Gear 2.2 strategy bridge; importing it does not
 submit intents, write journals, initialize Sentry, or place orders.
 EV2-09A adds the local shadow parity/latency harness; importing it
 does not connect venues, submit intents, start tasks, or place orders.
+EV2-09C/09D add fail-closed readiness leases and warm-session publication;
+importing them performs no I/O.
 """
 
 from app.bot.execution.adapters import (
@@ -83,11 +85,16 @@ from app.bot.execution.engine import (
     DualReadinessFence,
     ExecutionEngine,
     IngestResult,
+    RecoveryReadinessLease,
     ReadinessSnapshot,
     ReadinessLease,
     RiskPolicy,
     SubmitResult,
     SubmitStatus,
+)
+from app.bot.execution.readiness import (
+    WarmSessionReadinessBridge,
+    snapshot_from_warm_session,
 )
 from app.bot.execution.ownership import (
     SCHEMA_VERSION as OWNERSHIP_SCHEMA_VERSION,
@@ -221,6 +228,7 @@ __all__ = [
     "RestartLiveSnapshot",
     "RestartResult",
     "ProjectionAck",
+    "RecoveryReadinessLease",
     "ReadinessSnapshot",
     "ReadinessLease",
     "RiskPolicy",
@@ -250,6 +258,7 @@ __all__ = [
     "WalHealth",
     "WalIntegrityError",
     "WalRecord",
+    "WarmSessionReadinessBridge",
     "WriteOutcome",
     "admission_capacity_ok",
     "apply_event",
@@ -272,6 +281,7 @@ __all__ = [
     "restore_context",
     "prepare_venue_action",
     "restart_correlation_id",
+    "snapshot_from_warm_session",
     "unsigned_cancel_finalizer",
     "unsigned_frame_finalizer",
 ]

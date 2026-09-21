@@ -254,6 +254,8 @@ class PrivateWarmSession:
         for rt in (self.bybit_runtime, self.okx_runtime):
             if not rt.authenticated:
                 return False
+            if not rt.trade_authenticated:
+                return False
             if rt.sequence_state != SequenceHealth.HEALTHY:
                 return False
             if rt.subscription_readiness != SubscriptionReadiness.READY:
@@ -452,6 +454,7 @@ class PrivateWarmSession:
                             pass
                 rt.private_socket = None
                 rt.trade_socket = None
+                rt.notify_readiness()
         if uses_loop and owner_loop is not None:
             try:
                 owner_loop.stop()
@@ -737,6 +740,8 @@ class PrivateWarmSession:
             slot.stop_event = self._external_stop
 
     def _on_loop_socket_up(self, exchange: str, sock: Any) -> None:
+        rt = self.bybit_runtime if exchange == "bybit" else self.okx_runtime
+        rt.notify_readiness()
         del sock
         if self._stopped or not self._started:
             return
@@ -748,6 +753,8 @@ class PrivateWarmSession:
         ).start()
 
     def _on_loop_socket_down(self, exchange: str, sock: Any) -> None:
+        rt = self.bybit_runtime if exchange == "bybit" else self.okx_runtime
+        rt.notify_readiness()
         del sock
         if self._stopped:
             return

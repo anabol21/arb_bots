@@ -644,6 +644,64 @@ class RecoveryFaultMatrixTests(RecoveryHarness):
         self.assertEqual(body["op"], "order.cancel")
         self.assertNotIn("orderId", json.dumps(body))
 
+    async def test_recovery_flatten_readiness_change_before_write_sends_nothing(self) -> None:
+        engine = self._engine()
+        await self._recovering_okx_filled(engine)
+        plan = await engine.plan_recovery()
+        self.assertEqual(plan.kind, RecoveryActionKind.FLATTEN_FILLED)
+        before = self.okx.asend_calls
+        original = engine._transport._finalize_frame
+
+        def _drop_private_during_finalize(*args: Any, **kwargs: Any) -> str:
+            engine.publish_readiness(
+                _ready(bybit_private_ready=False, bybit_generation=2)
+            )
+            return original(*args, **kwargs)
+
+        engine._transport._finalize_frame = _drop_private_during_finalize
+        result = await engine.apply_recovery_step(plan)
+        self.assertEqual(self.okx.asend_calls, before)
+        self.assertEqual(result.status, RecoveryStatus.BLOCKED)
+        self.assertIsNotNone(result.dispatch)
+        assert result.dispatch is not None
+        self.assertEqual(result.dispatch.evidence.outcome, WriteOutcome.NOT_ATTEMPTED)
+        self.assertEqual(result.dispatch.evidence.reason_code, "readiness_changed")
+
+    async def test_recovery_cancel_readiness_change_before_write_sends_nothing(self) -> None:
+        engine = self._engine()
+        await self._recovering_okx_filled(engine)
+        await self._ingest(
+            engine,
+            [
+                self._next_event(
+                    engine,
+                    ExecutionEventType.OPEN_ORDERS_OBSERVED,
+                    venue=Venue.BYBIT,
+                    leg_id="leg_bybit",
+                    payload={"open_order_count": 1},
+                )
+            ],
+        )
+        plan = await engine.plan_recovery()
+        self.assertEqual(plan.kind, RecoveryActionKind.CANCEL_PEER)
+        before = self.bybit.asend_calls
+        original = engine._transport._finalize_cancel
+
+        def _drop_trade_during_finalize(*args: Any, **kwargs: Any) -> str:
+            engine.publish_readiness(
+                _ready(bybit_trade_ready=False, bybit_generation=2)
+            )
+            return original(*args, **kwargs)
+
+        engine._transport._finalize_cancel = _drop_trade_during_finalize
+        result = await engine.apply_recovery_step(plan)
+        self.assertEqual(self.bybit.asend_calls, before)
+        self.assertEqual(result.status, RecoveryStatus.BLOCKED)
+        self.assertIsNotNone(result.dispatch)
+        assert result.dispatch is not None
+        self.assertEqual(result.dispatch.evidence.outcome, WriteOutcome.NOT_ATTEMPTED)
+        self.assertEqual(result.dispatch.evidence.reason_code, "readiness_changed")
+
     async def test_05_late_peer_fill_aborts_flatten(self) -> None:
         engine = self._engine()
         await self._open_both_sent(engine)

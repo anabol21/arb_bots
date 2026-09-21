@@ -522,6 +522,34 @@ class AdmissionApiTests(unittest.TestCase):
         self.assertFalse(fence.validate(open_lease))
         self.assertTrue(fence.validate(close_lease))
 
+    def test_recovery_lease_requires_target_trade_and_both_private_streams(self) -> None:
+        fence = DualReadinessFence(_ready(bybit_trade_ready=False))
+        lease, reason = fence.acquire_recovery(Venue.OKX)
+        assert lease is not None
+        self.assertIsNone(reason)
+        self.assertTrue(fence.validate_recovery(lease))
+
+        self.assertTrue(
+            fence.publish(
+                _ready(
+                    bybit_trade_ready=False,
+                    bybit_private_ready=False,
+                    bybit_generation=2,
+                )
+            )
+        )
+        self.assertFalse(fence.validate_recovery(lease))
+        blocked, reason = fence.acquire_recovery(Venue.OKX)
+        self.assertIsNone(blocked)
+        self.assertEqual(reason, "stream_blocked")
+
+        self.assertTrue(
+            fence.publish(_ready(bybit_trade_ready=False, okx_trade_ready=False))
+        )
+        blocked, reason = fence.acquire_recovery(Venue.OKX)
+        self.assertIsNone(blocked)
+        self.assertEqual(reason, "trade_socket_not_ready")
+
     def test_admission_capacity_ok_is_pure(self) -> None:
         self.assertFalse(
             admission_capacity_ok(

@@ -3673,6 +3673,8 @@ class W2PrivateWsTests(unittest.TestCase):
             priv.push_inbound(json.dumps({"op": "subscribe", "success": True}))
             rt.handle_inbound_text(priv.recv_text())
             rt.confirm_rest_reseed(RestReseedResult(matched=True))
+            # This focused test bypasses the full warm handshake.
+            rt.trade_authenticated = True
             rt.register_plan_fingerprint(plan)
             msg = rt.send_trade_place(plan, req_id="req_place_1")
             self.assertEqual(msg.channel, "trade")
@@ -4863,6 +4865,7 @@ class W4PrivateWsPostOnlyTests(unittest.TestCase):
             # Unblock trade send without REST order APIs (readiness only).
             rt.sequence_state = SequenceHealth.HEALTHY
             rt._sends_blocked = False  # noqa: SLF001
+            rt.trade_authenticated = True
             plan = R3OrdersTests()._plan()
             transport = build_ws_trade_transport(rt, op="place")
             before = len(trade2.outbox)

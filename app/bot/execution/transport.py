@@ -918,7 +918,12 @@ class ExecutionTransport:
             return self._reject(prepared, reason)
         return None
 
-    async def dispatch_action(self, prepared: Any) -> Any:
+    async def dispatch_action(
+        self,
+        prepared: Any,
+        *,
+        pre_send_guard: Optional[DispatchGuard] = None,
+    ) -> Any:
         """One-venue cancel or reduce-only place. No ACK wait, retry, or sibling."""
         from app.bot.execution.recovery import (
             PreparedVenueAction,
@@ -996,6 +1001,25 @@ class ExecutionTransport:
         socket = (
             self._bybit_socket if prepared.venue is Venue.BYBIT else self._okx_socket
         )
+        # Keep recovery writes under the same last-moment fence as normal
+        # dual-leg dispatch. There is no await between this check and entering
+        # ``_write_one`` on the socket-owning loop.
+        if pre_send_guard is not None:
+            try:
+                allowed = pre_send_guard()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                allowed = False
+            if allowed is not True:
+                return VenueActionResult(
+                    schema_version=RECOVERY_SCHEMA,
+                    kind=prepared.kind,
+                    venue=prepared.venue,
+                    evidence=_not_attempted(
+                        prepared.frame, reason_code="readiness_changed"
+                    ),
+                )
         evidence = await self._write_one(
             venue=prepared.venue,
             socket=socket,

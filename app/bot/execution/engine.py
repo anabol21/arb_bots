@@ -300,6 +300,15 @@ class ReadinessLease:
     require_controls: bool
 
 
+@dataclass(frozen=True)
+class RecoveryReadinessLease:
+    """Permission for one single-venue cancel or reduce-only recovery write."""
+
+    connectivity_revision: int
+    snapshot: ReadinessSnapshot
+    venue: Venue
+
+
 class DualReadinessFence:
     """Same-loop readiness publication with generation/revision invalidation.
 
@@ -381,6 +390,41 @@ class DualReadinessFence:
                 and not self._snapshot.kill_switch
             )
         return True
+
+    def acquire_recovery(
+        self, venue: Venue
+    ) -> tuple[Optional[RecoveryReadinessLease], Optional[str]]:
+        """Admit one target-venue recovery write with both private views fresh.
+
+        Recovery deliberately ignores pause/kill-switch and does not require the
+        peer trade socket: cancel/flatten is single-venue risk reduction. Both
+        private streams remain mandatory so exposure evidence cannot be stale.
+        """
+        if not isinstance(venue, Venue):
+            return None, "trade_socket_not_ready"
+        snapshot = self._snapshot
+        trade_ready = (
+            snapshot.bybit_trade_ready
+            if venue is Venue.BYBIT
+            else snapshot.okx_trade_ready
+        )
+        if not trade_ready:
+            return None, "trade_socket_not_ready"
+        if not snapshot.bybit_private_ready or not snapshot.okx_private_ready:
+            return None, "stream_blocked"
+        return RecoveryReadinessLease(
+            connectivity_revision=self._connectivity_revision,
+            snapshot=snapshot,
+            venue=venue,
+        ), None
+
+    def validate_recovery(self, lease: RecoveryReadinessLease) -> bool:
+        if not isinstance(lease, RecoveryReadinessLease):
+            return False
+        if lease.connectivity_revision != self._connectivity_revision:
+            return False
+        current, reason = self.acquire_recovery(lease.venue)
+        return current is not None and reason is None
 
 
 @dataclass(frozen=True)
@@ -1357,11 +1401,6 @@ class ExecutionEngine:
             dispatch=dispatch,
         )
 
-    def _trade_ready(self, venue: Venue) -> bool:
-        if venue is Venue.BYBIT:
-            return self.readiness.bybit_trade_ready
-        return self.readiness.okx_trade_ready
-
     def _both_private_ready(self) -> bool:
         return self.readiness.bybit_private_ready and self.readiness.okx_private_ready
 
@@ -1617,12 +1656,15 @@ class ExecutionEngine:
             return self._recovery_result(
                 RecoveryStatus.BLOCKED, RecoveryActionKind.CANCEL_PEER, "cancel_failed"
             )
-        if not self._trade_ready(plan.venue):
+        readiness_lease, readiness_reason = self._readiness_fence.acquire_recovery(
+            plan.venue
+        )
+        if readiness_lease is None:
             self._recovery_attempts += 1
             return self._recovery_result(
                 RecoveryStatus.BLOCKED,
                 RecoveryActionKind.CANCEL_PEER,
-                "trade_socket_not_ready",
+                readiness_reason or "wait_reseed",
             )
         primary = self._trusted_primary(plan.venue)
         if primary is None:
@@ -1691,7 +1733,12 @@ class ExecutionEngine:
             )
         self._recovery_attempts += 1
         try:
-            result = await self._transport.dispatch_action(prepared)
+            result = await self._transport.dispatch_action(
+                prepared,
+                pre_send_guard=lambda: self._readiness_fence.validate_recovery(
+                    readiness_lease
+                ),
+            )
         except asyncio.CancelledError:
             self._commit_started_uncertainty(
                 intent_id, plan.venue, peer.leg_id, started=False, halt=True
@@ -1732,12 +1779,15 @@ class ExecutionEngine:
                 RecoveryActionKind.FLATTEN_FILLED,
                 "flatten_failed",
             )
-        if not self._trade_ready(plan.venue):
+        readiness_lease, readiness_reason = self._readiness_fence.acquire_recovery(
+            plan.venue
+        )
+        if readiness_lease is None:
             self._recovery_attempts += 1
             return self._recovery_result(
                 RecoveryStatus.BLOCKED,
                 RecoveryActionKind.FLATTEN_FILLED,
-                "trade_socket_not_ready",
+                readiness_reason or "wait_reseed",
             )
         filled = None
         for leg in self._state.legs:
@@ -1837,7 +1887,12 @@ class ExecutionEngine:
                 "ownership_not_held",
             )
         try:
-            result = await self._transport.dispatch_action(prepared)
+            result = await self._transport.dispatch_action(
+                prepared,
+                pre_send_guard=lambda: self._readiness_fence.validate_recovery(
+                    readiness_lease
+                ),
+            )
         except asyncio.CancelledError:
             self._commit_started_uncertainty(
                 intent_id, plan.venue, filled.leg_id, started=False, halt=True

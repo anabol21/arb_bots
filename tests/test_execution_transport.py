@@ -18,6 +18,7 @@ from app.bot.execution.contracts import (
     Venue,
     derive_client_id,
 )
+from app.bot.execution.recovery import VenueActionKind
 from app.bot.execution.transport import (
     CachedInstrument,
     DispatchStatus,
@@ -27,6 +28,7 @@ from app.bot.execution.transport import (
     WriteOutcome,
     declared_owner_loop,
     prepare_dual_leg,
+    prepare_venue_action,
     unsigned_frame_finalizer,
 )
 
@@ -111,6 +113,25 @@ def _cache(
 def _prepare(*, now: int = 1_000, cache: Optional[InstrumentCache] = None) -> Any:
     intent = _intent()
     return prepare_dual_leg(intent, _plans(), cache or _cache(), now_mono_ns=now)
+
+
+def _prepare_action(*, now: int = 1_000) -> Any:
+    plan = LegPlan.build(
+        intent_id=INTENT_ID,
+        leg_id="leg_okx",
+        venue=Venue.OKX,
+        instrument="BTC-USDT-SWAP",
+        side="sell",
+        quantity=Decimal("1"),
+        reduce_only=True,
+    )
+    return prepare_venue_action(
+        plan,
+        _cache(),
+        kind=VenueActionKind.PLACE,
+        now_mono_ns=now,
+        run_id=RUN_ID,
+    )
 
 
 class ScriptedClock:
@@ -430,6 +451,36 @@ class DispatchKernelTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.status, DispatchStatus.REJECTED)
         self.assertEqual(result.reason_code, "readiness_changed")
         self.assertEqual(bybit.asend_calls, 0)
+        self.assertEqual(okx.asend_calls, 0)
+
+    async def test_recovery_action_final_guard_blocks_target_write(self) -> None:
+        loop = asyncio.get_running_loop()
+        bybit = FakeSocket(loop)
+        okx = FakeSocket(loop)
+        transport = _transport(loop, bybit, okx)
+
+        result = await transport.dispatch_action(
+            _prepare_action(), pre_send_guard=lambda: False
+        )
+        self.assertEqual(result.evidence.outcome, WriteOutcome.NOT_ATTEMPTED)
+        self.assertEqual(result.evidence.reason_code, "readiness_changed")
+        self.assertEqual(bybit.asend_calls, 0)
+        self.assertEqual(okx.asend_calls, 0)
+
+    async def test_recovery_action_guard_exception_fails_closed(self) -> None:
+        loop = asyncio.get_running_loop()
+        bybit = FakeSocket(loop)
+        okx = FakeSocket(loop)
+        transport = _transport(loop, bybit, okx)
+
+        def guard() -> bool:
+            raise RuntimeError("readiness source failed")
+
+        result = await transport.dispatch_action(
+            _prepare_action(), pre_send_guard=guard
+        )
+        self.assertEqual(result.evidence.outcome, WriteOutcome.NOT_ATTEMPTED)
+        self.assertEqual(result.evidence.reason_code, "readiness_changed")
         self.assertEqual(okx.asend_calls, 0)
 
     async def test_both_sockets_owned_by_active_loop(self) -> None:
