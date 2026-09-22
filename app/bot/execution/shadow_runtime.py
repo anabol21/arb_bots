@@ -13,6 +13,7 @@ Private read-only websocket qualification is run by the existing
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import os
 import time
@@ -45,12 +46,19 @@ from app.bot.execution.shadow import (
 from app.bot.execution.state_machine import apply_events, initial_spread_state
 from app.bot.execution.strategy_bridge import (
     CANARY_STAGE,
+    CONTEXT_SCHEMA_VERSION,
     DEFAULT_NOTIONAL_USDT,
     INTENT_TTL_NS,
     RISK_POLICY_REVISION,
     BridgeConfig,
+    OpenTradeContext,
 )
-from app.bot.theta_trade_manager import POLICY_ID, SlotState, ThetaTradeConfig
+from app.bot.theta_trade_manager import (
+    POLICY_ID,
+    OpenPosition,
+    SlotState,
+    ThetaTradeConfig,
+)
 
 SCHEMA_VERSION = "bbot.execution.shadow_runtime.v1"
 ENV_ENABLED = "BBOT_EV2_SHADOW"
@@ -282,6 +290,7 @@ class ExecutionShadowRuntime:
         data_root: Path,
         log: Callable[[str], None],
         env: Optional[Mapping[str, str]] = None,
+        initial_position: Optional[OpenPosition] = None,
     ) -> None:
         self.env = dict(env or os.environ)
         self.target_vps = _truthy(self.env.get(ENV_TARGET_VPS))
@@ -298,6 +307,9 @@ class ExecutionShadowRuntime:
         self.policy_id = policy_config.policy_id
         self.state: SpreadState = initial_spread_state(run_id=self.run_id)
         self.events = _EventFactory(self.run_id)
+        self.restored_trade_id: Optional[str] = None
+        if initial_position is not None:
+            self._restore_open_position(initial_position)
         self.hot_path: Optional[ShadowHotPath] = None
         self.health = ShadowHealth()
         self._tasks: list[asyncio.Task[Any]] = []
@@ -326,7 +338,65 @@ class ExecutionShadowRuntime:
             "trade_socket_bound": False,
             "policy_id": self.policy_id,
             "target_vps_gate_eligible": self.target_vps,
+            "restored_trade_id": self.restored_trade_id,
         }
+
+    def _restore_open_position(self, position: OpenPosition) -> None:
+        """Rebuild shadow FSM + bridge context from durable manager history."""
+
+        if not isinstance(position, OpenPosition):
+            raise ShadowRuntimeGateError("invalid restored position")
+        if position.fill_spread_pp is None:
+            raise ShadowRuntimeGateError("restored position missing fill spread")
+        direction = (
+            SpreadDirection.LONG if position.side == "long" else SpreadDirection.SHORT
+        )
+        signal_mono_ns = max(1, int(position.open_signal_ts_ms) * 1_000_000)
+        signal_wall_ns = max(1, int(position.open_signal_ts_ms) * 1_000_000)
+        snapshot_ref = "h" + hashlib.sha256(
+            f"theta-replay:{position.trade_id}".encode("utf-8")
+        ).hexdigest()
+        intent = TradeIntent(
+            schema_version=CONTRACT_SCHEMA_VERSION,
+            intent_id=position.trade_id,
+            run_id=self.run_id,
+            policy_version=self.policy_id,
+            action=IntentAction.OPEN,
+            spread_direction=direction,
+            coin=position.base_coin,
+            notional_usdt=Decimal(str(position.open_notional)),
+            signal_mono_ns=signal_mono_ns,
+            signal_wall_ns=signal_wall_ns,
+            expiry_mono_ns=signal_mono_ns + INTENT_TTL_NS,
+            signal_snapshot_ref=snapshot_ref,
+            canary_stage=CANARY_STAGE,
+            risk_policy_revision=RISK_POLICY_REVISION,
+        )
+        events = self.events.batch(intent, close=False, start_mono=signal_mono_ns)
+        self.state = apply_events(self.state, events)
+        restored = self.lane.bridge.restore_context(
+            self.state,
+            [
+                OpenTradeContext(
+                    schema_version=CONTEXT_SCHEMA_VERSION,
+                    trade_id=position.trade_id,
+                    open_intent_id=position.trade_id,
+                    coin=position.base_coin,
+                    side=position.side,
+                    open_signal_ts_ms=position.open_signal_ts_ms,
+                    open_fill_ts_ms=position.open_fill_ts_ms,
+                    fill_spread_pp=float(position.fill_spread_pp),
+                    open_theta_1m=position.open_theta_1m,
+                    open_notional=Decimal(str(position.open_notional)),
+                    signal_snapshot_ref=snapshot_ref,
+                    signal_mono_ns=signal_mono_ns,
+                    signal_wall_ns=signal_wall_ns,
+                )
+            ],
+        )
+        if not restored.restored:
+            raise ShadowRuntimeGateError("restored position context mismatch")
+        self.restored_trade_id = position.trade_id
 
     def _qualified_gate(self) -> dict[str, Any]:
         if self.hot_path is None:
@@ -365,6 +435,7 @@ class ExecutionShadowRuntime:
                 "live_orders": False,
                 "policy_id": self.policy_id,
                 "target_vps_gate_eligible": self.target_vps,
+                "restored_trade_id": self.restored_trade_id,
             }
         )
         self._tasks = [

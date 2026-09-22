@@ -18,6 +18,7 @@ from app.bot.floor_watcher import LiveFloorObserver
 from app.bot.paths import resolve_data_root
 from app.bot.theta_screener import ThetaSnapshot
 from app.bot.theta_trade_manager import (
+    POLICY_ID,
     SCHEMA_VERSION,
     SYNTHETIC_POLICY_MODE,
     SyntheticPolicyGateError,
@@ -25,7 +26,9 @@ from app.bot.theta_trade_manager import (
     ThetaTradeConfig,
     ThetaTradeJournalWriter,
     ThetaTradeManager,
+    ThetaTradeRecoveryError,
     decide_theta_k1,
+    replay_theta_trade_history,
     slip_spread,
     theta_trade_enabled,
 )
@@ -425,6 +428,109 @@ class JournalSchemaTests(unittest.TestCase):
         root = resolve_data_root({"BBOT_DATA_ROOT": str(tmp / "bbot")})
         self.assertTrue((root / "theta_trades").is_dir())
         self.assertTrue((root / "theta").is_dir())
+
+
+class TradeHistoryRecoveryTests(unittest.TestCase):
+    def _synthetic_config(self) -> ThetaTradeConfig:
+        return ThetaTradeConfig(
+            fill_delay_ms=0,
+            notional_usdt=20.0,
+            policy_params=PolicyParams(synthetic_roll_seed=7),
+            policy_id=SYNTHETIC_ROLL_POLICY_ID,
+        )
+
+    def test_open_survives_restart_and_close_uses_same_trade(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            snaps = [_snap("BTC", "long", 0.01), _snap("BTC", "short", 0.01)]
+            quotes = {"BTC": _books()}
+            opened_at = _ts_for_roll(SYNTHETIC_OPEN_ROLL, seed=7) * 1000
+            closed_at = _ts_for_roll(SYNTHETIC_CLOSE_ROLL, seed=7) * 1000
+
+            first = ThetaTradeManager(
+                data_root=root,
+                config=self._synthetic_config(),
+                sleep_fn=lambda _s: None,
+            )
+            open_rows = first.on_theta_snapshots(
+                snaps, quotes=quotes, now_ms=opened_at
+            )
+            self.assertEqual(open_rows[0]["event"], "open")
+            trade_id = open_rows[0]["trade_id"]
+
+            restarted = ThetaTradeManager(
+                data_root=root,
+                config=self._synthetic_config(),
+                sleep_fn=lambda _s: None,
+            )
+            self.assertIsNotNone(restarted.slot.position)
+            assert restarted.slot.position is not None
+            self.assertEqual(restarted.slot.position.trade_id, trade_id)
+            self.assertEqual(restarted.slot.position.base_coin, "BTC")
+
+            close_rows = restarted.on_theta_snapshots(
+                snaps, quotes=quotes, now_ms=closed_at
+            )
+            self.assertEqual(close_rows[0]["event"], "close")
+            self.assertEqual(close_rows[0]["trade_id"], trade_id)
+            self.assertIsNone(restarted.slot.position)
+            replayed = replay_theta_trade_history(
+                root, expected_policy_id=SYNTHETIC_ROLL_POLICY_ID
+            )
+            self.assertIsNone(replayed.position)
+            self.assertEqual(replayed.lifecycle_rows, 2)
+
+    def test_torn_tail_and_overlapping_open_fail_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            path = root / "theta_trades" / "event_date=2026-09-22" / "trades.jsonl"
+            path.parent.mkdir(parents=True)
+            path.write_text('{"schema_version":"bbot.theta_trade.v1"', encoding="utf-8")
+            with self.assertRaisesRegex(ThetaTradeRecoveryError, "truncated_history_tail"):
+                replay_theta_trade_history(root)
+
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            writer = ThetaTradeJournalWriter(root)
+            base = {
+                "schema_version": SCHEMA_VERSION,
+                "trade_id": "trade-a",
+                "base_coin": "BTC",
+                "side": "long",
+                "event": "open",
+                "would_send": True,
+                "send": False,
+                "live_send": False,
+                "signal_ts_ms": 1_700_000_000_000,
+                "fill_ts_ms": 1_700_000_000_070,
+                "spread_fill": 0.2,
+                "notional_usdt": 20.0,
+                "theta_1m": 0.3,
+                "policy_id": POLICY_ID,
+            }
+            writer.append_rows([base, {**base, "trade_id": "trade-b"}])
+            with self.assertRaisesRegex(ThetaTradeRecoveryError, "overlapping_open"):
+                replay_theta_trade_history(root)
+
+    def test_journal_failure_never_publishes_open_position(self) -> None:
+        class BrokenJournal:
+            def append_rows(self, _rows):
+                raise OSError("disk full")
+
+        with tempfile.TemporaryDirectory() as td:
+            mgr = ThetaTradeManager(
+                data_root=Path(td),
+                config=ThetaTradeConfig(fill_delay_ms=0, notional_usdt=20.0),
+                journal=BrokenJournal(),  # type: ignore[arg-type]
+                sleep_fn=lambda _s: None,
+            )
+            snaps = [_snap("BTC", "long", 0.6, p50_1m=0.8), _snap("BTC", "short", 0.01)]
+            with self.assertRaisesRegex(ThetaTradeRecoveryError, "trade_history_write_failed"):
+                mgr.on_theta_snapshots(snaps, quotes={"BTC": _books()}, now_ms=1_000_000)
+            self.assertIsNone(mgr.slot.position)
+            self.assertTrue(mgr.recovery_blocked)
+            with self.assertRaisesRegex(ThetaTradeRecoveryError, "trade_history_unhealthy"):
+                mgr.on_theta_snapshots(snaps, quotes={"BTC": _books()}, now_ms=1_001_000)
 
 
 class FloorWarmTests(unittest.TestCase):

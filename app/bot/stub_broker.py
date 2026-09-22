@@ -125,33 +125,51 @@ class StubBroker:
     def _state_path(self) -> Path:
         return pending_state_path(self.data_root)
 
+    @staticmethod
+    def _fsync_dir(path: Path) -> None:
+        fd = os.open(path, os.O_RDONLY)
+        try:
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+
+    def _atomic_state_write(self, path: Path, payload: dict[str, Any]) -> None:
+        tmp = path.with_suffix(path.suffix + ".tmp")
+        with tmp.open("w", encoding="utf-8") as fh:
+            fh.write(json.dumps(payload, separators=(",", ":")))
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp, path)
+        self._fsync_dir(path.parent)
+
     def _persist_pending(self) -> None:
         path = self._state_path()
         if self.pending is None:
+            changed = False
             if path.exists():
                 path.unlink()
+                changed = True
             # also persist flat position marker
             pos_path = path.parent / "position.json"
             if self.position is None:
                 if pos_path.exists():
                     pos_path.unlink()
+                    changed = True
             else:
-                pos_path.write_text(
-                    json.dumps(
-                        {"position": self.position, "held_coin": self.held_coin},
-                        separators=(",", ":"),
-                    ),
-                    encoding="utf-8",
+                self._atomic_state_write(
+                    pos_path,
+                    {"position": self.position, "held_coin": self.held_coin},
                 )
+                changed = False
+            if changed:
+                self._fsync_dir(path.parent)
             return
         payload = {
             "pending": asdict(self.pending),
             "position": self.position,
             "held_coin": self.held_coin,
         }
-        tmp = path.with_suffix(".tmp")
-        tmp.write_text(json.dumps(payload, separators=(",", ":")), encoding="utf-8")
-        os.replace(tmp, path)
+        self._atomic_state_write(path, payload)
 
     def _load_pending(self) -> None:
         path = self._state_path()
@@ -195,6 +213,25 @@ class StubBroker:
             status=p.get("status", "acked"),
             extra=dict(p.get("extra") or {}),
         )
+
+    def restore_committed_position(
+        self,
+        *,
+        position: Optional[str],
+        held_coin: Optional[str],
+    ) -> None:
+        """Replace the local cache only after an external reconciliation succeeds."""
+
+        if self.pending is not None:
+            raise RuntimeError("pending_intent_blocks_position_restore")
+        if position not in (None, "open_long", "open_short"):
+            raise ValueError("invalid_committed_position")
+        coin = str(held_coin).strip().upper() if held_coin else None
+        if (position is None) != (coin is None):
+            raise ValueError("committed_position_coin_mismatch")
+        self.position = position
+        self.held_coin = coin
+        self._persist_pending()
 
     def _qty_plan(
         self,

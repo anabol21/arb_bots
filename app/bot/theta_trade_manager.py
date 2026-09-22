@@ -109,6 +109,10 @@ class ThetaLiveSendError(RuntimeError):
     """Fail-closed live canary: missing LIVE_ORDERS / private_live / VENUE=live."""
 
 
+class ThetaTradeRecoveryError(RuntimeError):
+    """Durable trade history cannot be replayed into one unambiguous K=1 slot."""
+
+
 class SyntheticPolicyGateError(RuntimeError):
     """Synthetic signal policy must remain structurally unable to send orders."""
 
@@ -765,6 +769,7 @@ class ThetaTradeJournalWriter:
         written: list[Path] = []
         for event_date, batch in by_date.items():
             path = theta_trades_jsonl_path(self.data_root, event_date)
+            created = not path.exists()
             with path.open("a", encoding="utf-8") as fh:
                 for rec in batch:
                     line = json.dumps(
@@ -774,8 +779,151 @@ class ThetaTradeJournalWriter:
                     fh.write("\n")
                 fh.flush()
                 os.fsync(fh.fileno())
+            if created:
+                # Persist both the new file entry and its new date partition.
+                for directory in (path.parent, path.parent.parent):
+                    fd = os.open(directory, os.O_RDONLY)
+                    try:
+                        os.fsync(fd)
+                    finally:
+                        os.close(fd)
             written.append(path)
         return written
+
+
+@dataclass(frozen=True)
+class ThetaTradeReplay:
+    """Strict replay result for the append-only theta trade lifecycle."""
+
+    position: Optional[OpenPosition]
+    files_seen: int
+    rows_seen: int
+    lifecycle_rows: int
+
+
+def _replay_float(value: Any, *, field: str, optional: bool = False) -> Optional[float]:
+    if value is None and optional:
+        return None
+    parsed = _finite(value)
+    if parsed is None:
+        raise ThetaTradeRecoveryError(f"invalid_{field}")
+    return float(parsed)
+
+
+def _position_from_open_row(row: Mapping[str, Any]) -> OpenPosition:
+    trade_id = str(row.get("trade_id") or "").strip()
+    coin = str(row.get("base_coin") or "").strip().upper()
+    side = str(row.get("side") or "").strip().lower()
+    if not trade_id:
+        raise ThetaTradeRecoveryError("missing_trade_id")
+    if not coin:
+        raise ThetaTradeRecoveryError("missing_base_coin")
+    if side not in {"long", "short"}:
+        raise ThetaTradeRecoveryError("invalid_side")
+    try:
+        signal_ts_ms = int(row["signal_ts_ms"])
+        fill_ts_ms = int(row["fill_ts_ms"])
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ThetaTradeRecoveryError("invalid_timestamps") from exc
+    if signal_ts_ms <= 0 or fill_ts_ms < signal_ts_ms:
+        raise ThetaTradeRecoveryError("invalid_timestamps")
+    spread_raw = row.get("spread_fill")
+    if spread_raw is None:
+        spread_raw = row.get("open_fill_spread")
+    fill_spread = _replay_float(spread_raw, field="fill_spread")
+    notional = _replay_float(row.get("notional_usdt"), field="notional")
+    if notional is None or notional <= 0:
+        raise ThetaTradeRecoveryError("invalid_notional")
+    theta = _replay_float(row.get("theta_1m"), field="theta", optional=True)
+    return OpenPosition(
+        trade_id=trade_id,
+        base_coin=coin,
+        side=side,
+        open_signal_ts_ms=signal_ts_ms,
+        open_fill_ts_ms=fill_ts_ms,
+        open_fill_spread=fill_spread,
+        open_notional=notional,
+        open_theta_1m=theta,
+        fill_spread_pp=fill_spread,
+    )
+
+
+def replay_theta_trade_history(
+    data_root: Path,
+    *,
+    expected_policy_id: Optional[str] = None,
+) -> ThetaTradeReplay:
+    """Rebuild the K=1 slot from all UTC trade-history partitions.
+
+    A live row changes state only when ``send=true``.  A no-order row changes
+    the synthetic/would-send state only when ``would_send=true``.  Malformed,
+    torn or contradictory lifecycle rows fail closed instead of inventing a
+    flat slot.
+    """
+
+    root = Path(data_root) / "theta_trades"
+    paths = sorted(root.glob("event_date=*/trades.jsonl"))
+    position: Optional[OpenPosition] = None
+    position_policy: Optional[str] = None
+    rows_seen = 0
+    lifecycle_rows = 0
+    for path in paths:
+        try:
+            raw = path.read_text(encoding="utf-8")
+        except OSError as exc:
+            raise ThetaTradeRecoveryError("history_read_failed") from exc
+        if raw and not raw.endswith("\n"):
+            raise ThetaTradeRecoveryError("truncated_history_tail")
+        for line in raw.splitlines():
+            if not line.strip():
+                continue
+            rows_seen += 1
+            try:
+                row = json.loads(line)
+            except json.JSONDecodeError as exc:
+                raise ThetaTradeRecoveryError("invalid_history_json") from exc
+            if not isinstance(row, Mapping):
+                raise ThetaTradeRecoveryError("invalid_history_row")
+            if row.get("schema_version") != SCHEMA_VERSION:
+                raise ThetaTradeRecoveryError("unsupported_history_schema")
+            event = str(row.get("event") or "").strip().lower()
+            if event not in {"open", "close"}:
+                continue
+            live = bool(row.get("live_send"))
+            committed = row.get("send") is True if live else row.get("would_send") is True
+            if not committed:
+                # A recorded live abort / size reject did not change exposure.
+                continue
+            lifecycle_rows += 1
+            trade_id = str(row.get("trade_id") or "").strip()
+            coin = str(row.get("base_coin") or "").strip().upper()
+            side = str(row.get("side") or "").strip().lower()
+            if event == "open":
+                if position is not None:
+                    raise ThetaTradeRecoveryError("overlapping_open")
+                position = _position_from_open_row(row)
+                position_policy = str(row.get("policy_id") or "").strip() or None
+                continue
+            if position is None:
+                raise ThetaTradeRecoveryError("orphan_close")
+            if trade_id != position.trade_id:
+                raise ThetaTradeRecoveryError("close_trade_id_mismatch")
+            if coin != position.base_coin or side != position.side:
+                raise ThetaTradeRecoveryError("close_identity_mismatch")
+            position = None
+            position_policy = None
+    if (
+        position is not None
+        and expected_policy_id is not None
+        and position_policy != str(expected_policy_id)
+    ):
+        raise ThetaTradeRecoveryError("open_policy_mismatch")
+    return ThetaTradeReplay(
+        position=position,
+        files_seen=len(paths),
+        rows_seen=rows_seen,
+        lifecycle_rows=lifecycle_rows,
+    )
 
 
 class ThetaTradeManager:
@@ -796,6 +944,8 @@ class ThetaTradeManager:
         live_send: bool = False,
         place_fn: Optional[PlaceFn] = None,
         meta_fn: Optional[MetaFn] = None,
+        restore_from_journal: bool = True,
+        live_recovery_confirmed: Optional[bool] = None,
     ) -> None:
         self.data_root = Path(data_root)
         self.config = config or ThetaTradeConfig.from_env()
@@ -810,8 +960,92 @@ class ThetaTradeManager:
             raise ThetaLiveSendError(
                 "theta live send requires place_fn and meta_fn (fail closed)"
             )
-        self.slot = SlotState(k=int(self.config.slot_k))
+        self.replay = (
+            replay_theta_trade_history(
+                self.data_root,
+                expected_policy_id=self.config.policy_id,
+            )
+            if restore_from_journal
+            else ThetaTradeReplay(None, 0, 0, 0)
+        )
+        self.slot = SlotState(
+            k=int(self.config.slot_k),
+            position=self.replay.position,
+        )
+        self.recovery_blocked = False
+        self.live_recovery_confirmed = (
+            not self.live_send
+            if live_recovery_confirmed is None
+            else bool(live_recovery_confirmed)
+        )
+        restored = self.slot.position
+        self._log(
+            "theta_trade_replay | "
+            f"files={self.replay.files_seen} | rows={self.replay.rows_seen} | "
+            f"lifecycle={self.replay.lifecycle_rows} | "
+            f"state={'OPEN' if restored is not None else 'FLAT'} | "
+            f"trade_id={restored.trade_id if restored is not None else '-'} | "
+            f"coin={restored.base_coin if restored is not None else '-'} | "
+            f"side={restored.side if restored is not None else '-'}"
+        )
         self._skip_log_budget = 0
+
+    def _assert_recovery_writable(self) -> None:
+        if self.recovery_blocked:
+            raise ThetaTradeRecoveryError("trade_history_unhealthy")
+        if self.live_send and not self.live_recovery_confirmed:
+            raise ThetaTradeRecoveryError("live_reconciliation_required")
+
+    def confirm_live_reconciliation(self, *, matched: bool, reason: str) -> None:
+        """Open the live decision gate only after signed exchange reconciliation."""
+
+        if not self.live_send:
+            return
+        if self.recovery_blocked:
+            raise ThetaTradeRecoveryError("trade_history_unhealthy")
+        if not matched:
+            self.recovery_blocked = True
+            raise ThetaTradeRecoveryError(
+                f"live_reconciliation_failed:{str(reason or 'unknown')}"
+            )
+        self.live_recovery_confirmed = True
+
+    def assert_local_broker_state(
+        self,
+        *,
+        broker_position: Optional[str],
+        held_coin: Optional[str],
+    ) -> None:
+        """Require the broker cache to agree with replay before live startup."""
+
+        if not self.live_send:
+            return
+        restored = self.slot.position
+        expected_position = None
+        expected_coin = None
+        if restored is not None:
+            expected_position = "open_long" if restored.side == "long" else "open_short"
+            expected_coin = restored.base_coin
+        actual_coin = str(held_coin).upper() if held_coin else None
+        if broker_position != expected_position or actual_coin != expected_coin:
+            self.recovery_blocked = True
+            raise ThetaTradeRecoveryError("local_broker_state_mismatch")
+
+    def _commit_lifecycle_row(
+        self,
+        row: Mapping[str, Any],
+        *,
+        position_after: Optional[OpenPosition],
+    ) -> None:
+        """Durably append before publishing the new in-memory slot state."""
+
+        self._assert_recovery_writable()
+        try:
+            self.journal.append_rows([row])
+        except Exception as exc:  # noqa: BLE001 - exposure must latch fail-closed
+            self.recovery_blocked = True
+            raise ThetaTradeRecoveryError("trade_history_write_failed") from exc
+        self.slot.position = position_after
 
     def _books_for(self, quotes: Mapping[str, Any], coin: str) -> tuple[dict, dict]:
         books = quotes.get(coin) or {}
@@ -966,6 +1200,7 @@ class ThetaTradeManager:
         position). Signal OK but fill size bad → still journal would_fill with
         ``fill_size_ok=false``.
         """
+        self._assert_recovery_writable()
         if decision.action == "skip":
             if decision.reject_reason == "insufficient_size":
                 self._log(
@@ -1103,7 +1338,7 @@ class ThetaTradeManager:
                     fill_size=fill_size,
                     policy_decision=decision.policy_decision,
                 )
-                self.slot.position = OpenPosition(
+                position_after = OpenPosition(
                     trade_id=trade_id,
                     base_coin=decision.base_coin,
                     side=decision.side,
@@ -1159,8 +1394,8 @@ class ThetaTradeManager:
                     pnl_fields=pnl_fields,
                     policy_decision=decision.policy_decision,
                 )
-                self.slot.position = None
-            self.journal.append_rows([row])
+                position_after = None
+            self._commit_lifecycle_row(row, position_after=position_after)
             self._log(
                 f"theta_trade_{decision.action} | trade_id={row['trade_id']} | "
                 f"coin={row['base_coin']} | side={row['side']} | "
@@ -1376,9 +1611,10 @@ class ThetaTradeManager:
                 intent_id=intent_id,
                 live_abort=None if sent_ok else str(abort),
             )
+            position_after = self.slot.position
             if sent_ok and decision.action == "open":
                 fill_spread = spread_for_side(okx_f, bybit_f, side)
-                self.slot.position = OpenPosition(
+                position_after = OpenPosition(
                     trade_id=trade_id,
                     base_coin=str(coin).upper(),
                     side=side,
@@ -1390,9 +1626,9 @@ class ThetaTradeManager:
                     fill_spread_pp=fill_spread,
                 )
             elif sent_ok and decision.action == "close":
-                self.slot.position = None
+                position_after = None
 
-            self.journal.append_rows([row])
+            self._commit_lifecycle_row(row, position_after=position_after)
             self._log(
                 f"theta_trade_{decision.action} | trade_id={row['trade_id']} | "
                 f"intent_id={intent_id} | coin={row['base_coin']} | "
@@ -1437,6 +1673,7 @@ class ThetaTradeManager:
         now_ms: Optional[int] = None,
     ) -> list[dict[str, Any]]:
         """Sync entry (unit tests / offline). Prefer ``on_theta_snapshots_async`` live."""
+        self._assert_recovery_writable()
         decision_now_ms = int(now_ms if now_ms is not None else time.time() * 1000)
         decision = decide_theta_k1(
             snapshots,
@@ -1464,6 +1701,7 @@ class ThetaTradeManager:
         """Async emit-loop entry: ``fill_ts = signal_ts + BBOT_FILL_DELAY_MS``."""
         import asyncio
 
+        self._assert_recovery_writable()
         decision_now_ms = int(now_ms if now_ms is not None else time.time() * 1000)
         decision = decide_theta_k1(
             snapshots,
@@ -1583,7 +1821,7 @@ class ThetaTradeManager:
                     fill_size=fill_size,
                     policy_decision=decision.policy_decision,
                 )
-                self.slot.position = OpenPosition(
+                position_after = OpenPosition(
                     trade_id=trade_id,
                     base_coin=decision.base_coin,
                     side=decision.side,
@@ -1638,8 +1876,13 @@ class ThetaTradeManager:
                     pnl_fields=pnl_fields,
                     policy_decision=decision.policy_decision,
                 )
-                self.slot.position = None
-            await asyncio.to_thread(self.journal.append_rows, [row])
+                position_after = None
+            try:
+                await asyncio.to_thread(self.journal.append_rows, [row])
+            except Exception as exc:  # noqa: BLE001 - latch exposure fail-closed
+                self.recovery_blocked = True
+                raise ThetaTradeRecoveryError("trade_history_write_failed") from exc
+            self.slot.position = position_after
             self._log(
                 f"theta_trade_{decision.action} | trade_id={row['trade_id']} | "
                 f"coin={row['base_coin']} | side={row['side']} | "

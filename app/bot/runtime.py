@@ -323,12 +323,14 @@ class BotRuntime:
             )
         self.probe_done = False
         self.probe_intent_placed = False
-        self._lock = asyncio.Lock()
+        # Bind asyncio primitives inside the running loop (Python 3.9 otherwise
+        # captures/requests a loop during synchronous BotRuntime construction).
+        self._lock: asyncio.Lock | None = None
         # Coalesce book ticks: at most one in-flight _handle_book per base_coin.
         self._book_inflight: dict[str, bool] = {c: False for c in self.coins}
         self._book_dirty: dict[str, bool] = {c: False for c in self.coins}
         self._book_last_exchange: dict[str, str] = {c: "okx" for c in self.coins}
-        self.stop_event = asyncio.Event()
+        self.stop_event: asyncio.Event | None = None
         self._heartbeat_n = 0
         self._ma_cache: dict[str, tuple[Optional[float], Optional[float]]] = {
             c: (None, None) for c in self.coins
@@ -393,6 +395,11 @@ class BotRuntime:
             self.execution_shadow = ExecutionShadowRuntime(
                 data_root=self.data_root,
                 log=lambda m: self.log.info(m),
+                initial_position=(
+                    self.theta_trade.slot.position
+                    if self.theta_trade is not None
+                    else None
+                ),
             )
         # Floor warm-start (standard for gear22 / when pickle present).
         self._floor_warm_path = resolve_floor_warm_path(self.data_root)
@@ -465,6 +472,77 @@ class BotRuntime:
 
         return start_warm_private_for_bot_process(**overrides)
 
+    async def _reconcile_live_restart_state(self) -> None:
+        """Verify journal state against both venues before live decisions exist."""
+
+        manager = self.theta_trade
+        if manager is None or not manager.live_send:
+            return
+        if self._private_warm is None:
+            raise RuntimeError("live_reconciliation_requires_private_warm_session")
+
+        from app.bot.private.position_reconcile import (
+            SignedRestRestartPositionReconciler,
+        )
+
+        expected = manager.slot.position
+        expected_meta = self._meta(expected.base_coin) if expected is not None else None
+        reconciler = SignedRestRestartPositionReconciler(
+            bybit_credentials=self._private_warm.bybit_credentials,
+            okx_credentials=self._private_warm.okx_credentials,
+        )
+        result = await asyncio.to_thread(
+            reconciler.check,
+            expected=expected,
+            bybit_symbols=[self._meta(coin).bybit_symbol for coin in self.coins],
+            okx_symbols=[self._meta(coin).okx_symbol for coin in self.coins],
+            expected_bybit_symbol=(
+                expected_meta.bybit_symbol if expected_meta is not None else None
+            ),
+            expected_okx_symbol=(
+                expected_meta.okx_symbol if expected_meta is not None else None
+            ),
+        )
+        if not result.matched:
+            self.log.error(
+                "live_restart_reconciliation_failed | reason=%s | "
+                "bybit_state=%s | okx_state=%s | bybit_orders_flat=%s | "
+                "okx_orders_flat=%s",
+                result.reason,
+                result.bybit_state,
+                result.okx_state,
+                result.bybit_open_orders_flat,
+                result.okx_open_orders_flat,
+            )
+            manager.confirm_live_reconciliation(
+                matched=False,
+                reason=result.reason,
+            )
+
+        broker_position = None
+        broker_coin = None
+        if expected is not None:
+            broker_position = (
+                "open_long" if expected.side == "long" else "open_short"
+            )
+            broker_coin = expected.base_coin
+        self.broker.restore_committed_position(
+            position=broker_position,
+            held_coin=broker_coin,
+        )
+        manager.assert_local_broker_state(
+            broker_position=self.broker.position,
+            held_coin=self.broker.held_coin,
+        )
+        manager.confirm_live_reconciliation(matched=True, reason="matched")
+        self._sync_market_state_from_broker()
+        self.log.info(
+            "live_restart_reconciliation_ok | state=%s | coin=%s | "
+            "open_orders_flat=true",
+            "OPEN" if expected is not None else "FLAT",
+            expected.base_coin if expected is not None else "-",
+        )
+
     def _meta(self, coin: str) -> InstrumentMeta:
         if coin not in self.universe:
             raise KeyError(f"{coin} missing from bybit_okx_universe.csv")
@@ -522,6 +600,8 @@ class BotRuntime:
         asyncio.create_task(self._coalesced_handle_book(coin), name=f"tick-{coin}")
 
     async def _coalesced_handle_book(self, base_coin: str) -> None:
+        if self._lock is None:
+            self._lock = asyncio.Lock()
         try:
             while True:
                 exchange = self._book_last_exchange.get(base_coin, "okx")
@@ -574,6 +654,8 @@ class BotRuntime:
                 )
 
     async def _handle_book(self, base_coin: str, exchange: str) -> None:
+        if self._lock is None:
+            self._lock = asyncio.Lock()
         pending_floor: list[dict[str, Any]] = []
         async with self._lock:
             self._handle_book_sync(base_coin, exchange)
@@ -1281,6 +1363,8 @@ class BotRuntime:
     async def run(self) -> None:
         # Register signal handlers for graceful shutdown
         loop = asyncio.get_running_loop()
+        self._lock = asyncio.Lock()
+        self.stop_event = asyncio.Event()
         
         def _signal_handler(signame: str) -> None:
             self.log.info(f"bbot_signal_received | signal={signame}")
@@ -1359,6 +1443,17 @@ class BotRuntime:
             )
         else:
             self.log.info("private_warm_skipped | live_private_send=false")
+
+        try:
+            await self._reconcile_live_restart_state()
+        except Exception:
+            from app.bot.private.ws_warm_session import clear_process_warm_session
+
+            clear_process_warm_session(stop=True)
+            self._private_warm = None
+            if self.execution_shadow is not None:
+                await self.execution_shadow.stop()
+            raise
 
         tasks: list[asyncio.Task] = [asyncio.create_task(self._heartbeat())]
         # Periodic floor warm pickle save (if floor observer is enabled)

@@ -16,6 +16,7 @@ from app.bot.theta_trade_manager import (
     ThetaLiveSendError,
     ThetaTradeConfig,
     ThetaTradeManager,
+    ThetaTradeRecoveryError,
     assert_theta_live_send_gates,
     theta_live_send_requested,
     theta_trade_enabled,
@@ -257,6 +258,7 @@ class StubPathUnchangedTests(unittest.TestCase):
             ),
             sleep_fn=lambda s: slept.append(s),
             live_send=True,
+            live_recovery_confirmed=True,
             place_fn=broker.place,
             meta_fn=_meta,
         )
@@ -273,6 +275,102 @@ class StubPathUnchangedTests(unittest.TestCase):
 
 
 class LiveSendPathTests(unittest.TestCase):
+    def test_live_manager_refuses_decisions_before_reconciliation(self) -> None:
+        tmp = Path(tempfile.mkdtemp())
+        broker = FakeLiveBroker(notional_usdt=20.0)
+        mgr = ThetaTradeManager(
+            data_root=tmp,
+            config=ThetaTradeConfig(
+                notional_usdt=20.0,
+                policy_params=_frozen(),
+            ),
+            live_send=True,
+            place_fn=broker.place,
+            meta_fn=_meta,
+        )
+        with self.assertRaisesRegex(
+            ThetaTradeRecoveryError, "live_reconciliation_required"
+        ):
+            mgr.on_theta_snapshots(
+                _qualify_snaps(), quotes={"KAITO": _books()}, now_ms=1_000
+            )
+        self.assertEqual(broker.calls, [])
+        mgr.confirm_live_reconciliation(matched=True, reason="matched")
+        rows = mgr.on_theta_snapshots(
+            _qualify_snaps(), quotes={"KAITO": _books()}, now_ms=2_000
+        )
+        self.assertEqual(len(rows), 1)
+        self.assertTrue(rows[0]["send"])
+
+    def test_failed_live_reconciliation_latches_block(self) -> None:
+        tmp = Path(tempfile.mkdtemp())
+        broker = FakeLiveBroker(notional_usdt=20.0)
+        mgr = ThetaTradeManager(
+            data_root=tmp,
+            config=ThetaTradeConfig(
+                notional_usdt=20.0,
+                policy_params=_frozen(),
+            ),
+            live_send=True,
+            place_fn=broker.place,
+            meta_fn=_meta,
+        )
+        with self.assertRaisesRegex(
+            ThetaTradeRecoveryError, "live_reconciliation_failed"
+        ):
+            mgr.confirm_live_reconciliation(
+                matched=False, reason="expected_open_mismatch"
+            )
+        with self.assertRaisesRegex(
+            ThetaTradeRecoveryError, "trade_history_unhealthy"
+        ):
+            mgr.confirm_live_reconciliation(matched=True, reason="matched")
+
+    def test_restart_replays_live_open_and_checks_broker_cache(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            broker = FakeLiveBroker(notional_usdt=20.0)
+            config = ThetaTradeConfig(
+                fill_delay_ms=70,
+                notional_usdt=20.0,
+                policy_params=_frozen(),
+            )
+            first = ThetaTradeManager(
+                data_root=root,
+                config=config,
+                live_send=True,
+                live_recovery_confirmed=True,
+                place_fn=broker.place,
+                meta_fn=_meta,
+            )
+            rows = first.on_theta_snapshots(
+                _qualify_snaps(), quotes={"KAITO": _books()}, now_ms=2_000_000
+            )
+            trade_id = rows[0]["trade_id"]
+
+            restarted = ThetaTradeManager(
+                data_root=root,
+                config=config,
+                live_send=True,
+                live_recovery_confirmed=True,
+                place_fn=broker.place,
+                meta_fn=_meta,
+            )
+            self.assertIsNotNone(restarted.slot.position)
+            assert restarted.slot.position is not None
+            self.assertEqual(restarted.slot.position.trade_id, trade_id)
+            restarted.assert_local_broker_state(
+                broker_position=broker.position,
+                held_coin=broker.held_coin,
+            )
+            with self.assertRaisesRegex(
+                ThetaTradeRecoveryError, "local_broker_state_mismatch"
+            ):
+                restarted.assert_local_broker_state(
+                    broker_position=None,
+                    held_coin=None,
+                )
+
     def test_live_place_notional_20_shared_trade_id_no_sleep(self) -> None:
         tmp = Path(tempfile.mkdtemp())
         broker = FakeLiveBroker(notional_usdt=20.0)
@@ -289,6 +387,7 @@ class LiveSendPathTests(unittest.TestCase):
             ),
             sleep_fn=_boom,
             live_send=True,
+            live_recovery_confirmed=True,
             place_fn=broker.place,
             meta_fn=_meta,
         )
@@ -333,6 +432,7 @@ class LiveSendPathTests(unittest.TestCase):
                 AssertionError("no sleep on live abort")
             ),
             live_send=True,
+            live_recovery_confirmed=True,
             place_fn=broker.place,
             meta_fn=_meta,
         )
@@ -366,6 +466,7 @@ class LiveSendPathTests(unittest.TestCase):
             ),
             sleep_fn=_boom,
             live_send=True,
+            live_recovery_confirmed=True,
             place_fn=broker.place,
             meta_fn=_meta,
         )

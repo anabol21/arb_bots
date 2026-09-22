@@ -127,6 +127,44 @@ class ShadowRuntimeGateTests(unittest.TestCase):
 
 
 class ShadowRuntimeLifecycleTests(unittest.IsolatedAsyncioTestCase):
+    async def test_restored_open_position_seeds_fsm_and_bridge_context(self) -> None:
+        position = OpenPosition(
+            trade_id="7e881b50-9312-42b6-a453-93cbf9f14cac",
+            base_coin="KAITO",
+            side="short",
+            open_signal_ts_ms=1_700_000_000_000,
+            open_fill_ts_ms=1_700_000_000_070,
+            open_fill_spread=-0.2,
+            open_notional=20.0,
+            open_theta_1m=0.4,
+            fill_spread_pp=-0.2,
+        )
+        with tempfile.TemporaryDirectory() as td:
+            runtime = ExecutionShadowRuntime(
+                data_root=Path(td),
+                log=lambda _message: None,
+                initial_position=position,
+            )
+            self.assertEqual(runtime.state.status, SpreadStatus.OPEN)
+            self.assertEqual(runtime.state.open_intent_id, position.trade_id)
+            self.assertEqual(runtime.restored_trade_id, position.trade_id)
+            context = runtime.lane.bridge.context
+            self.assertIsNotNone(context)
+            assert context is not None
+            self.assertEqual(context.trade_id, position.trade_id)
+            self.assertEqual(context.coin, position.base_coin)
+            self.assertEqual(context.side, position.side)
+            await runtime.start()
+            await runtime.stop()
+            records = [
+                json.loads(line)
+                for line in (Path(td) / "execution-v2-shadow.jsonl")
+                .read_text(encoding="utf-8")
+                .splitlines()
+            ]
+            self.assertEqual(records[0]["restored_trade_id"], position.trade_id)
+            self.assertEqual(records[-1]["spread_status"], "OPEN")
+
     async def test_synthetic_policy_runtime_is_no_order_and_replayable(self) -> None:
         seed = 7
         decision_ts_s = next(
