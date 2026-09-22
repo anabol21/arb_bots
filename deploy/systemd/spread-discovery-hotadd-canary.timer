@@ -1,0 +1,12 @@
+[Unit]
+Description=Periodic discovery for hot-add canary (listing wait)
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=30min
+AccuracySec=1min
+Persistent=true
+Unit=spread-discovery-hotadd-canary.service
+
+[Install]
+WantedBy=timers.target
