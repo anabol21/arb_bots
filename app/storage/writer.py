@@ -36,6 +36,24 @@ from .spool import DurableSpool
 
 _SENTINEL = object()
 
+
+def _tmp_owned_by_pid(path: Path, pid: int) -> bool:
+    """True only for writer tmp names that embed this process PID.
+
+    Writer tmp: ``batch_{utc_ms}_{pid}_{seq}_{uuid}.parquet.tmp``.
+    Unknown or other-PID names are left in place so a second publisher on the
+    same parquet root cannot unlink an in-flight batch.
+    """
+    name = path.name
+    prefix = "batch_"
+    suffix = ".parquet.tmp"
+    if not name.startswith(prefix) or not name.endswith(suffix):
+        return False
+    parts = name[len(prefix) : -len(suffix)].split("_")
+    if len(parts) != 4:
+        return False
+    return parts[1] == str(pid)
+
 # Tick schemas: "v1" (canary default) | "lean". Bars: "bar_5m".
 SchemaMode = str
 
@@ -608,7 +626,10 @@ class ParquetPublisher:
         staging = tmp_dir(self.parquet_root)
         staging.mkdir(parents=True, exist_ok=True)
         cleaned = 0
+        own_pid = os.getpid()
         for path in staging.glob("*.parquet.tmp"):
+            if not _tmp_owned_by_pid(path, own_pid):
+                continue
             try:
                 path.unlink()
                 cleaned += 1

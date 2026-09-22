@@ -92,6 +92,31 @@ class P0StorageTests(unittest.TestCase):
         self.assertEqual(pq.ParquetFile(finals[0]).metadata.num_rows, 1)
         self.assertEqual(list((local_primary / ".tmp").glob("*")), [])
 
+    def test_orphan_tmp_cleanup_skips_other_pid_files(self) -> None:
+        from app.storage.paths import tmp_dir
+        from app.storage.writer import _tmp_owned_by_pid
+
+        own = os.getpid()
+        other = own + 1
+        staging = tmp_dir(self.publisher.parquet_root)
+        staging.mkdir(parents=True, exist_ok=True)
+        own_tmp = staging / f"batch_1700000000000_{own}_000001_abcd1234.parquet.tmp"
+        other_tmp = staging / f"batch_1700000000001_{other}_000002_deadbeef.parquet.tmp"
+        weird_tmp = staging / "batch_not_a_writer_name.parquet.tmp"
+        own_tmp.write_bytes(b"own")
+        other_tmp.write_bytes(b"other")
+        weird_tmp.write_bytes(b"weird")
+
+        self.assertTrue(_tmp_owned_by_pid(own_tmp, own))
+        self.assertFalse(_tmp_owned_by_pid(other_tmp, own))
+        self.assertFalse(_tmp_owned_by_pid(weird_tmp, own))
+
+        cleaned = self.publisher._cleanup_orphan_tmps()
+        self.assertEqual(cleaned, 1)
+        self.assertFalse(own_tmp.exists())
+        self.assertTrue(other_tmp.exists())
+        self.assertTrue(weird_tmp.exists())
+
     def test_force_spool_accounts_valid_and_rejected_records_durably(self) -> None:
         records = [valid_record(), {"base_coin": "", "trigger": "okx"}]
 
