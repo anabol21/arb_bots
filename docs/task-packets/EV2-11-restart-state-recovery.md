@@ -82,7 +82,7 @@ Deploy EV2-11 as a no-order restart canary first. Then run a separate, explicitl
 small real-order restart experiment. Keep auto-repair/auto-flatten out of scope until the
 ambiguous ACK-to-fsync crash case is covered by the execution WAL protocol.
 
-## VPS canary in progress — 2026-09-23
+## VPS canary result — 2026-09-23
 
 - Release commit: `8579dd0`; release path: `/root/spread_ev2_11`.
 - Isolated data: `/data/bbot-ev2-11-restart`; dedicated main and two private read-only units.
@@ -93,13 +93,33 @@ ambiguous ACK-to-fsync crash case is covered by the execution WAL protocol.
 - After restart, manager replay and shadow FSM restored the same trade; the
   second process committed its `CLOSE` with that same trade ID at 09:51:59 UTC.
   Shadow mirror transitioned to FLAT.
-- Main and private companions were active with zero unplanned restarts at the
-  09:53 UTC check; `orders_sent=0`, `trade_socket_bound=false`. The current
-  collector is `spread-collector-next.service`, active with zero restarts; the
-  continuing `spread-bbot-theta-k1-canary.service` was also active with zero.
+- The second run ended at exactly 11:50:02 UTC via `RuntimeMaxSec=7200`.
+  `systemd` reports `Result=timeout` as expected for that bounded stop and
+  `ExecMainStatus=0`; the private companions stopped with it. Wall time from
+  first start to final stop was 2 h 2 m 53 s, including the planned restart.
+- The history contains 37 synthetic OPEN and 36 CLOSE rows; no skip audit
+  rows were recorded. Slot-busy holds are not individually journaled. All
+  lifecycle rows have `would_send=true`, `send=false`; `orders_sent=0` and
+  `trade_socket_bound=false` throughout the shadow reports.
+- Shutdown occurred while one synthetic position remained open: KAITO short,
+  `trade_id=65dee06a-4261-4978-8c37-bb818d56fc8f`. Strict replay after stop
+  reconstructed that same open position; the manager did not invent a close.
+- The second shadow run emitted 6,467 parity ticks, 72 mirror transitions,
+  zero divergences, zero lifecycle/journal drops, and zero unknown states. Its
+  final FSM state was OPEN, matching the journal. Its target-VPS latency
+  report had 10,072 valid samples, passed p50/p99 with no p999 alert, and
+  recorded zero invalid clocks, missing samples, or rejected-before-write.
+- `spread-collector-next.service` and the continuing
+  `spread-bbot-theta-k1-canary.service` stayed active with zero restarts at
+  the final check. The EV2-11 main/private units had no unplanned restarts.
 - Both private companions recorded auth success and matched REST reconciliation
   on both starts. OKX also recorded two known misclassified auth failure frames
   per start (four total); track any increase as a new anomaly.
-- The two-hour window is still running. `RuntimeMaxSec=7200` is measured from
-  the second start, so expected auto-stop is no earlier than 11:50:02 UTC.
-  Final metrics and verdict belong to the post-stop report.
+- Important simulation limit: 15 of 36 virtual CLOSE rows had
+  `fill_size_ok=false` (14 also had `signal_size_ok=false`). The manager still
+  marked those synthetic positions closed. This does not invalidate the
+  restart-recovery proof, but it prevents treating every synthetic close as
+  evidence of a fillable real exit. A live exit must remain exposure-aware
+  until venue confirmation; do not infer flatness from this fill model.
+- Verdict: EV2-11 no-order restart recovery passed. Real-order restart safety
+  and exit execution remain separate gates for the subsequent live ladder.
