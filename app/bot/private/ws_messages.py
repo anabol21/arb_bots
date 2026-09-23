@@ -298,8 +298,9 @@ def build_okx_private_subscribe(
     symbol: Optional[str] = None,
     symbols: Optional[Sequence[str]] = None,
     inst_type: str = "SWAP",
+    swap_scope: bool = False,
 ) -> WsOutboundMessage:
-    """Orders + positions for each active OKX SWAP instId.
+    """Orders + positions for active OKX SWAP instruments.
 
     Do not subscribe ``fills``: that channel is VIP/fee-tier gated (OKX
     ``64003``) and the refusal often arrives with ``arg: null``. The
@@ -313,13 +314,19 @@ def build_okx_private_subscribe(
     if not insts:
         raise ValueError("okx private subscribe requires at least one instId")
     args: list[dict[str, str]] = []
-    for inst in insts:
-        args.extend(
-            [
-                {"channel": "orders", "instType": inst_type, "instId": inst},
-                {"channel": "positions", "instType": inst_type, "instId": inst},
-            ]
-        )
+    if swap_scope:
+        args = [
+            {"channel": "orders", "instType": inst_type},
+            {"channel": "positions", "instType": inst_type},
+        ]
+    else:
+        for inst in insts:
+            args.extend(
+                [
+                    {"channel": "orders", "instType": inst_type, "instId": inst},
+                    {"channel": "positions", "instType": inst_type, "instId": inst},
+                ]
+            )
     body = {"op": "subscribe", "args": args}
     return WsOutboundMessage(
         venue="okx_live",

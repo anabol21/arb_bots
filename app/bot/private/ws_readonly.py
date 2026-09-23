@@ -45,6 +45,21 @@ DEFAULT_RECV_TIMEOUT_SEC = 5.0
 DEFAULT_HEARTBEAT_EVERY_SEC = 15.0
 
 
+def _okx_swap_scope_ack_channel(raw: str) -> Optional[str]:
+    """Return only the two expected channel names, never raw venue fields."""
+    try:
+        frame = json.loads(raw)
+    except (TypeError, ValueError):
+        return None
+    if not isinstance(frame, dict) or frame.get("event") != "subscribe":
+        return None
+    arg = frame.get("arg")
+    if not isinstance(arg, dict) or arg.get("instType") != "SWAP":
+        return None
+    channel = arg.get("channel")
+    return channel if channel in {"orders", "positions"} else None
+
+
 @dataclass
 class WsReadonlyReport:
     status: str
@@ -243,6 +258,34 @@ def run_ws_readonly_preflight(
                 error_code="venue_rejected",
                 journal=j,
             )
+
+        if exchange == "okx" and str(e.get("BBOT_OKX_READONLY_SWAP_SCOPE") or "") == "1":
+            seen = {_okx_swap_scope_ack_channel(sub_raw)}
+            if None in seen:
+                return _report_from_runtime(
+                    runtime, status="subscribe_failed", error_code="venue_rejected", journal=j,
+                )
+            deadline = time.monotonic() + recv_timeout_sec
+            while seen != {"orders", "positions"}:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return _report_from_runtime(
+                        runtime, status="subscribe_timeout", error_code="timeout", journal=j,
+                    )
+                try:
+                    raw = runtime.private_socket.recv_text(timeout_sec=remaining)  # type: ignore[union-attr]
+                except TimeoutError:
+                    return _report_from_runtime(
+                        runtime, status="subscribe_timeout", error_code="timeout", journal=j,
+                    )
+                parsed = runtime.handle_inbound_text(raw)
+                if parsed.kind == "sub_ack" and parsed.ack_ok is False:
+                    return _report_from_runtime(
+                        runtime, status="subscribe_failed", error_code="venue_rejected", journal=j,
+                    )
+                channel = _okx_swap_scope_ack_channel(raw)
+                if channel is not None:
+                    seen.add(channel)
 
         # REST seed/reseed (categorical)
         reseed_pool = getattr(reseed_port, "reseed_pool", None)

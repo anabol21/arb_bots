@@ -18,6 +18,7 @@ Environment=VENUE=live
 Environment=LIVE_ORDERS=0
 Environment=BBOT_PROFILE=gear22_live_canary
 Environment=BBOT_MODE=policy
+Environment=BBOT_OKX_READONLY_SWAP_SCOPE=1
 Environment=BBOT_PRIVATE_DATA_ROOT=/data/bbot-ev2-12-prewrite/private-%i
 Environment=BBOT_PRIVATE_LOG_PATH=/var/log/spread/bbot-ev2-12-private-%i.log
 ExecStartPre=/usr/bin/mkdir -p /data/bbot-ev2-12-prewrite/private-%i /data/bbot-ev2-12-prewrite/private-status /var/log/spread

@@ -3293,6 +3293,54 @@ class W2PrivateWsTests(unittest.TestCase):
             self.assertEqual(events[-1]["outcome"], "failure")
             self.assertEqual(events[-1]["error_code"], "auth_failed")
 
+    def test_okx_swap_scope_readonly_subscription_and_argless_error(self) -> None:
+        from app.bot.private.ws_messages import build_okx_private_subscribe
+        from app.bot.private.ws_private import (
+            PrivateStreamRuntime, RestReseedResult, SequenceHealth,
+        )
+        from app.bot.private.ws_socket import FakePrivateWsSocket
+
+        symbols = tuple(f"C{i}-USDT-SWAP" for i in range(30))
+        scoped = json.loads(build_okx_private_subscribe(
+            symbols=symbols, swap_scope=True,
+        ).text)
+        self.assertEqual(scoped["args"], [
+            {"channel": "orders", "instType": "SWAP"},
+            {"channel": "positions", "instType": "SWAP"},
+        ])
+        with tempfile.TemporaryDirectory() as td:
+            journal = self._journal(td)
+            env = {
+                "VENUE": "live", "LIVE_ORDERS": "0",
+                "BBOT_PROFILE": "gear22_live_canary",
+                "BBOT_OKX_READONLY_SWAP_SCOPE": "1",
+            }
+            rt = PrivateStreamRuntime(
+                exchange="okx", environment="live", symbol_alias=symbols[0],
+                journal=journal, run_id=journal.run_id,
+                credentials=self._creds(okx=True), gate_env=env,
+                subscribe_symbols=symbols,
+            )
+            self.assertEqual(json.loads(rt.build_subscribe_message().text), scoped)
+            rt.gate_env = {**env, "LIVE_ORDERS": "1"}
+            with self.assertRaises(RuntimeError):
+                rt.build_subscribe_message()
+            rt.gate_env = env
+            rt.bind_sockets(private=FakePrivateWsSocket(), env=env)
+            rt.handle_inbound_text(json.dumps({"event": "login", "code": "0"}))
+            rt.send_subscribe()
+            rt.handle_inbound_text(json.dumps({"event": "subscribe", "code": "0"}))
+            rt.confirm_rest_reseed(RestReseedResult(matched=True))
+            self.assertTrue(rt.authenticated)
+            self.assertFalse(rt.sends_blocked)
+            error = rt.handle_inbound_text(json.dumps({
+                "event": "error", "code": "60018", "arg": None,
+            }))
+            self.assertEqual(error.kind, "sub_ack")
+            self.assertTrue(rt.authenticated)
+            self.assertTrue(rt.sends_blocked)
+            self.assertEqual(rt.sequence_state, SequenceHealth.RESEED_REQUIRED)
+
     def test_subscription_ack(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             journal = self._journal(td)
@@ -3976,6 +4024,52 @@ class W3PrivateWsReadonlyTests(unittest.TestCase):
 
     def _live_env(self) -> dict:
         return {"VENUE": "live", "LIVE_ORDERS": "0"}
+
+    def test_okx_swap_scope_requires_both_channel_acks_before_reseed(self) -> None:
+        from app.bot.private.ws_private import RestReseedResult
+        from app.bot.private.ws_readonly import run_ws_readonly_preflight
+        from app.bot.private.ws_socket import FakePrivateWsSocket
+        from app.bot.theta_trade_manager import GEAR22_HTML_TOP30
+
+        for second_frame, expected in (
+            ({"event": "subscribe", "code": "0", "arg": {"channel": "positions", "instType": "SWAP"}}, "ok"),
+            ({"event": "error", "code": "60018", "arg": None}, "subscribe_failed"),
+            (None, "subscribe_timeout"),
+        ):
+            with self.subTest(expected=expected), tempfile.TemporaryDirectory() as td:
+                socket = FakePrivateWsSocket()
+                socket.push_inbound(json.dumps({"event": "login", "code": "0"}))
+                socket.push_inbound(json.dumps({
+                    "event": "subscribe", "code": "0",
+                    "arg": {"channel": "orders", "instType": "SWAP"},
+                }))
+                if second_frame is not None:
+                    socket.push_inbound(json.dumps(second_frame))
+                report = run_ws_readonly_preflight(
+                    exchange="okx",
+                    env={
+                        **self._live_env(),
+                        "BBOT_PROFILE": "gear22_live_canary",
+                        "BBOT_OKX_READONLY_SWAP_SCOPE": "1",
+                        "BBOT_PRIVATE_DATA_ROOT": td,
+                    },
+                    private_socket=socket,
+                    rest_probe_fn=lambda **_kwargs: RestReseedResult(matched=True),
+                    credentials=W2PrivateWsTests()._creds(okx=True),
+                    load_secrets=False,
+                    coins=GEAR22_HTML_TOP30,
+                    max_cycles=1,
+                    recv_timeout_sec=0.01,
+                    heartbeat_every_sec=100.0,
+                )
+                self.assertEqual(report.status, expected)
+                subscribe = json.loads(socket.outbox[1])
+                self.assertEqual(subscribe["args"], [
+                    {"channel": "orders", "instType": "SWAP"},
+                    {"channel": "positions", "instType": "SWAP"},
+                ])
+                if expected != "ok":
+                    self.assertFalse(report.reseed_matched)
 
     def test_cli_mode_gate_requires_flag_and_live_readonly(self) -> None:
         from app.bot.private.ws_gates import (

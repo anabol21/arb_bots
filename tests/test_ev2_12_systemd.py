@@ -34,6 +34,7 @@ class Ev212SystemdTests(unittest.TestCase):
         text = (SYSTEMD / "spread-bbot-ev2-12-private@.service").read_text()
         self.assertIn("Environment=LIVE_ORDERS=0", text)
         self.assertIn("--ws-readonly", text)
+        self.assertIn("Environment=BBOT_OKX_READONLY_SWAP_SCOPE=1", text)
         self.assertIn("--status-path=/data/bbot-ev2-12-prewrite/private-status/%i.json", text)
         self.assertIn("PartOf=spread-bbot-ev2-12-prewrite.service", text)
         self.assertIn("BindsTo=spread-bbot-ev2-12-prewrite.service", text)

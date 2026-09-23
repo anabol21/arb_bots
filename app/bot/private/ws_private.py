@@ -464,7 +464,18 @@ class PrivateStreamRuntime:
             # Bybit private topics are account-wide; coin pool is client-side.
             return build_bybit_private_subscribe()
         if self.exchange == "okx":
-            return build_okx_private_subscribe(symbols=self.subscribed_natives)
+            e = self.gate_env or {}
+            swap_scope = str(e.get("BBOT_OKX_READONLY_SWAP_SCOPE") or "") == "1"
+            if swap_scope and not (
+                e.get("LIVE_ORDERS") == "0"
+                and e.get("BBOT_PROFILE") == "gear22_live_canary"
+                and self.trade_socket is None
+                and len(self.subscribed_natives) == 30
+            ):
+                raise RuntimeError("readonly swap scope gate rejected")
+            return build_okx_private_subscribe(
+                symbols=self.subscribed_natives, swap_scope=swap_scope,
+            )
         raise ValueError(f"unsupported exchange {self.exchange!r}")
 
     def build_heartbeat(self) -> WsOutboundMessage:
@@ -1235,7 +1246,12 @@ class PrivateStreamRuntime:
             # Distinguish auth vs sub via arg channel when present.
             arg = data.get("arg") if isinstance(data.get("arg"), Mapping) else {}
             if not arg:
-                return ParsedStreamEvent(kind="auth_reject", ack_ok=False)
+                # An argless error after login fails the current subscription,
+                # without rewriting a successful login as an auth failure.
+                return ParsedStreamEvent(
+                    kind="sub_ack" if self.authenticated else "auth_reject",
+                    ack_ok=False,
+                )
             return ParsedStreamEvent(kind="sub_ack", ack_ok=False)
         arg = data.get("arg") if isinstance(data.get("arg"), Mapping) else {}
         channel = str(arg.get("channel") or "")
