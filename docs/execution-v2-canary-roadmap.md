@@ -264,6 +264,11 @@ manager-journal fsync, runtime wiring and fault injection are still open;
 the live-start block remains in place.
 EV2-12B2a closes the [first K=1 trade-history directory fsync gap](task-packets/EV2-12B2a-manager-journal-directory-durability.md).
 It does not publish EV2 candidates or change the live-start block.
+EV2-12B2b adds a [durable pending handoff in the same K=1 journal](task-packets/EV2-12B2b-pending-manager-handoff.md).
+It is idempotent after single-writer restart and latches K=1 while venue
+reconciliation is outstanding; it does not publish a lifecycle or wire live
+runtime. Signed two-venue proof, pending resolution and the crash matrix
+remain open.
 
 Prepare a reviewable release without starting it.
 

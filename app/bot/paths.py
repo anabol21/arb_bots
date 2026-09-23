@@ -153,7 +153,7 @@ def theta_trades_dir(data_root: Path) -> Path:
 
 
 def theta_trades_jsonl_path(data_root: Path, event_date: str) -> Path:
-    """``{data_root}/theta_trades/event_date=YYYY-MM-DD/trades.jsonl`` — would_send only."""
+    """``{data_root}/theta_trades/event_date=YYYY-MM-DD/trades.jsonl``."""
     if _is_under_denied(data_root):
         raise RuntimeError(f"refusing theta_trades under denied path: {data_root}")
     path = data_root / "theta_trades" / f"event_date={event_date}"

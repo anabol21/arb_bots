@@ -740,7 +740,7 @@ def decide_theta_k1(
 
 
 class ThetaTradeJournalWriter:
-    """Append-only would_send trades under ``{data_root}/theta_trades/``."""
+    """Append-only K=1 lifecycle and pending EV2 evidence under theta_trades."""
 
     def __init__(self, data_root: Path) -> None:
         self.data_root = Path(data_root)
@@ -800,6 +800,7 @@ class ThetaTradeReplay:
     files_seen: int
     rows_seen: int
     lifecycle_rows: int
+    pending_ev2_candidates: int = 0
 
 
 def _replay_float(value: Any, *, field: str, optional: bool = False) -> Optional[float]:
@@ -868,6 +869,7 @@ def replay_theta_trade_history(
     position_policy: Optional[str] = None
     rows_seen = 0
     lifecycle_rows = 0
+    pending_ev2_ids: set[str] = set()
     for path in paths:
         try:
             raw = path.read_text(encoding="utf-8")
@@ -889,6 +891,22 @@ def replay_theta_trade_history(
                 raise ThetaTradeRecoveryError("unsupported_history_schema")
             event = str(row.get("event") or "").strip().lower()
             live = bool(row.get("live_send"))
+            if event == "ev2_candidate":
+                candidate_id = str(row.get("candidate_id") or "")
+                if (
+                    len(candidate_id) != 64
+                    or any(char not in "0123456789abcdef" for char in candidate_id)
+                    or row.get("candidate_status") != "pending_venue_reconciliation"
+                    or row.get("lifecycle_committed") is not False
+                    or row.get("live_send") is not False
+                    or row.get("send") is not False
+                    or row.get("would_send") is not False
+                ):
+                    raise ThetaTradeRecoveryError("invalid_ev2_candidate")
+                if candidate_id in pending_ev2_ids:
+                    raise ThetaTradeRecoveryError("duplicate_ev2_candidate")
+                pending_ev2_ids.add(candidate_id)
+                continue
             if event in {"open_attempt", "close_attempt"}:
                 if row.get("lifecycle_committed") is not False:
                     raise ThetaTradeRecoveryError("committed_attempt")
@@ -950,6 +968,7 @@ def replay_theta_trade_history(
         files_seen=len(paths),
         rows_seen=rows_seen,
         lifecycle_rows=lifecycle_rows,
+        pending_ev2_candidates=len(pending_ev2_ids),
     )
 
 
@@ -999,18 +1018,22 @@ class ThetaTradeManager:
             k=int(self.config.slot_k),
             position=self.replay.position,
         )
-        self.recovery_blocked = False
+        self.recovery_blocked = self.replay.pending_ev2_candidates > 0
         self.live_recovery_confirmed = (
             not self.live_send
             if live_recovery_confirmed is None
             else bool(live_recovery_confirmed)
         )
         restored = self.slot.position
+        replay_state = "OPEN" if restored is not None else "FLAT"
+        if self.recovery_blocked:
+            replay_state = f"{replay_state}_PENDING_EV2"
         self._log(
             "theta_trade_replay | "
             f"files={self.replay.files_seen} | rows={self.replay.rows_seen} | "
             f"lifecycle={self.replay.lifecycle_rows} | "
-            f"state={'OPEN' if restored is not None else 'FLAT'} | "
+            f"pending_ev2={self.replay.pending_ev2_candidates} | "
+            f"state={replay_state} | "
             f"trade_id={restored.trade_id if restored is not None else '-'} | "
             f"coin={restored.base_coin if restored is not None else '-'} | "
             f"side={restored.side if restored is not None else '-'}"
