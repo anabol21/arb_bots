@@ -255,6 +255,8 @@ control-plane work below is EV2-12D.
 
 EV2-12A1 has a narrow [synthetic exposure fence and legacy live-start block](task-packets/EV2-12A-synthetic-exposure-fence.md). It does not complete
 EV2-12A or authorize live orders.
+EV2-12A2 adds the [fill-authoritative manager publication contract](task-packets/EV2-12A2-manager-exposure-projection.md);
+it remains pure until EV2-12B provides durable runtime wiring.
 
 Prepare a reviewable release without starting it.
 
