@@ -864,6 +864,39 @@ class ExecutionEngine:
             return "wal_capacity"
         return None
 
+    def _no_order_audit_gate(
+        self, intent: TradeIntent, readiness: ReadinessSnapshot,
+    ) -> Optional[str]:
+        """Risk/private/WAL gate for prewrite evidence with no venue exposure.
+
+        This gate is only reachable through ``audit_intent`` and a
+        network-incapable transport. It does not relax ``submit``: live opens
+        still require current venue reconciliation.
+        """
+        now = self._now()
+        if now >= intent.expiry_mono_ns:
+            return "ttl_expired"
+        if intent.coin not in self._policy.allowed_coins:
+            return "coin_not_allowed"
+        if intent.notional_usdt <= 0:
+            return "notional_invalid"
+        if intent.notional_usdt > self._policy.max_notional_usdt:
+            return "notional_exceeds_cap"
+        if readiness.pause:
+            return "pause"
+        if readiness.kill_switch:
+            return "kill_switch"
+        if not readiness.bybit_private_ready or not readiness.okx_private_ready:
+            return "private_stream_not_ready"
+        if self._restart_unproven or not opens_allowed(self._state):
+            return "opens_not_allowed"
+        health = self._wal.health()
+        if health.writer_unhealthy or health.integrity_unhealthy or health.hard_full:
+            return "wal_unhealthy"
+        if not self._wal.can_admit_no_order_audit(2):
+            return "wal_capacity" if health.queue_depth else "wal_blocks_opens"
+        return None
+
     def _close_gate(self, intent: TradeIntent) -> Optional[str]:
         if self._state.status is not SpreadStatus.OPEN:
             return "close_not_open"
@@ -1240,9 +1273,7 @@ class ExecutionEngine:
             lease, lease_reason = self._readiness_fence.acquire_no_order()
             if lease is None:
                 return result(lease_reason or "readiness_changed")
-            gate_reason = self._open_gate(
-                intent, lease.snapshot, require_trade_socket=False,
-            )
+            gate_reason = self._no_order_audit_gate(intent, lease.snapshot)
             if gate_reason is not None:
                 return result(gate_reason)
             try:

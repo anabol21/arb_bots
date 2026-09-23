@@ -396,9 +396,42 @@ class BotRuntime:
         )
 
         if shadow_runtime_enabled():
+            audit_bridge_factory = None
+            audit_enabled = str(os.environ.get("BBOT_EV2_AUDIT") or "").strip().lower() in {
+                "1", "true", "yes", "on",
+            }
+            if audit_enabled:
+                from app.bot.execution.no_order_audit_lane import NoOrderAuditBridge
+                from app.bot.private.ws_trivial_dual_leg import parse_inst_id_code_env
+
+                if tuple(self.coins) != GEAR22_HTML_TOP30:
+                    raise RuntimeError("ev2_no_order_audit_requires_frozen_top30")
+                status_dir_raw = str(os.environ.get("BBOT_PRIVATE_STATUS_DIR") or "").strip()
+                try:
+                    status_age_sec = float(
+                        os.environ.get("BBOT_PRIVATE_STATUS_MAX_AGE_SEC") or "15"
+                    )
+                except ValueError as exc:
+                    raise RuntimeError("invalid_private_status_age") from exc
+                if not 1.0 <= status_age_sec <= 30.0:
+                    raise RuntimeError("invalid_private_status_age")
+                okx_inst_id_codes = parse_inst_id_code_env(
+                    os.environ.get("BBOT_OKX_INST_ID_CODES")
+                )
+                audit_bridge_factory = lambda loop, run_id: NoOrderAuditBridge(
+                    loop=loop,
+                    data_root=self.data_root,
+                    run_id=run_id,
+                    coins=self.coins,
+                    universe=self.universe,
+                    okx_inst_id_codes=okx_inst_id_codes,
+                    status_dir=Path(status_dir_raw),
+                    status_max_age_ns=int(status_age_sec * 1_000_000_000),
+                )
             self.execution_shadow = ExecutionShadowRuntime(
                 data_root=self.data_root,
                 log=lambda m: self.log.info(m),
+                audit_bridge_factory=audit_bridge_factory,
                 initial_position=(
                     self.theta_trade.slot.position
                     if self.theta_trade is not None

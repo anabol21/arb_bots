@@ -58,6 +58,7 @@ from app.bot.theta_trade_manager import (
     OpenPosition,
     SlotState,
     ThetaTradeConfig,
+    assert_synthetic_policy_gates,
 )
 
 SCHEMA_VERSION = "bbot.execution.shadow_runtime.v1"
@@ -66,6 +67,7 @@ ENV_TARGET_VPS = "BBOT_EV2_TARGET_VPS"
 ENV_PROBE_DELAY_SEC = "BBOT_EV2_PROBE_DELAY_SEC"
 ENV_COUNTED_N = "BBOT_EV2_COUNTED_N"
 ENV_WARMUP_N = "BBOT_EV2_WARMUP_N"
+ENV_AUDIT_ENABLED = "BBOT_EV2_AUDIT"
 DEFAULT_PROBE_DELAY_SEC = 60.0
 QUEUE_MAX = 4096
 
@@ -101,6 +103,19 @@ def assert_shadow_runtime_gates(
         raise ShadowRuntimeGateError("EV2 shadow requires LIVE_ORDERS=0")
     if _truthy(e.get("BBOT_THETA_LIVE_SEND")):
         raise ShadowRuntimeGateError("EV2 shadow requires BBOT_THETA_LIVE_SEND=0")
+    if _truthy(e.get(ENV_AUDIT_ENABLED)):
+        if normalized != "gear22_would_send":
+            raise ShadowRuntimeGateError("no-order audit requires gear22_would_send")
+        if not shadow_runtime_enabled(e):
+            raise ShadowRuntimeGateError("no-order audit requires EV2 shadow")
+        if str(e.get("BBOT_POLICY_MODE") or "").strip().lower() != "synthetic_roll_v1":
+            raise ShadowRuntimeGateError("no-order audit requires synthetic policy")
+        if not str(e.get("BBOT_PRIVATE_STATUS_DIR") or "").strip():
+            raise ShadowRuntimeGateError("no-order audit requires private status directory")
+        try:
+            assert_synthetic_policy_gates(e)
+        except Exception as exc:
+            raise ShadowRuntimeGateError("no-order audit policy gate rejected") from exc
 
 
 class _JsonlQueue:
@@ -291,6 +306,7 @@ class ExecutionShadowRuntime:
         log: Callable[[str], None],
         env: Optional[Mapping[str, str]] = None,
         initial_position: Optional[OpenPosition] = None,
+        audit_bridge_factory: Optional[Callable[[asyncio.AbstractEventLoop, str], Any]] = None,
     ) -> None:
         self.env = dict(env or os.environ)
         self.target_vps = _truthy(self.env.get(ENV_TARGET_VPS))
@@ -318,6 +334,11 @@ class ExecutionShadowRuntime:
         self._divergences = 0
         self._lifecycle_drops = 0
         self._last_loop_target_ns = 0
+        self._audit_bridge_factory = audit_bridge_factory
+        self._audit_bridge: Any = None
+        self._audit_attempts = 0
+        self._audit_passes = 0
+        self._audit_rejections: dict[str, int] = {}
 
     @property
     def summary(self) -> dict[str, Any]:
@@ -339,6 +360,11 @@ class ExecutionShadowRuntime:
             "policy_id": self.policy_id,
             "target_vps_gate_eligible": self.target_vps,
             "restored_trade_id": self.restored_trade_id,
+            "no_order_audit": {
+                "attempts": self._audit_attempts,
+                "passes": self._audit_passes,
+                "rejections": dict(self._audit_rejections),
+            },
         }
 
     def _restore_open_position(self, position: OpenPosition) -> None:
@@ -410,6 +436,8 @@ class ExecutionShadowRuntime:
         if self._started:
             return
         loop = asyncio.get_running_loop()
+        if self._audit_bridge_factory is not None:
+            self._audit_bridge = self._audit_bridge_factory(loop, self.run_id)
         warmup_n = max(0, int(self.env.get(ENV_WARMUP_N) or DEFAULT_WARMUP_N))
         counted_n = max(1, int(self.env.get(ENV_COUNTED_N) or DEFAULT_COUNTED_N))
         self.hot_path = ShadowHotPath(
@@ -451,6 +479,9 @@ class ExecutionShadowRuntime:
         self._tasks.clear()
         self.writer.emit(self.summary)
         await self.writer.close()
+        if self._audit_bridge is not None:
+            self._audit_bridge.close()
+            self._audit_bridge = None
         self._started = False
 
     async def before_trade(
@@ -476,6 +507,25 @@ class ExecutionShadowRuntime:
         sample = None
         if tick.intent is not None:
             sample = (await self.hot_path.probe(tick.intent)).to_public_dict()
+            if (
+                self._audit_bridge is not None
+                and tick.intent.action is IntentAction.OPEN
+            ):
+                audit = await self._audit_bridge.audit(tick.intent, quotes)
+                self._audit_attempts += 1
+                if audit.passed:
+                    self._audit_passes += 1
+                else:
+                    code = audit.reason_code or "audit_not_passed"
+                    self._audit_rejections[code] = self._audit_rejections.get(code, 0) + 1
+                self.writer.emit({
+                    "schema_version": SCHEMA_VERSION,
+                    "event": "no_order_prewrite_audit",
+                    "run_id": self.run_id,
+                    "audit": audit.to_public_dict(),
+                    "orders_sent": 0,
+                    "trade_socket_bound": False,
+                })
         self.writer.emit(
             {
                 "schema_version": SCHEMA_VERSION,

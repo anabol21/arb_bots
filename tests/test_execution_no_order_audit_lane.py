@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from unittest.mock import patch
 
 from app.bot.execution.engine import ExecutionEngine
 from app.bot.execution.no_order_audit_lane import NoOrderAuditLane
+from app.bot.execution.no_order_audit_lane import NoOrderAuditBridge
+from app.bot.stub_broker import InstrumentMeta
 from app.bot.execution.transport import ExecutionTransport, NoOrderTradeSocket, unsigned_frame_finalizer
 from app.bot.execution.wal import WalError
 from tests.test_execution_engine import (
@@ -15,10 +18,35 @@ from tests.test_execution_engine import (
 
 
 class NoOrderAuditLaneTests(EngineHarness):
+    async def test_bridge_uses_topology_metadata_and_stub_size_rounding(self) -> None:
+        meta = InstrumentMeta(
+            base_coin="BTC", okx_symbol="BTC-USDT-SWAP", bybit_symbol="BTCUSDT",
+            okx_lot_size=0.01, okx_min_size=0.01,
+            bybit_qty_step=0.001, bybit_min_order_qty=0.001,
+        )
+        bridge = NoOrderAuditBridge(
+            loop=self.loop, data_root=Path(self.tmp.name), run_id=RUN_ID,
+            coins=("BTC",), universe={"BTC": meta},
+            okx_inst_id_codes={"BTC-USDT-SWAP": 193761},
+            status_dir=Path(self.tmp.name) / "private-status",
+            status_max_age_ns=15_000_000_000,
+        )
+        try:
+            plans = bridge._build_plans(_intent(), {"BTC": {
+                "okx": {"ask_price": 100.0, "bid_price": 99.0},
+                "bybit": {"bid_price": 100.2, "ask_price": 101.0},
+            }})
+            self.assertEqual([(plan.venue.value, plan.side, str(plan.quantity)) for plan in plans], [
+                ("bybit", "sell", "0.199"),
+                ("okx", "buy", "0.2"),
+            ])
+        finally:
+            bridge.close()
+
     def make_lane(self, source):
         self.audit_bybit = NoOrderTradeSocket(self.loop)
         self.audit_okx = NoOrderTradeSocket(self.loop)
-        self.audit_wal = _ready_wal(self.wal_path)
+        self.audit_wal = _ready_wal(self.wal_path, mark=False)
         transport = ExecutionTransport(
             self.loop,
             bybit_socket=self.audit_bybit,

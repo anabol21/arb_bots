@@ -1006,6 +1006,29 @@ class ExecutionWal:
             integrity_unhealthy=self._integrity_unhealthy,
         )
 
+    def can_admit_no_order_audit(self, count: int) -> bool:
+        """Capacity/read-only health gate that does not assert venue reconciliation.
+
+        Audit-only events cannot dispatch or publish exposure. The WAL must
+        still have a verified prefix and healthy writer before it can accept
+        them. Live `submit()` continues to require venue reconciliation.
+        """
+        return bool(
+            self._scanned
+            and not self._writer_unhealthy
+            and not self._integrity_unhealthy
+            and admission_capacity_ok(
+                queue_depth=len(self._queue),
+                max_queue=self._max_queue,
+                reserved_tail=self._reserved_tail,
+                count=count,
+                open_intent=True,
+                scanned=self._scanned,
+                hard_full=self._hard_full,
+                integrity_unhealthy=self._integrity_unhealthy,
+            )
+        )
+
     def mark_venue_reconciled(self, token: object) -> Venue:
         if not isinstance(token, str) or not token:
             raise WalError("invalid_reconciliation_token")

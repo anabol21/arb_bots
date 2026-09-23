@@ -92,6 +92,27 @@ class ShadowRuntimeGateTests(unittest.TestCase):
             with self.assertRaises(ShadowRuntimeGateError):
                 assert_shadow_runtime_gates("gear22_would_send", env)
 
+    def test_prewrite_audit_is_only_armed_for_synthetic_no_order(self) -> None:
+        env = {
+            "BBOT_EV2_SHADOW": "1",
+            "BBOT_EV2_AUDIT": "1",
+            "BBOT_PRIVATE_STATUS_DIR": "/tmp/private-status",
+            "BBOT_POLICY_MODE": "synthetic_roll_v1",
+            "BBOT_PROFILE": "gear22_would_send",
+            "BBOT_BROKER": "stub",
+            "LIVE_ORDERS": "0",
+            "BBOT_THETA_LIVE_SEND": "0",
+        }
+        assert_shadow_runtime_gates("gear22_would_send", env)
+        for override in (
+            {"LIVE_ORDERS": "1"},
+            {"BBOT_BROKER": "private_live"},
+            {"BBOT_THETA_LIVE_SEND": "1"},
+            {"BBOT_POLICY_MODE": "frozen"},
+        ):
+            with self.assertRaises(ShadowRuntimeGateError):
+                assert_shadow_runtime_gates("gear22_would_send", {**env, **override})
+
     def test_private_readonly_pool_has_no_trade_socket_or_orders(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)

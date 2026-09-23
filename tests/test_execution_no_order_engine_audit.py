@@ -32,10 +32,10 @@ from tests.test_execution_engine import (
 
 
 class NoOrderEngineAuditTests(EngineHarness):
-    def audit_engine(self, *, readiness=None, finalizer=unsigned_frame_finalizer):
+    def audit_engine(self, *, readiness=None, finalizer=unsigned_frame_finalizer, reconciled=True):
         self.audit_bybit = NoOrderTradeSocket(self.loop)
         self.audit_okx = NoOrderTradeSocket(self.loop)
-        self.audit_wal = _ready_wal(self.wal_path)
+        self.audit_wal = _ready_wal(self.wal_path, mark=reconciled)
         transport = ExecutionTransport(
             self.loop,
             bybit_socket=self.audit_bybit,
@@ -61,6 +61,7 @@ class NoOrderEngineAuditTests(EngineHarness):
         self.assertIsNone(first.reason_code)
         self.assertEqual(engine.state.status, SpreadStatus.IDLE)
         self.assertEqual((self.audit_bybit.write_attempts, self.audit_okx.write_attempts), (0, 0))
+
         events = [item.event for item in self.audit_wal._queue]
         self.assertEqual([event.event_type for event in events], [
             ExecutionEventType.INTENT_ACCEPTED,
@@ -87,6 +88,18 @@ class NoOrderEngineAuditTests(EngineHarness):
             record.event.event_type is ExecutionEventType.REQUEST_SENT
             for record in replay.records
         ))
+
+    async def test_no_order_audit_does_not_fabricate_venue_reconciliation(self) -> None:
+        engine = self.audit_engine(reconciled=False)
+        result = await engine.audit_intent(_intent())
+        self.assertTrue(result.wal_accepted)
+        self.assertTrue(result.prewrite.ready)
+        self.assertFalse(self.audit_wal.health().venue_reconciliation_complete)
+        self.audit_wal.drain_all()
+        replay = self.audit_wal.replay()
+        self.assertTrue(replay.integrity_ok)
+        self.assertEqual(replay.state.status, SpreadStatus.IDLE)
+        self.assertTrue(replay.requires_venue_reconciliation)
 
     async def test_trade_submit_still_requires_real_trade_readiness(self) -> None:
         engine = self.audit_engine()
