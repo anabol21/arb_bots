@@ -273,6 +273,10 @@ EV2-12C1 adds a [pure native-quantity comparator](task-packets/EV2-12C1-native-q
 for both venue legs and declared pool orders. Its match is not signed,
 fresh, account-owned or plan-bound evidence; C2 and B2c remain required
 before pending resolution or K=1 publication.
+EV2-12C2a adds a [signed read-only WAL-bound quantity probe](task-packets/EV2-12C2a-signed-quantity-probe.md).
+It is not runtime-wired and always returns `publication_ready=false` while
+account UID, private reseed, OKX completeness and coherent recheck remain
+unproven. No live capability changes.
 
 Prepare a reviewable release without starting it.
 
