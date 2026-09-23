@@ -1,0 +1,173 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<title>Bybit and OKX cash ledger</title>
+<style>
+  body { font-family: ui-sans-serif, system-ui, sans-serif; margin: 24px; color: #111; max-width: 1200px; }
+  h1 { font-size: 1.4rem; }
+  h2 { font-size: 1.05rem; margin-top: 1.6rem; }
+  table { border-collapse: collapse; width: 100%; font-size: 0.78rem; }
+  th, td { border-bottom: 1px solid #eee; padding: 4px 6px; text-align: left; }
+  th { background: #f6f6f6; }
+  .note { color: #333; font-size: 0.9rem; line-height: 1.45; }
+  .warn { background: #fff8e6; border: 1px solid #e6d08a; padding: 10px 12px; }
+  svg { max-width: 100%; height: auto; }
+</style>
+</head>
+<body>
+<h1>Bybit and OKX cash, frozen gear-2.2 policy</h1>
+<div class="warn note">
+This is a perp-wallet ledger on the 1 Hz last tick. It is not a profitability
+claim and not live. Policy gates are unchanged, including
+<code>fee_round_trip_pp = 0.30</code>. Ledger taker fees are Bybit 0.10% and
+OKX 0.05% on each fill. <code>potential_pp</code> is listed in the CSV and is
+not added into these balances.
+</div>
+<p class='note'>Replay input is the 1 Hz feature hive (gear22_backtest_features_by_date) via sweep.store_from_hive + run_combo on IS 2026-08-10..2026-08-27 and OOS 2026-08-28..2026-09-13. Lean ticks / 1 Hz books are only an optional L1 attachment for two-venue cash. Feature hive trade list is not extended past its dates.</p><p class='note'>Local lean-tick coverage: UTC [2026-07-22T11:05:00+00:00, 2026-08-27T11:50:00+00:00). 1 Hz books sidecar: /Users/mishatrubik/Desktop/spread/output/gear22_books_1hz (lean first, part-*.parquet fills gaps). Where a (coin, ts_s) has no matching last tick, that round is price_mismatch / not booked. 1 Hz policy trades still exist on OOS; missing L1 means no Bybit/OKX cash, not &#x27;no backtest&#x27;.</p><p class='note'>Cash is a separate perp-wallet ledger. potential_pp is listed beside cash in the CSV and is never added into these balances. This is 1 Hz accounting, not profitability, not live.</p><p class='note'>p50_open=0.50 is the known occupancy cliff on this contour; a higher cash path there is not evidence of a better policy.</p>
+<h2>is frozen fixed100</h2>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1040 240" width="1040" height="240">
+<text x="56" y="16" font-size="12" font-family="sans-serif">is frozen fixed100</text>
+<line x1="56" y1="28" x2="56" y2="204" stroke="#ccc"/>
+<line x1="56" y1="204" x2="1024" y2="204" stroke="#ccc"/>
+<text x="50" y="208.0" text-anchor="end" font-size="10" fill="#444">14.4</text>
+<text x="50" y="120.0" text-anchor="end" font-size="10" fill="#444">113.4</text>
+<text x="50" y="32.0" text-anchor="end" font-size="10" fill="#444">212.3</text>
+<polyline fill="none" stroke="#4c6ef5" stroke-width="2" points="56.0,127.9 82.2,128.1 108.3,126.1 134.5,125.4 160.6,125.0 186.8,128.8 213.0,131.5 239.1,132.3 265.3,139.6 291.5,141.0 317.6,140.3 343.8,134.4 369.9,122.9 396.1,107.9 422.3,107.0 448.4,117.1 474.6,120.9 500.8,103.0 526.9,95.8 553.1,92.1 579.2,85.5 605.4,69.3 631.6,76.5 657.7,75.1 683.9,70.4 710.1,57.8 736.2,54.4 762.4,52.0 788.5,52.8 814.7,48.6 840.9,50.1 867.0,51.1 893.2,47.6 919.4,44.9 945.5,36.6 971.7,35.6 997.8,30.7 1024.0,28.0"/>
+<polyline fill="none" stroke="#c92a2a" stroke-width="2" points="56.0,127.9 82.2,127.4 108.3,129.3 134.5,129.7 160.6,129.5 186.8,125.5 213.0,122.2 239.1,121.2 265.3,113.6 291.5,112.0 317.6,112.5 343.8,117.5 369.9,128.8 396.1,138.5 422.3,136.8 448.4,126.5 474.6,122.5 500.8,140.3 526.9,147.3 553.1,150.8 579.2,157.2 605.4,167.5 631.6,159.2 657.7,160.4 683.9,164.9 710.1,177.4 736.2,180.4 762.4,182.6 788.5,181.7 814.7,185.5 840.9,183.8 867.0,182.6 893.2,185.8 919.4,188.3 945.5,196.3 971.7,196.9 997.8,201.6 1024.0,204.0"/>
+<text x="280" y="16" font-size="11" fill="#4c6ef5" font-family="sans-serif">Bybit cash</text>
+<text x="380" y="16" font-size="11" fill="#c92a2a" font-family="sans-serif">OKX cash</text>
+</svg>
+<h2>is frozen fixed100_equalize</h2>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1040 240" width="1040" height="240">
+<text x="56" y="16" font-size="12" font-family="sans-serif">is frozen fixed100_equalize</text>
+<line x1="56" y1="28" x2="56" y2="204" stroke="#ccc"/>
+<line x1="56" y1="204" x2="1024" y2="204" stroke="#ccc"/>
+<text x="50" y="208.0" text-anchor="end" font-size="10" fill="#444">100.0</text>
+<text x="50" y="120.0" text-anchor="end" font-size="10" fill="#444">106.7</text>
+<text x="50" y="32.0" text-anchor="end" font-size="10" fill="#444">113.4</text>
+<polyline fill="none" stroke="#4c6ef5" stroke-width="2" points="56.0,204.0 82.2,202.6 108.3,201.1 134.5,199.1 160.6,194.8 186.8,193.2 213.0,188.5 239.1,187.0 265.3,185.1 291.5,183.6 317.6,182.1 343.8,175.5 369.9,174.0 396.1,135.1 422.3,115.8 448.4,114.1 474.6,112.5 500.8,111.6 526.9,109.8 553.1,108.6 579.2,107.4 605.4,63.5 631.6,55.6 657.7,54.1 683.9,52.8 710.1,51.8 736.2,48.9 762.4,47.5 788.5,46.1 814.7,43.5 840.9,41.9 867.0,40.5 893.2,38.6 919.4,37.0 945.5,34.7 971.7,31.5 997.8,30.2 1024.0,28.0"/>
+<polyline fill="none" stroke="#c92a2a" stroke-width="2" points="56.0,204.0 82.2,202.6 108.3,201.1 134.5,199.1 160.6,194.8 186.8,193.2 213.0,188.5 239.1,187.0 265.3,185.1 291.5,183.6 317.6,182.1 343.8,175.5 369.9,174.0 396.1,135.1 422.3,115.8 448.4,114.1 474.6,112.5 500.8,111.6 526.9,109.8 553.1,108.6 579.2,107.4 605.4,63.5 631.6,55.6 657.7,54.1 683.9,52.8 710.1,51.8 736.2,48.9 762.4,47.5 788.5,46.1 814.7,43.5 840.9,41.9 867.0,40.5 893.2,38.6 919.4,37.0 945.5,34.7 971.7,31.5 997.8,30.2 1024.0,28.0"/>
+<text x="280" y="16" font-size="11" fill="#4c6ef5" font-family="sans-serif">Bybit cash</text>
+<text x="380" y="16" font-size="11" fill="#c92a2a" font-family="sans-serif">OKX cash</text>
+</svg>
+<h2>is frozen balance_equalize</h2>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1040 240" width="1040" height="240">
+<text x="56" y="16" font-size="12" font-family="sans-serif">is frozen balance_equalize</text>
+<line x1="56" y1="28" x2="56" y2="204" stroke="#ccc"/>
+<line x1="56" y1="204" x2="1024" y2="204" stroke="#ccc"/>
+<text x="50" y="208.0" text-anchor="end" font-size="10" fill="#444">100.0</text>
+<text x="50" y="120.0" text-anchor="end" font-size="10" fill="#444">107.1</text>
+<text x="50" y="32.0" text-anchor="end" font-size="10" fill="#444">114.2</text>
+<polyline fill="none" stroke="#4c6ef5" stroke-width="2" points="56.0,204.0 82.2,202.7 108.3,201.3 134.5,199.4 160.6,195.3 186.8,193.8 213.0,189.3 239.1,187.9 265.3,186.0 291.5,184.6 317.6,183.2 343.8,176.9 369.9,175.4 396.1,137.8 422.3,118.7 448.4,117.0 474.6,115.4 500.8,114.5 526.9,112.7 553.1,111.4 579.2,110.2 605.4,65.7 631.6,57.4 657.7,55.8 683.9,54.4 710.1,53.3 736.2,50.3 762.4,48.8 788.5,47.3 814.7,44.6 840.9,42.9 867.0,41.4 893.2,39.4 919.4,37.6 945.5,35.2 971.7,31.8 997.8,30.4 1024.0,28.0"/>
+<polyline fill="none" stroke="#c92a2a" stroke-width="2" points="56.0,204.0 82.2,202.7 108.3,201.3 134.5,199.4 160.6,195.3 186.8,193.8 213.0,189.3 239.1,187.9 265.3,186.0 291.5,184.6 317.6,183.2 343.8,176.9 369.9,175.4 396.1,137.8 422.3,118.7 448.4,117.0 474.6,115.4 500.8,114.5 526.9,112.7 553.1,111.4 579.2,110.2 605.4,65.7 631.6,57.4 657.7,55.8 683.9,54.4 710.1,53.3 736.2,50.3 762.4,48.8 788.5,47.3 814.7,44.6 840.9,42.9 867.0,41.4 893.2,39.4 919.4,37.6 945.5,35.2 971.7,31.8 997.8,30.4 1024.0,28.0"/>
+<text x="280" y="16" font-size="11" fill="#4c6ef5" font-family="sans-serif">Bybit cash</text>
+<text x="380" y="16" font-size="11" fill="#c92a2a" font-family="sans-serif">OKX cash</text>
+</svg>
+<h2>oos frozen fixed100</h2>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1040 240" width="1040" height="240">
+<text x="56" y="16" font-size="12" font-family="sans-serif">oos frozen fixed100</text>
+<line x1="56" y1="28" x2="56" y2="204" stroke="#ccc"/>
+<line x1="56" y1="204" x2="1024" y2="204" stroke="#ccc"/>
+<text x="50" y="208.0" text-anchor="end" font-size="10" fill="#444">89.3</text>
+<text x="50" y="120.0" text-anchor="end" font-size="10" fill="#444">106.3</text>
+<text x="50" y="32.0" text-anchor="end" font-size="10" fill="#444">123.3</text>
+<polyline fill="none" stroke="#4c6ef5" stroke-width="2" points="56.0,148.5 69.4,134.5 82.9,186.6 96.3,188.6 109.8,187.7 123.2,185.3 136.7,185.9 150.1,188.3 163.6,193.7 177.0,197.1 190.4,192.3 203.9,195.8 217.3,204.0 230.8,190.1 244.2,197.2 257.7,193.2 271.1,185.3 284.6,190.7 298.0,155.8 311.4,190.7 324.9,193.5 338.3,203.1 351.8,193.0 365.2,188.6 378.7,203.0 392.1,195.5 405.6,107.8 419.0,100.8 432.4,77.3 445.9,64.0 459.3,76.1 472.8,78.2 486.2,71.1 499.7,71.4 513.1,77.6 526.6,78.7 540.0,71.0 553.4,108.8 566.9,112.4 580.3,126.0 593.8,132.4 607.2,107.9 620.7,111.3 634.1,120.7 647.6,113.7 661.0,116.8 674.4,123.2 687.9,108.2 701.3,114.0 714.8,127.6 728.2,137.9 741.7,143.3 755.1,152.0 768.6,150.7 782.0,156.4 795.4,145.1 808.9,159.4 822.3,160.8 835.8,162.3 849.2,146.8 862.7,150.8 876.1,145.1 889.6,143.1 903.0,150.6 916.4,164.1 929.9,167.6 943.3,164.9 956.8,165.1 970.2,161.1 983.7,158.4 997.1,154.3 1010.6,158.4 1024.0,158.9"/>
+<polyline fill="none" stroke="#c92a2a" stroke-width="2" points="56.0,148.5 69.4,161.5 82.9,105.4 96.3,102.1 109.8,101.6 123.2,102.6 136.7,100.8 150.1,96.9 163.6,89.9 177.0,85.1 190.4,88.5 203.9,83.5 217.3,73.9 230.8,86.8 244.2,78.5 257.7,81.2 271.1,86.5 284.6,80.0 298.0,113.9 311.4,76.9 324.9,72.6 338.3,61.8 351.8,70.7 365.2,73.9 378.7,58.4 392.1,64.4 405.6,150.1 419.0,155.6 432.4,177.9 445.9,189.6 459.3,176.4 472.8,172.5 486.2,177.4 499.7,173.8 513.1,166.1 526.6,163.9 540.0,170.3 553.4,131.4 566.9,126.7 580.3,111.7 593.8,103.6 607.2,127.0 620.7,122.5 634.1,111.9 647.6,117.2 661.0,112.8 674.4,105.2 687.9,117.9 701.3,110.7 714.8,95.1 728.2,83.7 741.7,76.4 755.1,66.3 768.6,65.5 782.0,58.6 795.4,68.2 808.9,52.3 822.3,49.5 835.8,46.6 849.2,60.8 862.7,55.5 876.1,59.4 889.6,59.4 903.0,49.6 916.4,34.7 929.9,29.4 943.3,30.7 956.8,29.1 970.2,31.7 983.7,33.1 997.1,33.2 1010.6,28.0 1024.0,28.3"/>
+<text x="280" y="16" font-size="11" fill="#4c6ef5" font-family="sans-serif">Bybit cash</text>
+<text x="380" y="16" font-size="11" fill="#c92a2a" font-family="sans-serif">OKX cash</text>
+</svg>
+<h2>oos frozen fixed100_equalize</h2>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1040 240" width="1040" height="240">
+<text x="56" y="16" font-size="12" font-family="sans-serif">oos frozen fixed100_equalize</text>
+<line x1="56" y1="28" x2="56" y2="204" stroke="#ccc"/>
+<line x1="56" y1="204" x2="1024" y2="204" stroke="#ccc"/>
+<text x="50" y="208.0" text-anchor="end" font-size="10" fill="#444">100.0</text>
+<text x="50" y="120.0" text-anchor="end" font-size="10" fill="#444">105.3</text>
+<text x="50" y="32.0" text-anchor="end" font-size="10" fill="#444">110.7</text>
+<polyline fill="none" stroke="#4c6ef5" stroke-width="2" points="56.0,204.0 69.4,202.3 82.9,195.8 96.3,193.8 109.8,191.6 123.2,189.4 136.7,187.3 150.1,185.2 163.6,182.5 177.0,180.3 190.4,178.0 203.9,175.7 217.3,173.4 230.8,171.8 244.2,169.9 257.7,168.0 271.1,163.8 284.6,162.1 298.0,160.3 311.4,157.0 324.9,154.8 338.3,152.9 351.8,150.9 365.2,149.1 378.7,147.2 392.1,144.8 405.6,141.7 419.0,139.4 432.4,137.3 445.9,134.9 459.3,133.1 472.8,130.3 486.2,126.7 499.7,121.5 513.1,119.2 526.6,117.4 540.0,115.2 553.4,113.5 566.9,111.7 580.3,109.4 593.8,106.9 607.2,105.2 620.7,103.3 634.1,101.5 647.6,98.8 661.0,96.8 674.4,94.7 687.9,91.2 701.3,88.9 714.8,85.8 728.2,83.8 741.7,80.9 755.1,78.7 768.6,75.3 782.0,73.5 795.4,70.8 808.9,68.1 822.3,65.9 835.8,63.6 849.2,61.8 862.7,59.6 876.1,56.7 889.6,53.7 903.0,49.9 916.4,47.7 929.9,44.8 943.3,42.7 956.8,40.5 970.2,38.3 983.7,36.1 997.1,29.7 1010.6,28.0 1024.0,29.6"/>
+<polyline fill="none" stroke="#c92a2a" stroke-width="2" points="56.0,204.0 69.4,202.3 82.9,195.8 96.3,193.8 109.8,191.6 123.2,189.4 136.7,187.3 150.1,185.2 163.6,182.5 177.0,180.3 190.4,178.0 203.9,175.7 217.3,173.4 230.8,171.8 244.2,169.9 257.7,168.0 271.1,163.8 284.6,162.1 298.0,160.3 311.4,157.0 324.9,154.8 338.3,152.9 351.8,150.9 365.2,149.1 378.7,147.2 392.1,144.8 405.6,141.7 419.0,139.4 432.4,137.3 445.9,134.9 459.3,133.1 472.8,130.3 486.2,126.7 499.7,121.5 513.1,119.2 526.6,117.4 540.0,115.2 553.4,113.5 566.9,111.7 580.3,109.4 593.8,106.9 607.2,105.2 620.7,103.3 634.1,101.5 647.6,98.8 661.0,96.8 674.4,94.7 687.9,91.2 701.3,88.9 714.8,85.8 728.2,83.8 741.7,80.9 755.1,78.7 768.6,75.3 782.0,73.5 795.4,70.8 808.9,68.1 822.3,65.9 835.8,63.6 849.2,61.8 862.7,59.6 876.1,56.7 889.6,53.7 903.0,49.9 916.4,47.7 929.9,44.8 943.3,42.7 956.8,40.5 970.2,38.3 983.7,36.1 997.1,29.7 1010.6,28.0 1024.0,28.8"/>
+<text x="280" y="16" font-size="11" fill="#4c6ef5" font-family="sans-serif">Bybit cash</text>
+<text x="380" y="16" font-size="11" fill="#c92a2a" font-family="sans-serif">OKX cash</text>
+</svg>
+<h2>oos frozen balance_equalize</h2>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1040 240" width="1040" height="240">
+<text x="56" y="16" font-size="12" font-family="sans-serif">oos frozen balance_equalize</text>
+<line x1="56" y1="28" x2="56" y2="204" stroke="#ccc"/>
+<line x1="56" y1="204" x2="1024" y2="204" stroke="#ccc"/>
+<text x="50" y="208.0" text-anchor="end" font-size="10" fill="#444">100.0</text>
+<text x="50" y="120.0" text-anchor="end" font-size="10" fill="#444">105.6</text>
+<text x="50" y="32.0" text-anchor="end" font-size="10" fill="#444">111.3</text>
+<polyline fill="none" stroke="#4c6ef5" stroke-width="2" points="56.0,204.0 69.4,202.4 82.9,196.2 96.3,194.3 109.8,192.2 123.2,190.1 136.7,188.1 150.1,186.1 163.6,183.5 177.0,181.4 190.4,179.2 203.9,177.0 217.3,174.8 230.8,173.2 244.2,171.4 257.7,169.5 271.1,165.5 284.6,163.7 298.0,162.1 311.4,158.8 324.9,156.7 338.3,154.9 351.8,152.9 365.2,151.1 378.7,149.2 392.1,146.9 405.6,143.8 419.0,141.6 432.4,139.5 445.9,137.2 459.3,135.4 472.8,132.6 486.2,129.0 499.7,123.9 513.1,121.6 526.6,119.7 540.0,117.6 553.4,115.9 566.9,114.1 580.3,111.8 593.8,109.2 607.2,107.5 620.7,105.6 634.1,103.8 647.6,101.1 661.0,99.0 674.4,97.0 687.9,93.3 701.3,91.0 714.8,87.9 728.2,85.9 741.7,82.9 755.1,80.6 768.6,77.2 782.0,75.3 795.4,72.5 808.9,69.8 822.3,67.5 835.8,65.2 849.2,63.2 862.7,61.0 876.1,58.0 889.6,54.9 903.0,51.0 916.4,48.6 929.9,45.7 943.3,43.4 956.8,41.1 970.2,38.8 983.7,36.5 997.1,29.8 1010.6,28.0 1024.0,29.7"/>
+<polyline fill="none" stroke="#c92a2a" stroke-width="2" points="56.0,204.0 69.4,202.4 82.9,196.2 96.3,194.3 109.8,192.2 123.2,190.1 136.7,188.1 150.1,186.1 163.6,183.5 177.0,181.4 190.4,179.2 203.9,177.0 217.3,174.8 230.8,173.2 244.2,171.4 257.7,169.5 271.1,165.5 284.6,163.7 298.0,162.1 311.4,158.8 324.9,156.7 338.3,154.9 351.8,152.9 365.2,151.1 378.7,149.2 392.1,146.9 405.6,143.8 419.0,141.6 432.4,139.5 445.9,137.2 459.3,135.4 472.8,132.6 486.2,129.0 499.7,123.9 513.1,121.6 526.6,119.7 540.0,117.6 553.4,115.9 566.9,114.1 580.3,111.8 593.8,109.2 607.2,107.5 620.7,105.6 634.1,103.8 647.6,101.1 661.0,99.0 674.4,97.0 687.9,93.3 701.3,91.0 714.8,87.9 728.2,85.9 741.7,82.9 755.1,80.6 768.6,77.2 782.0,75.3 795.4,72.5 808.9,69.8 822.3,67.5 835.8,65.2 849.2,63.2 862.7,61.0 876.1,58.0 889.6,54.9 903.0,51.0 916.4,48.6 929.9,45.7 943.3,43.4 956.8,41.1 970.2,38.8 983.7,36.5 997.1,29.8 1010.6,28.0 1024.0,28.9"/>
+<text x="280" y="16" font-size="11" fill="#4c6ef5" font-family="sans-serif">Bybit cash</text>
+<text x="380" y="16" font-size="11" fill="#c92a2a" font-family="sans-serif">OKX cash</text>
+</svg>
+<h2>One-step neighbours</h2>
+<p class="note">Each row moves one frozen knob. <code>p50_open=0.50</code> is the known occupancy cliff. A higher cash there is not a better policy.</p>
+<table>
+<thead><tr>
+<th>window</th><th>label</th><th>mode</th><th>status</th>
+<th>applied</th><th>neg rounds</th><th>skipped</th>
+<th>final Bybit</th><th>final OKX</th><th>min Bybit</th><th>min OKX</th>
+<th>policy sum pp</th>
+</tr></thead>
+<tbody>
+<tr><td>is</td><td>frozen</td><td>fixed100</td><td>ok</td><td>37</td><td>0</td><td>0</td><td>212.2644</td><td>14.4384</td><td>85.1486</td><td>14.4384</td><td>26.5115</td></tr>
+<tr><td>is</td><td>frozen</td><td>fixed100_equalize</td><td>ok</td><td>37</td><td>0</td><td>0</td><td>113.3514</td><td>113.3514</td><td>93.0166</td><td>87.0052</td><td>26.5115</td></tr>
+<tr><td>is</td><td>frozen</td><td>balance_equalize</td><td>ok</td><td>37</td><td>0</td><td>0</td><td>114.1532</td><td>114.1532</td><td>92.9160</td><td>85.7704</td><td>26.5115</td></tr>
+<tr><td>is</td><td>theta_open=0.40</td><td>fixed100</td><td>ok</td><td>42</td><td>0</td><td>0</td><td>217.2405</td><td>10.3088</td><td>81.9429</td><td>10.3088</td><td>27.3397</td></tr>
+<tr><td>is</td><td>theta_open=0.40</td><td>fixed100_equalize</td><td>ok</td><td>42</td><td>0</td><td>0</td><td>113.7747</td><td>113.7747</td><td>89.3552</td><td>89.5349</td><td>27.3397</td></tr>
+<tr><td>is</td><td>theta_open=0.40</td><td>balance_equalize</td><td>ok</td><td>42</td><td>0</td><td>0</td><td>114.6372</td><td>114.6372</td><td>89.2041</td><td>89.2762</td><td>27.3397</td></tr>
+<tr><td>is</td><td>theta_open=0.60</td><td>fixed100</td><td>ok</td><td>34</td><td>0</td><td>0</td><td>216.2625</td><td>8.8401</td><td>94.0070</td><td>8.8401</td><td>24.9158</td></tr>
+<tr><td>is</td><td>theta_open=0.60</td><td>fixed100_equalize</td><td>ok</td><td>34</td><td>0</td><td>0</td><td>112.5513</td><td>112.5513</td><td>94.6079</td><td>86.2608</td><td>24.9158</td></tr>
+<tr><td>is</td><td>theta_open=0.60</td><td>balance_equalize</td><td>ok</td><td>34</td><td>0</td><td>0</td><td>113.2452</td><td>113.2452</td><td>94.0457</td><td>85.1355</td><td>24.9158</td></tr>
+<tr><td>is</td><td>p50_open=0.50</td><td>fixed100</td><td>ok</td><td>39</td><td>0</td><td>0</td><td>190.1618</td><td>40.4671</td><td>80.1794</td><td>37.8154</td><td>29.4512</td></tr>
+<tr><td>is</td><td>p50_open=0.50</td><td>fixed100_equalize</td><td>ok</td><td>39</td><td>0</td><td>0</td><td>115.3145</td><td>115.3145</td><td>93.2350</td><td>87.4670</td><td>29.4512</td></tr>
+<tr><td>is</td><td>p50_open=0.50</td><td>balance_equalize</td><td>ok</td><td>39</td><td>0</td><td>0</td><td>116.3322</td><td>116.3322</td><td>93.1192</td><td>87.1347</td><td>29.4512</td></tr>
+<tr><td>is</td><td>p50_open=0.70</td><td>fixed100</td><td>ok</td><td>33</td><td>0</td><td>0</td><td>201.4614</td><td>23.3231</td><td>86.9551</td><td>23.3231</td><td>24.7165</td></tr>
+<tr><td>is</td><td>p50_open=0.70</td><td>fixed100_equalize</td><td>ok</td><td>33</td><td>0</td><td>0</td><td>112.3922</td><td>112.3922</td><td>92.8944</td><td>89.9671</td><td>24.7165</td></tr>
+<tr><td>is</td><td>p50_open=0.70</td><td>balance_equalize</td><td>ok</td><td>33</td><td>0</td><td>0</td><td>113.0747</td><td>113.0747</td><td>92.8026</td><td>89.7884</td><td>24.7165</td></tr>
+<tr><td>is</td><td>min_profit_pp=0.15</td><td>fixed100</td><td>ok</td><td>42</td><td>0</td><td>0</td><td>217.6015</td><td>7.9781</td><td>88.1571</td><td>7.9781</td><td>25.3277</td></tr>
+<tr><td>is</td><td>min_profit_pp=0.15</td><td>fixed100_equalize</td><td>ok</td><td>42</td><td>0</td><td>0</td><td>112.7898</td><td>112.7898</td><td>94.2318</td><td>88.9577</td><td>25.3277</td></tr>
+<tr><td>is</td><td>min_profit_pp=0.15</td><td>balance_equalize</td><td>ok</td><td>42</td><td>0</td><td>0</td><td>113.5157</td><td>113.5157</td><td>94.1558</td><td>88.7636</td><td>25.3277</td></tr>
+<tr><td>is</td><td>min_profit_pp=0.25</td><td>fixed100</td><td>ok</td><td>37</td><td>0</td><td>0</td><td>225.3641</td><td>2.4368</td><td>86.6331</td><td>2.4368</td><td>27.6941</td></tr>
+<tr><td>is</td><td>min_profit_pp=0.25</td><td>fixed100_equalize</td><td>ok</td><td>37</td><td>0</td><td>0</td><td>113.9005</td><td>113.9005</td><td>93.1253</td><td>87.8055</td><td>27.6941</td></tr>
+<tr><td>is</td><td>min_profit_pp=0.25</td><td>balance_equalize</td><td>ok</td><td>37</td><td>0</td><td>0</td><td>114.7809</td><td>114.7809</td><td>93.0169</td><td>86.5848</td><td>27.6941</td></tr>
+<tr><td>is</td><td>min_theta_close=0</td><td>fixed100</td><td>ok</td><td>39</td><td>0</td><td>0</td><td>202.5491</td><td>24.7827</td><td>84.7151</td><td>24.7827</td><td>27.1807</td></tr>
+<tr><td>is</td><td>min_theta_close=0</td><td>fixed100_equalize</td><td>ok</td><td>39</td><td>0</td><td>0</td><td>113.6659</td><td>113.6659</td><td>92.9298</td><td>88.7711</td><td>27.1807</td></tr>
+<tr><td>is</td><td>min_theta_close=0</td><td>balance_equalize</td><td>ok</td><td>39</td><td>0</td><td>0</td><td>114.5224</td><td>114.5224</td><td>92.8355</td><td>87.6704</td><td>27.1807</td></tr>
+<tr><td>is</td><td>min_theta_close=0.10</td><td>fixed100</td><td>ok</td><td>36</td><td>0</td><td>0</td><td>219.7234</td><td>6.6892</td><td>89.9062</td><td>6.6892</td><td>26.1225</td></tr>
+<tr><td>is</td><td>min_theta_close=0.10</td><td>fixed100_equalize</td><td>ok</td><td>36</td><td>0</td><td>0</td><td>113.2063</td><td>113.2063</td><td>93.1702</td><td>87.0692</td><td>26.1225</td></tr>
+<tr><td>is</td><td>min_theta_close=0.10</td><td>balance_equalize</td><td>ok</td><td>36</td><td>0</td><td>0</td><td>113.9774</td><td>113.9774</td><td>93.0583</td><td>85.8257</td><td>26.1225</td></tr>
+<tr><td>oos</td><td>frozen</td><td>fixed100</td><td>ok</td><td>71</td><td>0</td><td>0</td><td>97.9958</td><td>123.2332</td><td>89.1898</td><td>92.0154</td><td>21.2058</td></tr>
+<tr><td>oos</td><td>frozen</td><td>fixed100_equalize</td><td>ok</td><td>71</td><td>0</td><td>0</td><td>110.5895</td><td>110.6395</td><td>90.0521</td><td>87.0384</td><td>21.2058</td></tr>
+<tr><td>oos</td><td>frozen</td><td>balance_equalize</td><td>ok</td><td>71</td><td>0</td><td>0</td><td>111.1603</td><td>111.2159</td><td>90.0417</td><td>86.4953</td><td>21.2058</td></tr>
+<tr><td>oos</td><td>theta_open=0.40</td><td>fixed100</td><td>ok</td><td>79</td><td>0</td><td>0</td><td>99.9263</td><td>123.5199</td><td>87.9434</td><td>88.6611</td><td>23.5135</td></tr>
+<tr><td>oos</td><td>theta_open=0.40</td><td>fixed100_equalize</td><td>ok</td><td>79</td><td>0</td><td>0</td><td>111.6981</td><td>111.7481</td><td>90.0511</td><td>87.1515</td><td>23.5135</td></tr>
+<tr><td>oos</td><td>theta_open=0.40</td><td>balance_equalize</td><td>ok</td><td>79</td><td>0</td><td>0</td><td>112.3986</td><td>112.4548</td><td>90.0408</td><td>86.4623</td><td>23.5135</td></tr>
+<tr><td>oos</td><td>theta_open=0.60</td><td>fixed100</td><td>ok</td><td>58</td><td>0</td><td>0</td><td>115.6117</td><td>102.8095</td><td>90.1325</td><td>81.6206</td><td>18.1832</td></tr>
+<tr><td>oos</td><td>theta_open=0.60</td><td>fixed100_equalize</td><td>ok</td><td>58</td><td>0</td><td>0</td><td>109.2106</td><td>109.2106</td><td>90.0500</td><td>83.6595</td><td>18.1832</td></tr>
+<tr><td>oos</td><td>theta_open=0.60</td><td>balance_equalize</td><td>ok</td><td>58</td><td>0</td><td>0</td><td>109.6381</td><td>109.6381</td><td>90.0398</td><td>83.1021</td><td>18.1832</td></tr>
+<tr><td>oos</td><td>p50_open=0.50</td><td>fixed100</td><td>ok</td><td>75</td><td>0</td><td>0</td><td>110.4864</td><td>111.1124</td><td>87.2204</td><td>93.9889</td><td>21.5641</td></tr>
+<tr><td>oos</td><td>p50_open=0.50</td><td>fixed100_equalize</td><td>ok</td><td>75</td><td>0</td><td>0</td><td>110.7744</td><td>110.8244</td><td>88.9872</td><td>85.7788</td><td>21.5641</td></tr>
+<tr><td>oos</td><td>p50_open=0.50</td><td>balance_equalize</td><td>ok</td><td>75</td><td>0</td><td>0</td><td>111.3659</td><td>111.4216</td><td>88.9488</td><td>85.2241</td><td>21.5641</td></tr>
+<tr><td>oos</td><td>p50_open=0.70</td><td>fixed100</td><td>ok</td><td>63</td><td>0</td><td>0</td><td>102.8656</td><td>115.9545</td><td>92.8254</td><td>83.3947</td><td>18.5047</td></tr>
+<tr><td>oos</td><td>p50_open=0.70</td><td>fixed100_equalize</td><td>ok</td><td>63</td><td>0</td><td>0</td><td>109.4100</td><td>109.4100</td><td>94.2419</td><td>86.2246</td><td>18.5047</td></tr>
+<tr><td>oos</td><td>p50_open=0.70</td><td>balance_equalize</td><td>ok</td><td>63</td><td>0</td><td>0</td><td>109.8579</td><td>109.8579</td><td>94.2360</td><td>85.7946</td><td>18.5047</td></tr>
+<tr><td>oos</td><td>min_profit_pp=0.15</td><td>fixed100</td><td>ok</td><td>76</td><td>0</td><td>0</td><td>91.5163</td><td>126.2170</td><td>85.3949</td><td>93.8101</td><td>17.6561</td></tr>
+<tr><td>oos</td><td>min_profit_pp=0.15</td><td>fixed100_equalize</td><td>ok</td><td>76</td><td>0</td><td>0</td><td>108.8417</td><td>108.8917</td><td>90.0217</td><td>86.4201</td><td>17.6561</td></tr>
+<tr><td>oos</td><td>min_profit_pp=0.15</td><td>balance_equalize</td><td>ok</td><td>76</td><td>0</td><td>0</td><td>109.2372</td><td>109.2919</td><td>90.0143</td><td>85.9627</td><td>17.6561</td></tr>
+<tr><td>oos</td><td>min_profit_pp=0.25</td><td>fixed100</td><td>ok</td><td>58</td><td>0</td><td>0</td><td>93.4292</td><td>126.5620</td><td>87.1185</td><td>94.9199</td><td>19.9808</td></tr>
+<tr><td>oos</td><td>min_profit_pp=0.25</td><td>fixed100_equalize</td><td>ok</td><td>58</td><td>0</td><td>0</td><td>109.9706</td><td>110.0206</td><td>90.0759</td><td>86.3325</td><td>19.9808</td></tr>
+<tr><td>oos</td><td>min_profit_pp=0.25</td><td>balance_equalize</td><td>ok</td><td>58</td><td>0</td><td>0</td><td>110.4731</td><td>110.5284</td><td>90.0631</td><td>85.8863</td><td>19.9808</td></tr>
+<tr><td>oos</td><td>min_theta_close=0</td><td>fixed100</td><td>ok</td><td>71</td><td>0</td><td>0</td><td>99.5684</td><td>121.5114</td><td>89.1898</td><td>91.2309</td><td>21.0419</td></tr>
+<tr><td>oos</td><td>min_theta_close=0</td><td>fixed100_equalize</td><td>ok</td><td>71</td><td>0</td><td>0</td><td>110.5149</td><td>110.5649</td><td>90.0521</td><td>86.9554</td><td>21.0419</td></tr>
+<tr><td>oos</td><td>min_theta_close=0</td><td>balance_equalize</td><td>ok</td><td>71</td><td>0</td><td>0</td><td>111.0775</td><td>111.1331</td><td>90.0417</td><td>86.4237</td><td>21.0419</td></tr>
+<tr><td>oos</td><td>min_theta_close=0.10</td><td>fixed100</td><td>ok</td><td>70</td><td>0</td><td>0</td><td>103.8303</td><td>117.2172</td><td>89.1898</td><td>91.4036</td><td>20.9901</td></tr>
+<tr><td>oos</td><td>min_theta_close=0.10</td><td>fixed100_equalize</td><td>ok</td><td>70</td><td>0</td><td>0</td><td>110.4988</td><td>110.5488</td><td>90.0521</td><td>87.1069</td><td>20.9901</td></tr>
+<tr><td>oos</td><td>min_theta_close=0.10</td><td>balance_equalize</td><td>ok</td><td>70</td><td>0</td><td>0</td><td>111.0595</td><td>111.1151</td><td>90.0417</td><td>86.5545</td><td>20.9901</td></tr>
+</tbody>
+</table>
+</body>
+</html>

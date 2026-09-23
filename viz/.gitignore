@@ -1,0 +1,5 @@
+# Spread visualization (Mac host)
+viz/web/node_modules/
+viz/catalog.duckdb
+viz/catalog.duckdb.wal
+viz/data/

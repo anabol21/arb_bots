@@ -1,0 +1,422 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<title>Bybit ∩ OKX listing growth vs frozen CSV</title>
+<style>
+  body { font-family: ui-sans-serif, system-ui, sans-serif; margin: 24px; color: #111; max-width: 1100px; }
+  h1 { font-size: 1.4rem; }
+  h2 { font-size: 1.1rem; margin-top: 2rem; }
+  .nums { display: flex; flex-wrap: wrap; gap: 12px; }
+  .card { border: 1px solid #ddd; padding: 12px 16px; min-width: 140px; }
+  .card b { display: block; font-size: 1.4rem; }
+  table { border-collapse: collapse; width: 100%; font-size: 0.85rem; }
+  th, td { border-bottom: 1px solid #eee; padding: 4px 8px; text-align: left; }
+  th { background: #f6f6f6; }
+  code { font-size: 0.9em; }
+  .note { color: #444; font-size: 0.9rem; line-height: 1.45; }
+  .warn { background: #fff8e6; border: 1px solid #e6d08a; padding: 10px 12px; }
+  svg { max-width: 100%; height: auto; }
+</style>
+</head>
+<body>
+<h1>Bybit ∩ OKX USDT-swap listing growth</h1>
+<p class="note">
+Frozen pool: <code>bybit_okx_universe.csv</code> first committed 2026-08-14
+(345 names). A later commit added <code>take</code>; the <code>base_coin</code>
+set did not change. The collector still watches that CSV. This page is the
+live public catalogs versus that snapshot — not how often the CSV was updated
+(it was not, by names) and not profitability.
+</p>
+<p class="note">Fetched UTC: 2026-09-18T13:20:54Z.
+Proxy: <code>joint_listed_ms = max(bybit.launchTime, okx.listTime)</code>.</p>
+
+<div class="nums">
+  <div class="card"><span>n_csv</span><b>345</b></div>
+  <div class="card"><span>n_live intersect</span><b>415</b></div>
+  <div class="card"><span>n_live crypto</span><b>319</b></div>
+  <div class="card"><span>|live − csv|</span><b>72</b></div>
+  <div class="card"><span>|csv − live|</span><b>2</b></div>
+  <div class="card"><span>joint ≥ 14 Aug (all / crypto)</span><b>37 / 37</b></div>
+  <div class="card"><span>joint ≥ 1 Jul (all / crypto)</span><b>95 / 75</b></div>
+</div>
+
+<div class="warn note">
+Limitations: no daily catalog archive, so a name with listTime before the freeze
+cannot be proven to have been in the intersection on a given halted day.
+<code>launchTime</code>/<code>listTime</code> are vendor fields. Inverse, dated
+futures, and non-USDT are out of this intersection, as in the CSV.
+<code>is_crypto</code> uses the existing denylist (equities already in the CSV).
+Newly listed stock/ETF perps are usually <em>not</em> on that list, so the
+post-freeze crypto series can equal the all-swaps series. Do not read that
+overlap as “no equities listed.” The all-swaps daily bars are the listing rate.
+</div>
+
+<h2>Daily cadence from CSV freeze (2026-08-14)</h2>
+<p class="note">Bars count names whose <code>joint_listed</code> falls on that UTC
+calendar day and on/after the freeze. Empty days stay on the axis. Left scale
+is daily count; right scale is cumulative. Equities inflate the all-swaps
+series; <code>is_crypto</code> is the second series (denylist may miss new stocks).</p>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1040 240" width="1040" height="240">
+<text x="40" y="16" font-size="13" font-family="sans-serif">all USDT swaps</text>
+<line x1="40" y1="28" x2="40" y2="196" stroke="#ccc"/>
+<line x1="1000" y1="28" x2="1000" y2="196" stroke="#ccc"/>
+<line x1="40" y1="196" x2="1000" y2="196" stroke="#ccc"/>
+<text x="34" y="200.0" text-anchor="end" font-size="10" fill="#4c6ef5">0</text>
+<text x="1006" y="200.0" font-size="10" fill="#c92a2a">0</text>
+<text x="34" y="116.0" text-anchor="end" font-size="10" fill="#4c6ef5">3</text>
+<text x="1006" y="116.0" font-size="10" fill="#c92a2a">18</text>
+<text x="34" y="32.0" text-anchor="end" font-size="10" fill="#4c6ef5">6</text>
+<text x="1006" y="32.0" font-size="10" fill="#c92a2a">37</text>
+<rect x="40.0" y="196.0" width="24.7" height="0.0" fill="#4c6ef5" opacity="0.85"/>
+<text x="52.3" y="210" text-anchor="middle" font-size="9" fill="#444">08-14</text>
+<rect x="66.7" y="196.0" width="24.7" height="0.0" fill="#4c6ef5" opacity="0.85"/>
+<rect x="93.3" y="196.0" width="24.7" height="0.0" fill="#4c6ef5" opacity="0.85"/>
+<rect x="120.0" y="140.0" width="24.7" height="56.0" fill="#4c6ef5" opacity="0.85"/>
+<rect x="146.7" y="140.0" width="24.7" height="56.0" fill="#4c6ef5" opacity="0.85"/>
+<text x="159.0" y="210" text-anchor="middle" font-size="9" fill="#444">08-18</text>
+<rect x="173.3" y="168.0" width="24.7" height="28.0" fill="#4c6ef5" opacity="0.85"/>
+<rect x="200.0" y="196.0" width="24.7" height="0.0" fill="#4c6ef5" opacity="0.85"/>
+<rect x="226.7" y="140.0" width="24.7" height="56.0" fill="#4c6ef5" opacity="0.85"/>
+<rect x="253.3" y="196.0" width="24.7" height="0.0" fill="#4c6ef5" opacity="0.85"/>
+<text x="265.7" y="210" text-anchor="middle" font-size="9" fill="#444">08-22</text>
+<rect x="280.0" y="196.0" width="24.7" height="0.0" fill="#4c6ef5" opacity="0.85"/>
+<rect x="306.7" y="196.0" width="24.7" height="0.0" fill="#4c6ef5" opacity="0.85"/>
+<rect x="333.3" y="168.0" width="24.7" height="28.0" fill="#4c6ef5" opacity="0.85"/>
+<rect x="360.0" y="168.0" width="24.7" height="28.0" fill="#4c6ef5" opacity="0.85"/>
+<text x="372.3" y="210" text-anchor="middle" font-size="9" fill="#444">08-26</text>
+<rect x="386.7" y="56.0" width="24.7" height="140.0" fill="#4c6ef5" opacity="0.85"/>
+<rect x="413.3" y="196.0" width="24.7" height="0.0" fill="#4c6ef5" opacity="0.85"/>
+<rect x="440.0" y="196.0" width="24.7" height="0.0" fill="#4c6ef5" opacity="0.85"/>
+<rect x="466.7" y="196.0" width="24.7" height="0.0" fill="#4c6ef5" opacity="0.85"/>
+<text x="479.0" y="210" text-anchor="middle" font-size="9" fill="#444">08-30</text>
+<rect x="493.3" y="140.0" width="24.7" height="56.0" fill="#4c6ef5" opacity="0.85"/>
+<rect x="520.0" y="196.0" width="24.7" height="0.0" fill="#4c6ef5" opacity="0.85"/>
+<rect x="546.7" y="140.0" width="24.7" height="56.0" fill="#4c6ef5" opacity="0.85"/>
+<rect x="573.3" y="28.0" width="24.7" height="168.0" fill="#4c6ef5" opacity="0.85"/>
+<text x="585.7" y="210" text-anchor="middle" font-size="9" fill="#444">09-03</text>
+<rect x="600.0" y="84.0" width="24.7" height="112.0" fill="#4c6ef5" opacity="0.85"/>
+<rect x="626.7" y="168.0" width="24.7" height="28.0" fill="#4c6ef5" opacity="0.85"/>
+<rect x="653.3" y="196.0" width="24.7" height="0.0" fill="#4c6ef5" opacity="0.85"/>
+<rect x="680.0" y="196.0" width="24.7" height="0.0" fill="#4c6ef5" opacity="0.85"/>
+<text x="692.3" y="210" text-anchor="middle" font-size="9" fill="#444">09-07</text>
+<rect x="706.7" y="196.0" width="24.7" height="0.0" fill="#4c6ef5" opacity="0.85"/>
+<rect x="733.3" y="168.0" width="24.7" height="28.0" fill="#4c6ef5" opacity="0.85"/>
+<rect x="760.0" y="140.0" width="24.7" height="56.0" fill="#4c6ef5" opacity="0.85"/>
+<rect x="786.7" y="196.0" width="24.7" height="0.0" fill="#4c6ef5" opacity="0.85"/>
+<text x="799.0" y="210" text-anchor="middle" font-size="9" fill="#444">09-11</text>
+<rect x="813.3" y="168.0" width="24.7" height="28.0" fill="#4c6ef5" opacity="0.85"/>
+<rect x="840.0" y="196.0" width="24.7" height="0.0" fill="#4c6ef5" opacity="0.85"/>
+<rect x="866.7" y="196.0" width="24.7" height="0.0" fill="#4c6ef5" opacity="0.85"/>
+<rect x="893.3" y="196.0" width="24.7" height="0.0" fill="#4c6ef5" opacity="0.85"/>
+<text x="905.7" y="210" text-anchor="middle" font-size="9" fill="#444">09-15</text>
+<rect x="920.0" y="84.0" width="24.7" height="112.0" fill="#4c6ef5" opacity="0.85"/>
+<rect x="946.7" y="196.0" width="24.7" height="0.0" fill="#4c6ef5" opacity="0.85"/>
+<rect x="973.3" y="196.0" width="24.7" height="0.0" fill="#4c6ef5" opacity="0.85"/>
+<text x="985.7" y="210" text-anchor="middle" font-size="9" fill="#444">09-18</text>
+<polyline fill="none" stroke="#c92a2a" stroke-width="2" points="52.3,196.0 79.0,196.0 105.7,196.0 132.3,186.9 159.0,177.8 185.7,173.3 212.3,173.3 239.0,164.2 265.7,164.2 292.3,164.2 319.0,164.2 345.7,159.7 372.3,155.1 399.0,132.4 425.7,132.4 452.3,132.4 479.0,132.4 505.7,123.4 532.3,123.4 559.0,114.3 585.7,87.0 612.3,68.9 639.0,64.3 665.7,64.3 692.3,64.3 719.0,64.3 745.7,59.8 772.3,50.7 799.0,50.7 825.7,46.2 852.3,46.2 879.0,46.2 905.7,46.2 932.3,28.0 959.0,28.0 985.7,28.0"/>
+<text x="200" y="16" font-size="11" fill="#4c6ef5" font-family="sans-serif">daily new (bars, left)</text><text x="400" y="16" font-size="11" fill="#c92a2a" font-family="sans-serif">cumulative (line, right)</text>
+</svg>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1040 240" width="1040" height="240">
+<text x="40" y="16" font-size="13" font-family="sans-serif">is_crypto only</text>
+<line x1="40" y1="28" x2="40" y2="196" stroke="#ccc"/>
+<line x1="1000" y1="28" x2="1000" y2="196" stroke="#ccc"/>
+<line x1="40" y1="196" x2="1000" y2="196" stroke="#ccc"/>
+<text x="34" y="200.0" text-anchor="end" font-size="10" fill="#4c6ef5">0</text>
+<text x="1006" y="200.0" font-size="10" fill="#c92a2a">0</text>
+<text x="34" y="116.0" text-anchor="end" font-size="10" fill="#4c6ef5">3</text>
+<text x="1006" y="116.0" font-size="10" fill="#c92a2a">18</text>
+<text x="34" y="32.0" text-anchor="end" font-size="10" fill="#4c6ef5">6</text>
+<text x="1006" y="32.0" font-size="10" fill="#c92a2a">37</text>
+<rect x="40.0" y="196.0" width="24.7" height="0.0" fill="#4c6ef5" opacity="0.85"/>
+<text x="52.3" y="210" text-anchor="middle" font-size="9" fill="#444">08-14</text>
+<rect x="66.7" y="196.0" width="24.7" height="0.0" fill="#4c6ef5" opacity="0.85"/>
+<rect x="93.3" y="196.0" width="24.7" height="0.0" fill="#4c6ef5" opacity="0.85"/>
+<rect x="120.0" y="140.0" width="24.7" height="56.0" fill="#4c6ef5" opacity="0.85"/>
+<rect x="146.7" y="140.0" width="24.7" height="56.0" fill="#4c6ef5" opacity="0.85"/>
+<text x="159.0" y="210" text-anchor="middle" font-size="9" fill="#444">08-18</text>
+<rect x="173.3" y="168.0" width="24.7" height="28.0" fill="#4c6ef5" opacity="0.85"/>
+<rect x="200.0" y="196.0" width="24.7" height="0.0" fill="#4c6ef5" opacity="0.85"/>
+<rect x="226.7" y="140.0" width="24.7" height="56.0" fill="#4c6ef5" opacity="0.85"/>
+<rect x="253.3" y="196.0" width="24.7" height="0.0" fill="#4c6ef5" opacity="0.85"/>
+<text x="265.7" y="210" text-anchor="middle" font-size="9" fill="#444">08-22</text>
+<rect x="280.0" y="196.0" width="24.7" height="0.0" fill="#4c6ef5" opacity="0.85"/>
+<rect x="306.7" y="196.0" width="24.7" height="0.0" fill="#4c6ef5" opacity="0.85"/>
+<rect x="333.3" y="168.0" width="24.7" height="28.0" fill="#4c6ef5" opacity="0.85"/>
+<rect x="360.0" y="168.0" width="24.7" height="28.0" fill="#4c6ef5" opacity="0.85"/>
+<text x="372.3" y="210" text-anchor="middle" font-size="9" fill="#444">08-26</text>
+<rect x="386.7" y="56.0" width="24.7" height="140.0" fill="#4c6ef5" opacity="0.85"/>
+<rect x="413.3" y="196.0" width="24.7" height="0.0" fill="#4c6ef5" opacity="0.85"/>
+<rect x="440.0" y="196.0" width="24.7" height="0.0" fill="#4c6ef5" opacity="0.85"/>
+<rect x="466.7" y="196.0" width="24.7" height="0.0" fill="#4c6ef5" opacity="0.85"/>
+<text x="479.0" y="210" text-anchor="middle" font-size="9" fill="#444">08-30</text>
+<rect x="493.3" y="140.0" width="24.7" height="56.0" fill="#4c6ef5" opacity="0.85"/>
+<rect x="520.0" y="196.0" width="24.7" height="0.0" fill="#4c6ef5" opacity="0.85"/>
+<rect x="546.7" y="140.0" width="24.7" height="56.0" fill="#4c6ef5" opacity="0.85"/>
+<rect x="573.3" y="28.0" width="24.7" height="168.0" fill="#4c6ef5" opacity="0.85"/>
+<text x="585.7" y="210" text-anchor="middle" font-size="9" fill="#444">09-03</text>
+<rect x="600.0" y="84.0" width="24.7" height="112.0" fill="#4c6ef5" opacity="0.85"/>
+<rect x="626.7" y="168.0" width="24.7" height="28.0" fill="#4c6ef5" opacity="0.85"/>
+<rect x="653.3" y="196.0" width="24.7" height="0.0" fill="#4c6ef5" opacity="0.85"/>
+<rect x="680.0" y="196.0" width="24.7" height="0.0" fill="#4c6ef5" opacity="0.85"/>
+<text x="692.3" y="210" text-anchor="middle" font-size="9" fill="#444">09-07</text>
+<rect x="706.7" y="196.0" width="24.7" height="0.0" fill="#4c6ef5" opacity="0.85"/>
+<rect x="733.3" y="168.0" width="24.7" height="28.0" fill="#4c6ef5" opacity="0.85"/>
+<rect x="760.0" y="140.0" width="24.7" height="56.0" fill="#4c6ef5" opacity="0.85"/>
+<rect x="786.7" y="196.0" width="24.7" height="0.0" fill="#4c6ef5" opacity="0.85"/>
+<text x="799.0" y="210" text-anchor="middle" font-size="9" fill="#444">09-11</text>
+<rect x="813.3" y="168.0" width="24.7" height="28.0" fill="#4c6ef5" opacity="0.85"/>
+<rect x="840.0" y="196.0" width="24.7" height="0.0" fill="#4c6ef5" opacity="0.85"/>
+<rect x="866.7" y="196.0" width="24.7" height="0.0" fill="#4c6ef5" opacity="0.85"/>
+<rect x="893.3" y="196.0" width="24.7" height="0.0" fill="#4c6ef5" opacity="0.85"/>
+<text x="905.7" y="210" text-anchor="middle" font-size="9" fill="#444">09-15</text>
+<rect x="920.0" y="84.0" width="24.7" height="112.0" fill="#4c6ef5" opacity="0.85"/>
+<rect x="946.7" y="196.0" width="24.7" height="0.0" fill="#4c6ef5" opacity="0.85"/>
+<rect x="973.3" y="196.0" width="24.7" height="0.0" fill="#4c6ef5" opacity="0.85"/>
+<text x="985.7" y="210" text-anchor="middle" font-size="9" fill="#444">09-18</text>
+<polyline fill="none" stroke="#c92a2a" stroke-width="2" points="52.3,196.0 79.0,196.0 105.7,196.0 132.3,186.9 159.0,177.8 185.7,173.3 212.3,173.3 239.0,164.2 265.7,164.2 292.3,164.2 319.0,164.2 345.7,159.7 372.3,155.1 399.0,132.4 425.7,132.4 452.3,132.4 479.0,132.4 505.7,123.4 532.3,123.4 559.0,114.3 585.7,87.0 612.3,68.9 639.0,64.3 665.7,64.3 692.3,64.3 719.0,64.3 745.7,59.8 772.3,50.7 799.0,50.7 825.7,46.2 852.3,46.2 879.0,46.2 905.7,46.2 932.3,28.0 959.0,28.0 985.7,28.0"/>
+<text x="200" y="16" font-size="11" fill="#4c6ef5" font-family="sans-serif">daily new (bars, left)</text><text x="400" y="16" font-size="11" fill="#c92a2a" font-family="sans-serif">cumulative (line, right)</text>
+</svg>
+
+<h2>Daily cadence from 1 Jul 2026</h2>
+<p class="note">Same frozen name list. July is an earlier reporting bucket, not a
+different CSV.</p>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1040 240" width="1040" height="240">
+<text x="40" y="16" font-size="13" font-family="sans-serif">all USDT swaps</text>
+<line x1="40" y1="28" x2="40" y2="196" stroke="#ccc"/>
+<line x1="1000" y1="28" x2="1000" y2="196" stroke="#ccc"/>
+<line x1="40" y1="196" x2="1000" y2="196" stroke="#ccc"/>
+<text x="34" y="200.0" text-anchor="end" font-size="10" fill="#4c6ef5">0</text>
+<text x="1006" y="200.0" font-size="10" fill="#c92a2a">0</text>
+<text x="34" y="116.0" text-anchor="end" font-size="10" fill="#4c6ef5">3</text>
+<text x="1006" y="116.0" font-size="10" fill="#c92a2a">48</text>
+<text x="34" y="32.0" text-anchor="end" font-size="10" fill="#4c6ef5">6</text>
+<text x="1006" y="32.0" font-size="10" fill="#c92a2a">95</text>
+<rect x="40.0" y="196.0" width="11.0" height="0.0" fill="#4c6ef5" opacity="0.85"/>
+<text x="45.5" y="210" text-anchor="middle" font-size="9" fill="#444">07-01</text>
+<rect x="52.0" y="56.0" width="11.0" height="140.0" fill="#4c6ef5" opacity="0.85"/>
+<rect x="64.0" y="112.0" width="11.0" height="84.0" fill="#4c6ef5" opacity="0.85"/>
+<rect x="76.0" y="196.0" width="11.0" height="0.0" fill="#4c6ef5" opacity="0.85"/>
+<rect x="88.0" y="196.0" width="11.0" height="0.0" fill="#4c6ef5" opacity="0.85"/>
+<rect x="100.0" y="112.0" width="11.0" height="84.0" fill="#4c6ef5" opacity="0.85"/>
+<rect x="112.0" y="196.0" width="11.0" height="0.0" fill="#4c6ef5" opacity="0.85"/>
+<rect x="124.0" y="140.0" width="11.0" height="56.0" fill="#4c6ef5" opacity="0.85"/>
+<rect x="136.0" y="196.0" width="11.0" height="0.0" fill="#4c6ef5" opacity="0.85"/>
+<rect x="148.0" y="112.0" width="11.0" height="84.0" fill="#4c6ef5" opacity="0.85"/>
+<rect x="160.0" y="168.0" width="11.0" height="28.0" fill="#4c6ef5" opacity="0.85"/>
+<text x="165.5" y="210" text-anchor="middle" font-size="9" fill="#444">07-11</text>
+<rect x="172.0" y="196.0" width="11.0" height="0.0" fill="#4c6ef5" opacity="0.85"/>
+<rect x="184.0" y="196.0" width="11.0" height="0.0" fill="#4c6ef5" opacity="0.85"/>
+<rect x="196.0" y="140.0" width="11.0" height="56.0" fill="#4c6ef5" opacity="0.85"/>
+<rect x="208.0" y="84.0" width="11.0" height="112.0" fill="#4c6ef5" opacity="0.85"/>
+<rect x="220.0" y="112.0" width="11.0" height="84.0" fill="#4c6ef5" opacity="0.85"/>
+<rect x="232.0" y="28.0" width="11.0" height="168.0" fill="#4c6ef5" opacity="0.85"/>
+<rect x="244.0" y="196.0" width="11.0" height="0.0" fill="#4c6ef5" opacity="0.85"/>
+<rect x="256.0" y="196.0" width="11.0" height="0.0" fill="#4c6ef5" opacity="0.85"/>
+<rect x="268.0" y="140.0" width="11.0" height="56.0" fill="#4c6ef5" opacity="0.85"/>
+<rect x="280.0" y="168.0" width="11.0" height="28.0" fill="#4c6ef5" opacity="0.85"/>
+<text x="285.5" y="210" text-anchor="middle" font-size="9" fill="#444">07-21</text>
+<rect x="292.0" y="196.0" width="11.0" height="0.0" fill="#4c6ef5" opacity="0.85"/>
+<rect x="304.0" y="196.0" width="11.0" height="0.0" fill="#4c6ef5" opacity="0.85"/>
+<rect x="316.0" y="196.0" width="11.0" height="0.0" fill="#4c6ef5" opacity="0.85"/>
+<rect x="328.0" y="196.0" width="11.0" height="0.0" fill="#4c6ef5" opacity="0.85"/>
+<rect x="340.0" y="196.0" width="11.0" height="0.0" fill="#4c6ef5" opacity="0.85"/>
+<rect x="352.0" y="112.0" width="11.0" height="84.0" fill="#4c6ef5" opacity="0.85"/>
+<rect x="364.0" y="140.0" width="11.0" height="56.0" fill="#4c6ef5" opacity="0.85"/>
+<rect x="376.0" y="168.0" width="11.0" height="28.0" fill="#4c6ef5" opacity="0.85"/>
+<rect x="388.0" y="140.0" width="11.0" height="56.0" fill="#4c6ef5" opacity="0.85"/>
+<rect x="400.0" y="140.0" width="11.0" height="56.0" fill="#4c6ef5" opacity="0.85"/>
+<text x="405.5" y="210" text-anchor="middle" font-size="9" fill="#444">07-31</text>
+<rect x="412.0" y="196.0" width="11.0" height="0.0" fill="#4c6ef5" opacity="0.85"/>
+<rect x="424.0" y="196.0" width="11.0" height="0.0" fill="#4c6ef5" opacity="0.85"/>
+<rect x="436.0" y="168.0" width="11.0" height="28.0" fill="#4c6ef5" opacity="0.85"/>
+<rect x="448.0" y="168.0" width="11.0" height="28.0" fill="#4c6ef5" opacity="0.85"/>
+<rect x="460.0" y="196.0" width="11.0" height="0.0" fill="#4c6ef5" opacity="0.85"/>
+<rect x="472.0" y="140.0" width="11.0" height="56.0" fill="#4c6ef5" opacity="0.85"/>
+<rect x="484.0" y="196.0" width="11.0" height="0.0" fill="#4c6ef5" opacity="0.85"/>
+<rect x="496.0" y="196.0" width="11.0" height="0.0" fill="#4c6ef5" opacity="0.85"/>
+<rect x="508.0" y="196.0" width="11.0" height="0.0" fill="#4c6ef5" opacity="0.85"/>
+<rect x="520.0" y="112.0" width="11.0" height="84.0" fill="#4c6ef5" opacity="0.85"/>
+<text x="525.5" y="210" text-anchor="middle" font-size="9" fill="#444">08-10</text>
+<rect x="532.0" y="196.0" width="11.0" height="0.0" fill="#4c6ef5" opacity="0.85"/>
+<rect x="544.0" y="56.0" width="11.0" height="140.0" fill="#4c6ef5" opacity="0.85"/>
+<rect x="556.0" y="168.0" width="11.0" height="28.0" fill="#4c6ef5" opacity="0.85"/>
+<rect x="568.0" y="196.0" width="11.0" height="0.0" fill="#4c6ef5" opacity="0.85"/>
+<rect x="580.0" y="196.0" width="11.0" height="0.0" fill="#4c6ef5" opacity="0.85"/>
+<rect x="592.0" y="196.0" width="11.0" height="0.0" fill="#4c6ef5" opacity="0.85"/>
+<rect x="604.0" y="140.0" width="11.0" height="56.0" fill="#4c6ef5" opacity="0.85"/>
+<rect x="616.0" y="140.0" width="11.0" height="56.0" fill="#4c6ef5" opacity="0.85"/>
+<rect x="628.0" y="168.0" width="11.0" height="28.0" fill="#4c6ef5" opacity="0.85"/>
+<rect x="640.0" y="196.0" width="11.0" height="0.0" fill="#4c6ef5" opacity="0.85"/>
+<text x="645.5" y="210" text-anchor="middle" font-size="9" fill="#444">08-20</text>
+<rect x="652.0" y="140.0" width="11.0" height="56.0" fill="#4c6ef5" opacity="0.85"/>
+<rect x="664.0" y="196.0" width="11.0" height="0.0" fill="#4c6ef5" opacity="0.85"/>
+<rect x="676.0" y="196.0" width="11.0" height="0.0" fill="#4c6ef5" opacity="0.85"/>
+<rect x="688.0" y="196.0" width="11.0" height="0.0" fill="#4c6ef5" opacity="0.85"/>
+<rect x="700.0" y="168.0" width="11.0" height="28.0" fill="#4c6ef5" opacity="0.85"/>
+<rect x="712.0" y="168.0" width="11.0" height="28.0" fill="#4c6ef5" opacity="0.85"/>
+<rect x="724.0" y="56.0" width="11.0" height="140.0" fill="#4c6ef5" opacity="0.85"/>
+<rect x="736.0" y="196.0" width="11.0" height="0.0" fill="#4c6ef5" opacity="0.85"/>
+<rect x="748.0" y="196.0" width="11.0" height="0.0" fill="#4c6ef5" opacity="0.85"/>
+<rect x="760.0" y="196.0" width="11.0" height="0.0" fill="#4c6ef5" opacity="0.85"/>
+<text x="765.5" y="210" text-anchor="middle" font-size="9" fill="#444">08-30</text>
+<rect x="772.0" y="140.0" width="11.0" height="56.0" fill="#4c6ef5" opacity="0.85"/>
+<rect x="784.0" y="196.0" width="11.0" height="0.0" fill="#4c6ef5" opacity="0.85"/>
+<rect x="796.0" y="140.0" width="11.0" height="56.0" fill="#4c6ef5" opacity="0.85"/>
+<rect x="808.0" y="28.0" width="11.0" height="168.0" fill="#4c6ef5" opacity="0.85"/>
+<rect x="820.0" y="84.0" width="11.0" height="112.0" fill="#4c6ef5" opacity="0.85"/>
+<rect x="832.0" y="168.0" width="11.0" height="28.0" fill="#4c6ef5" opacity="0.85"/>
+<rect x="844.0" y="196.0" width="11.0" height="0.0" fill="#4c6ef5" opacity="0.85"/>
+<rect x="856.0" y="196.0" width="11.0" height="0.0" fill="#4c6ef5" opacity="0.85"/>
+<rect x="868.0" y="196.0" width="11.0" height="0.0" fill="#4c6ef5" opacity="0.85"/>
+<rect x="880.0" y="168.0" width="11.0" height="28.0" fill="#4c6ef5" opacity="0.85"/>
+<text x="885.5" y="210" text-anchor="middle" font-size="9" fill="#444">09-09</text>
+<rect x="892.0" y="140.0" width="11.0" height="56.0" fill="#4c6ef5" opacity="0.85"/>
+<rect x="904.0" y="196.0" width="11.0" height="0.0" fill="#4c6ef5" opacity="0.85"/>
+<rect x="916.0" y="168.0" width="11.0" height="28.0" fill="#4c6ef5" opacity="0.85"/>
+<rect x="928.0" y="196.0" width="11.0" height="0.0" fill="#4c6ef5" opacity="0.85"/>
+<rect x="940.0" y="196.0" width="11.0" height="0.0" fill="#4c6ef5" opacity="0.85"/>
+<rect x="952.0" y="196.0" width="11.0" height="0.0" fill="#4c6ef5" opacity="0.85"/>
+<rect x="964.0" y="84.0" width="11.0" height="112.0" fill="#4c6ef5" opacity="0.85"/>
+<rect x="976.0" y="196.0" width="11.0" height="0.0" fill="#4c6ef5" opacity="0.85"/>
+<rect x="988.0" y="196.0" width="11.0" height="0.0" fill="#4c6ef5" opacity="0.85"/>
+<text x="993.5" y="210" text-anchor="middle" font-size="9" fill="#444">09-18</text>
+<polyline fill="none" stroke="#c92a2a" stroke-width="2" points="45.5,196.0 57.5,187.2 69.5,181.9 81.5,181.9 93.5,181.9 105.5,176.5 117.5,176.5 129.5,173.0 141.5,173.0 153.5,167.7 165.5,165.9 177.5,165.9 189.5,165.9 201.5,162.4 213.5,155.3 225.5,150.0 237.5,139.4 249.5,139.4 261.5,139.4 273.5,135.9 285.5,134.1 297.5,134.1 309.5,134.1 321.5,134.1 333.5,134.1 345.5,134.1 357.5,128.8 369.5,125.3 381.5,123.5 393.5,120.0 405.5,116.4 417.5,116.4 429.5,116.4 441.5,114.7 453.5,112.9 465.5,112.9 477.5,109.3 489.5,109.3 501.5,109.3 513.5,109.3 525.5,104.0 537.5,104.0 549.5,95.2 561.5,93.4 573.5,93.4 585.5,93.4 597.5,93.4 609.5,89.9 621.5,86.4 633.5,84.6 645.5,84.6 657.5,81.1 669.5,81.1 681.5,81.1 693.5,81.1 705.5,79.3 717.5,77.5 729.5,68.7 741.5,68.7 753.5,68.7 765.5,68.7 777.5,65.1 789.5,65.1 801.5,61.6 813.5,51.0 825.5,43.9 837.5,42.1 849.5,42.1 861.5,42.1 873.5,42.1 885.5,40.4 897.5,36.8 909.5,36.8 921.5,35.1 933.5,35.1 945.5,35.1 957.5,35.1 969.5,28.0 981.5,28.0 993.5,28.0"/>
+<text x="200" y="16" font-size="11" fill="#4c6ef5" font-family="sans-serif">daily new (bars, left)</text><text x="400" y="16" font-size="11" fill="#c92a2a" font-family="sans-serif">cumulative (line, right)</text>
+</svg>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1040 240" width="1040" height="240">
+<text x="40" y="16" font-size="13" font-family="sans-serif">is_crypto only</text>
+<line x1="40" y1="28" x2="40" y2="196" stroke="#ccc"/>
+<line x1="1000" y1="28" x2="1000" y2="196" stroke="#ccc"/>
+<line x1="40" y1="196" x2="1000" y2="196" stroke="#ccc"/>
+<text x="34" y="200.0" text-anchor="end" font-size="10" fill="#4c6ef5">0</text>
+<text x="1006" y="200.0" font-size="10" fill="#c92a2a">0</text>
+<text x="34" y="116.0" text-anchor="end" font-size="10" fill="#4c6ef5">3</text>
+<text x="1006" y="116.0" font-size="10" fill="#c92a2a">38</text>
+<text x="34" y="32.0" text-anchor="end" font-size="10" fill="#4c6ef5">6</text>
+<text x="1006" y="32.0" font-size="10" fill="#c92a2a">75</text>
+<rect x="40.0" y="196.0" width="11.0" height="0.0" fill="#4c6ef5" opacity="0.85"/>
+<text x="45.5" y="210" text-anchor="middle" font-size="9" fill="#444">07-01</text>
+<rect x="52.0" y="140.0" width="11.0" height="56.0" fill="#4c6ef5" opacity="0.85"/>
+<rect x="64.0" y="168.0" width="11.0" height="28.0" fill="#4c6ef5" opacity="0.85"/>
+<rect x="76.0" y="196.0" width="11.0" height="0.0" fill="#4c6ef5" opacity="0.85"/>
+<rect x="88.0" y="196.0" width="11.0" height="0.0" fill="#4c6ef5" opacity="0.85"/>
+<rect x="100.0" y="168.0" width="11.0" height="28.0" fill="#4c6ef5" opacity="0.85"/>
+<rect x="112.0" y="196.0" width="11.0" height="0.0" fill="#4c6ef5" opacity="0.85"/>
+<rect x="124.0" y="196.0" width="11.0" height="0.0" fill="#4c6ef5" opacity="0.85"/>
+<rect x="136.0" y="196.0" width="11.0" height="0.0" fill="#4c6ef5" opacity="0.85"/>
+<rect x="148.0" y="168.0" width="11.0" height="28.0" fill="#4c6ef5" opacity="0.85"/>
+<rect x="160.0" y="196.0" width="11.0" height="0.0" fill="#4c6ef5" opacity="0.85"/>
+<text x="165.5" y="210" text-anchor="middle" font-size="9" fill="#444">07-11</text>
+<rect x="172.0" y="196.0" width="11.0" height="0.0" fill="#4c6ef5" opacity="0.85"/>
+<rect x="184.0" y="196.0" width="11.0" height="0.0" fill="#4c6ef5" opacity="0.85"/>
+<rect x="196.0" y="168.0" width="11.0" height="28.0" fill="#4c6ef5" opacity="0.85"/>
+<rect x="208.0" y="196.0" width="11.0" height="0.0" fill="#4c6ef5" opacity="0.85"/>
+<rect x="220.0" y="196.0" width="11.0" height="0.0" fill="#4c6ef5" opacity="0.85"/>
+<rect x="232.0" y="28.0" width="11.0" height="168.0" fill="#4c6ef5" opacity="0.85"/>
+<rect x="244.0" y="196.0" width="11.0" height="0.0" fill="#4c6ef5" opacity="0.85"/>
+<rect x="256.0" y="196.0" width="11.0" height="0.0" fill="#4c6ef5" opacity="0.85"/>
+<rect x="268.0" y="140.0" width="11.0" height="56.0" fill="#4c6ef5" opacity="0.85"/>
+<rect x="280.0" y="168.0" width="11.0" height="28.0" fill="#4c6ef5" opacity="0.85"/>
+<text x="285.5" y="210" text-anchor="middle" font-size="9" fill="#444">07-21</text>
+<rect x="292.0" y="196.0" width="11.0" height="0.0" fill="#4c6ef5" opacity="0.85"/>
+<rect x="304.0" y="196.0" width="11.0" height="0.0" fill="#4c6ef5" opacity="0.85"/>
+<rect x="316.0" y="196.0" width="11.0" height="0.0" fill="#4c6ef5" opacity="0.85"/>
+<rect x="328.0" y="196.0" width="11.0" height="0.0" fill="#4c6ef5" opacity="0.85"/>
+<rect x="340.0" y="196.0" width="11.0" height="0.0" fill="#4c6ef5" opacity="0.85"/>
+<rect x="352.0" y="112.0" width="11.0" height="84.0" fill="#4c6ef5" opacity="0.85"/>
+<rect x="364.0" y="140.0" width="11.0" height="56.0" fill="#4c6ef5" opacity="0.85"/>
+<rect x="376.0" y="168.0" width="11.0" height="28.0" fill="#4c6ef5" opacity="0.85"/>
+<rect x="388.0" y="140.0" width="11.0" height="56.0" fill="#4c6ef5" opacity="0.85"/>
+<rect x="400.0" y="140.0" width="11.0" height="56.0" fill="#4c6ef5" opacity="0.85"/>
+<text x="405.5" y="210" text-anchor="middle" font-size="9" fill="#444">07-31</text>
+<rect x="412.0" y="196.0" width="11.0" height="0.0" fill="#4c6ef5" opacity="0.85"/>
+<rect x="424.0" y="196.0" width="11.0" height="0.0" fill="#4c6ef5" opacity="0.85"/>
+<rect x="436.0" y="168.0" width="11.0" height="28.0" fill="#4c6ef5" opacity="0.85"/>
+<rect x="448.0" y="168.0" width="11.0" height="28.0" fill="#4c6ef5" opacity="0.85"/>
+<rect x="460.0" y="196.0" width="11.0" height="0.0" fill="#4c6ef5" opacity="0.85"/>
+<rect x="472.0" y="140.0" width="11.0" height="56.0" fill="#4c6ef5" opacity="0.85"/>
+<rect x="484.0" y="196.0" width="11.0" height="0.0" fill="#4c6ef5" opacity="0.85"/>
+<rect x="496.0" y="196.0" width="11.0" height="0.0" fill="#4c6ef5" opacity="0.85"/>
+<rect x="508.0" y="196.0" width="11.0" height="0.0" fill="#4c6ef5" opacity="0.85"/>
+<rect x="520.0" y="112.0" width="11.0" height="84.0" fill="#4c6ef5" opacity="0.85"/>
+<text x="525.5" y="210" text-anchor="middle" font-size="9" fill="#444">08-10</text>
+<rect x="532.0" y="196.0" width="11.0" height="0.0" fill="#4c6ef5" opacity="0.85"/>
+<rect x="544.0" y="56.0" width="11.0" height="140.0" fill="#4c6ef5" opacity="0.85"/>
+<rect x="556.0" y="168.0" width="11.0" height="28.0" fill="#4c6ef5" opacity="0.85"/>
+<rect x="568.0" y="196.0" width="11.0" height="0.0" fill="#4c6ef5" opacity="0.85"/>
+<rect x="580.0" y="196.0" width="11.0" height="0.0" fill="#4c6ef5" opacity="0.85"/>
+<rect x="592.0" y="196.0" width="11.0" height="0.0" fill="#4c6ef5" opacity="0.85"/>
+<rect x="604.0" y="140.0" width="11.0" height="56.0" fill="#4c6ef5" opacity="0.85"/>
+<rect x="616.0" y="140.0" width="11.0" height="56.0" fill="#4c6ef5" opacity="0.85"/>
+<rect x="628.0" y="168.0" width="11.0" height="28.0" fill="#4c6ef5" opacity="0.85"/>
+<rect x="640.0" y="196.0" width="11.0" height="0.0" fill="#4c6ef5" opacity="0.85"/>
+<text x="645.5" y="210" text-anchor="middle" font-size="9" fill="#444">08-20</text>
+<rect x="652.0" y="140.0" width="11.0" height="56.0" fill="#4c6ef5" opacity="0.85"/>
+<rect x="664.0" y="196.0" width="11.0" height="0.0" fill="#4c6ef5" opacity="0.85"/>
+<rect x="676.0" y="196.0" width="11.0" height="0.0" fill="#4c6ef5" opacity="0.85"/>
+<rect x="688.0" y="196.0" width="11.0" height="0.0" fill="#4c6ef5" opacity="0.85"/>
+<rect x="700.0" y="168.0" width="11.0" height="28.0" fill="#4c6ef5" opacity="0.85"/>
+<rect x="712.0" y="168.0" width="11.0" height="28.0" fill="#4c6ef5" opacity="0.85"/>
+<rect x="724.0" y="56.0" width="11.0" height="140.0" fill="#4c6ef5" opacity="0.85"/>
+<rect x="736.0" y="196.0" width="11.0" height="0.0" fill="#4c6ef5" opacity="0.85"/>
+<rect x="748.0" y="196.0" width="11.0" height="0.0" fill="#4c6ef5" opacity="0.85"/>
+<rect x="760.0" y="196.0" width="11.0" height="0.0" fill="#4c6ef5" opacity="0.85"/>
+<text x="765.5" y="210" text-anchor="middle" font-size="9" fill="#444">08-30</text>
+<rect x="772.0" y="140.0" width="11.0" height="56.0" fill="#4c6ef5" opacity="0.85"/>
+<rect x="784.0" y="196.0" width="11.0" height="0.0" fill="#4c6ef5" opacity="0.85"/>
+<rect x="796.0" y="140.0" width="11.0" height="56.0" fill="#4c6ef5" opacity="0.85"/>
+<rect x="808.0" y="28.0" width="11.0" height="168.0" fill="#4c6ef5" opacity="0.85"/>
+<rect x="820.0" y="84.0" width="11.0" height="112.0" fill="#4c6ef5" opacity="0.85"/>
+<rect x="832.0" y="168.0" width="11.0" height="28.0" fill="#4c6ef5" opacity="0.85"/>
+<rect x="844.0" y="196.0" width="11.0" height="0.0" fill="#4c6ef5" opacity="0.85"/>
+<rect x="856.0" y="196.0" width="11.0" height="0.0" fill="#4c6ef5" opacity="0.85"/>
+<rect x="868.0" y="196.0" width="11.0" height="0.0" fill="#4c6ef5" opacity="0.85"/>
+<rect x="880.0" y="168.0" width="11.0" height="28.0" fill="#4c6ef5" opacity="0.85"/>
+<text x="885.5" y="210" text-anchor="middle" font-size="9" fill="#444">09-09</text>
+<rect x="892.0" y="140.0" width="11.0" height="56.0" fill="#4c6ef5" opacity="0.85"/>
+<rect x="904.0" y="196.0" width="11.0" height="0.0" fill="#4c6ef5" opacity="0.85"/>
+<rect x="916.0" y="168.0" width="11.0" height="28.0" fill="#4c6ef5" opacity="0.85"/>
+<rect x="928.0" y="196.0" width="11.0" height="0.0" fill="#4c6ef5" opacity="0.85"/>
+<rect x="940.0" y="196.0" width="11.0" height="0.0" fill="#4c6ef5" opacity="0.85"/>
+<rect x="952.0" y="196.0" width="11.0" height="0.0" fill="#4c6ef5" opacity="0.85"/>
+<rect x="964.0" y="84.0" width="11.0" height="112.0" fill="#4c6ef5" opacity="0.85"/>
+<rect x="976.0" y="196.0" width="11.0" height="0.0" fill="#4c6ef5" opacity="0.85"/>
+<rect x="988.0" y="196.0" width="11.0" height="0.0" fill="#4c6ef5" opacity="0.85"/>
+<text x="993.5" y="210" text-anchor="middle" font-size="9" fill="#444">09-18</text>
+<polyline fill="none" stroke="#c92a2a" stroke-width="2" points="45.5,196.0 57.5,191.5 69.5,189.3 81.5,189.3 93.5,189.3 105.5,187.0 117.5,187.0 129.5,187.0 141.5,187.0 153.5,184.8 165.5,184.8 177.5,184.8 189.5,184.8 201.5,182.6 213.5,182.6 225.5,182.6 237.5,169.1 249.5,169.1 261.5,169.1 273.5,164.6 285.5,162.4 297.5,162.4 309.5,162.4 321.5,162.4 333.5,162.4 345.5,162.4 357.5,155.7 369.5,151.2 381.5,149.0 393.5,144.5 405.5,140.0 417.5,140.0 429.5,140.0 441.5,137.8 453.5,135.5 465.5,135.5 477.5,131.0 489.5,131.0 501.5,131.0 513.5,131.0 525.5,124.3 537.5,124.3 549.5,113.1 561.5,110.9 573.5,110.9 585.5,110.9 597.5,110.9 609.5,106.4 621.5,101.9 633.5,99.7 645.5,99.7 657.5,95.2 669.5,95.2 681.5,95.2 693.5,95.2 705.5,93.0 717.5,90.7 729.5,79.5 741.5,79.5 753.5,79.5 765.5,79.5 777.5,75.0 789.5,75.0 801.5,70.6 813.5,57.1 825.5,48.2 837.5,45.9 849.5,45.9 861.5,45.9 873.5,45.9 885.5,43.7 897.5,39.2 909.5,39.2 921.5,37.0 933.5,37.0 945.5,37.0 957.5,37.0 969.5,28.0 981.5,28.0 993.5,28.0"/>
+<text x="200" y="16" font-size="11" fill="#4c6ef5" font-family="sans-serif">daily new (bars, left)</text><text x="400" y="16" font-size="11" fill="#c92a2a" font-family="sans-serif">cumulative (line, right)</text>
+</svg>
+
+<h2>Names in live ∩ not in CSV</h2>
+<table>
+<thead><tr>
+<th>base</th><th>crypto</th><th>joint listed UTC</th><th>later venue</th>
+<th>Bybit launch</th><th>OKX list</th><th>symbols</th>
+</tr></thead>
+<tbody>
+<tr><td><code>AKE</code></td><td>yes</td><td>2026-09-16T07:00:00Z</td><td>okx</td><td>2025-09-26T13:12:42Z</td><td>2026-09-16T07:00:00Z</td><td><code>AKEUSDT</code> / <code>AKE-USDT-SWAP</code></td></tr><tr><td><code>HANMI</code></td><td>yes</td><td>2026-09-16T06:00:00Z</td><td>okx</td><td>2026-08-14T09:09:03Z</td><td>2026-09-16T06:00:00Z</td><td><code>HANMIUSDT</code> / <code>HANMI-USDT-SWAP</code></td></tr><tr><td><code>NAVER</code></td><td>yes</td><td>2026-09-16T05:45:00Z</td><td>okx</td><td>2026-08-14T09:07:07Z</td><td>2026-09-16T05:45:00Z</td><td><code>NAVERUSDT</code> / <code>NAVER-USDT-SWAP</code></td></tr><tr><td><code>LGELECTRONICS</code></td><td>yes</td><td>2026-09-16T05:30:00Z</td><td>okx</td><td>2026-08-14T09:10:49Z</td><td>2026-09-16T05:30:00Z</td><td><code>LGELECTRONICSUSDT</code> / <code>LGELECTRONICS-USDT-SWAP</code></td></tr><tr><td><code>FLOCK</code></td><td>yes</td><td>2026-09-12T10:00:00Z</td><td>okx</td><td>2025-01-09T08:50:07Z</td><td>2026-09-12T10:00:00Z</td><td><code>FLOCKUSDT</code> / <code>FLOCK-USDT-SWAP</code></td></tr><tr><td><code>XOM</code></td><td>yes</td><td>2026-09-10T09:30:00Z</td><td>okx</td><td>2026-08-03T08:48:45Z</td><td>2026-09-10T09:30:00Z</td><td><code>XOMUSDT</code> / <code>XOM-USDT-SWAP</code></td></tr><tr><td><code>CGNX</code></td><td>yes</td><td>2026-09-10T09:10:26Z</td><td>bybit</td><td>2026-09-10T09:10:26Z</td><td>2026-06-12T09:45:00Z</td><td><code>CGNXUSDT</code> / <code>CGNX-USDT-SWAP</code></td></tr><tr><td><code>ZHONGJI</code></td><td>yes</td><td>2026-09-09T06:00:00Z</td><td>okx</td><td>2026-08-14T09:13:46Z</td><td>2026-09-09T06:00:00Z</td><td><code>ZHONGJIUSDT</code> / <code>ZHONGJI-USDT-SWAP</code></td></tr><tr><td><code>PONS</code></td><td>yes</td><td>2026-09-05T03:00:00Z</td><td>okx</td><td>2026-08-31T09:32:25Z</td><td>2026-09-05T03:00:00Z</td><td><code>PONSUSDT</code> / <code>PONS-USDT-SWAP</code></td></tr><tr><td><code>GPRO</code></td><td>yes</td><td>2026-09-04T13:35:00Z</td><td>okx</td><td>2026-09-02T08:14:26Z</td><td>2026-09-04T13:35:00Z</td><td><code>GPROUSDT</code> / <code>GPRO-USDT-SWAP</code></td></tr><tr><td><code>AMC</code></td><td>yes</td><td>2026-09-04T08:45:00Z</td><td>okx</td><td>2026-07-27T10:14:58Z</td><td>2026-09-04T08:45:00Z</td><td><code>AMCUSDT</code> / <code>AMC-USDT-SWAP</code></td></tr><tr><td><code>CP</code></td><td>yes</td><td>2026-09-04T07:42:00Z</td><td>bybit</td><td>2026-09-04T07:42:00Z</td><td>2026-09-02T15:40:00Z</td><td><code>CPUSDT</code> / <code>CP-USDT-SWAP</code></td></tr><tr><td><code>DGAI</code></td><td>yes</td><td>2026-09-04T07:39:39Z</td><td>bybit</td><td>2026-09-04T07:39:39Z</td><td>2026-09-03T03:00:00Z</td><td><code>DGAIUSDT</code> / <code>DGAI-USDT-SWAP</code></td></tr><tr><td><code>IONQ</code></td><td>yes</td><td>2026-09-03T09:30:00Z</td><td>okx</td><td>2026-07-17T10:52:04Z</td><td>2026-09-03T09:30:00Z</td><td><code>IONQUSDT</code> / <code>IONQ-USDT-SWAP</code></td></tr><tr><td><code>DDOG</code></td><td>yes</td><td>2026-09-03T09:15:00Z</td><td>okx</td><td>2026-08-18T09:23:46Z</td><td>2026-09-03T09:15:00Z</td><td><code>DDOGUSDT</code> / <code>DDOG-USDT-SWAP</code></td></tr><tr><td><code>PYPL</code></td><td>yes</td><td>2026-09-03T09:00:00Z</td><td>okx</td><td>2026-07-30T09:55:33Z</td><td>2026-09-03T09:00:00Z</td><td><code>PYPLUSDT</code> / <code>PYPL-USDT-SWAP</code></td></tr><tr><td><code>CSOPSAMSUNG2L</code></td><td>yes</td><td>2026-09-03T06:15:00Z</td><td>okx</td><td>2026-08-11T06:59:09Z</td><td>2026-09-03T06:15:00Z</td><td><code>CSOPSAMSUNG2LUSDT</code> / <code>CSOPSAMSUNG2L-USDT-SWAP</code></td></tr><tr><td><code>CSOPSKHYNIX2L</code></td><td>yes</td><td>2026-09-03T06:00:00Z</td><td>okx</td><td>2026-08-11T06:51:31Z</td><td>2026-09-03T06:00:00Z</td><td><code>CSOPSKHYNIX2LUSDT</code> / <code>CSOPSKHYNIX2L-USDT-SWAP</code></td></tr><tr><td><code>CASHCAT</code></td><td>yes</td><td>2026-09-03T03:30:00Z</td><td>okx</td><td>2026-08-05T10:00:43Z</td><td>2026-09-03T03:30:00Z</td><td><code>CASHCATUSDT</code> / <code>CASHCAT-USDT-SWAP</code></td></tr><tr><td><code>SPCH</code></td><td>yes</td><td>2026-09-02T08:15:00Z</td><td>okx</td><td>2026-08-20T07:54:47Z</td><td>2026-09-02T08:15:00Z</td><td><code>SPCHUSDT</code> / <code>SPCH-USDT-SWAP</code></td></tr><tr><td><code>SHEIN</code></td><td>yes</td><td>2026-09-02T07:00:00Z</td><td>okx</td><td>2026-08-27T05:24:49Z</td><td>2026-09-02T07:00:00Z</td><td><code>SHEINUSDT</code> / <code>SHEIN-USDT-SWAP</code></td></tr><tr><td><code>EWZ</code></td><td>yes</td><td>2026-08-31T09:36:37Z</td><td>bybit</td><td>2026-08-31T09:36:37Z</td><td>2026-06-18T09:15:00Z</td><td><code>EWZUSDT</code> / <code>EWZ-USDT-SWAP</code></td></tr><tr><td><code>OKTA</code></td><td>yes</td><td>2026-08-31T09:35:15Z</td><td>bybit</td><td>2026-08-31T09:35:15Z</td><td>2026-07-30T09:00:00Z</td><td><code>OKTAUSDT</code> / <code>OKTA-USDT-SWAP</code></td></tr><tr><td><code>NVDL</code></td><td>yes</td><td>2026-08-27T10:30:00Z</td><td>okx</td><td>2026-07-21T09:32:39Z</td><td>2026-08-27T10:30:00Z</td><td><code>NVDLUSDT</code> / <code>NVDL-USDT-SWAP</code></td></tr><tr><td><code>TSLL</code></td><td>yes</td><td>2026-08-27T10:15:00Z</td><td>okx</td><td>2026-07-20T09:16:48Z</td><td>2026-08-27T10:15:00Z</td><td><code>TSLLUSDT</code> / <code>TSLL-USDT-SWAP</code></td></tr><tr><td><code>MARA</code></td><td>yes</td><td>2026-08-27T10:00:00Z</td><td>okx</td><td>2026-07-17T10:46:50Z</td><td>2026-08-27T10:00:00Z</td><td><code>MARAUSDT</code> / <code>MARA-USDT-SWAP</code></td></tr><tr><td><code>WMT</code></td><td>yes</td><td>2026-08-27T09:45:00Z</td><td>okx</td><td>2026-07-30T10:02:28Z</td><td>2026-08-27T09:45:00Z</td><td><code>WMTUSDT</code> / <code>WMT-USDT-SWAP</code></td></tr><tr><td><code>MRK</code></td><td>yes</td><td>2026-08-27T09:30:00Z</td><td>okx</td><td>2026-08-21T07:20:45Z</td><td>2026-08-27T09:30:00Z</td><td><code>MRKUSDT</code> / <code>MRK-USDT-SWAP</code></td></tr><tr><td><code>INFQ</code></td><td>yes</td><td>2026-08-26T09:54:51Z</td><td>bybit</td><td>2026-08-26T09:54:51Z</td><td>2026-05-26T09:15:00Z</td><td><code>INFQUSDT</code> / <code>INFQ-USDT-SWAP</code></td></tr><tr><td><code>RAM</code></td><td>yes</td><td>2026-08-25T10:33:15Z</td><td>bybit</td><td>2026-08-25T10:33:15Z</td><td>2026-07-02T09:45:00Z</td><td><code>RAMUSDT</code> / <code>RAM-USDT-SWAP</code></td></tr><tr><td><code>PURR</code></td><td>yes</td><td>2026-08-21T09:15:00Z</td><td>okx</td><td>2026-07-10T09:48:53Z</td><td>2026-08-21T09:15:00Z</td><td><code>PURRUSDT</code> / <code>PURR-USDT-SWAP</code></td></tr><tr><td><code>MRNA</code></td><td>yes</td><td>2026-08-21T09:00:00Z</td><td>okx</td><td>2026-08-20T06:55:56Z</td><td>2026-08-21T09:00:00Z</td><td><code>MRNAUSDT</code> / <code>MRNA-USDT-SWAP</code></td></tr><tr><td><code>UNITREE</code></td><td>yes</td><td>2026-08-19T05:15:00Z</td><td>okx</td><td>2026-08-03T01:55:39Z</td><td>2026-08-19T05:15:00Z</td><td><code>UNITREEUSDT</code> / <code>UNITREE-USDT-SWAP</code></td></tr><tr><td><code>ISRG</code></td><td>yes</td><td>2026-08-18T09:22:20Z</td><td>bybit</td><td>2026-08-18T09:22:20Z</td><td>2026-06-11T09:30:00Z</td><td><code>ISRGUSDT</code> / <code>ISRG-USDT-SWAP</code></td></tr><tr><td><code>CXMT</code></td><td>yes</td><td>2026-08-18T06:45:00Z</td><td>okx</td><td>2026-07-27T08:13:38Z</td><td>2026-08-18T06:45:00Z</td><td><code>CXMTUSDT</code> / <code>CXMT-USDT-SWAP</code></td></tr><tr><td><code>OUST</code></td><td>yes</td><td>2026-08-17T09:30:00Z</td><td>okx</td><td>2026-08-10T09:54:14Z</td><td>2026-08-17T09:30:00Z</td><td><code>OUSTUSDT</code> / <code>OUST-USDT-SWAP</code></td></tr><tr><td><code>LYTE</code></td><td>yes</td><td>2026-08-17T09:15:00Z</td><td>okx</td><td>2026-08-13T09:02:08Z</td><td>2026-08-17T09:15:00Z</td><td><code>LYTEUSDT</code> / <code>LYTE-USDT-SWAP</code></td></tr><tr><td><code>AEON</code></td><td>yes</td><td>2026-08-13T09:04:37Z</td><td>bybit</td><td>2026-08-13T09:04:37Z</td><td>2026-07-27T11:30:00Z</td><td><code>AEONUSDT</code> / <code>AEON-USDT-SWAP</code></td></tr><tr><td><code>NET</code></td><td>yes</td><td>2026-08-12T08:30:00Z</td><td>okx</td><td>2026-08-06T09:36:26Z</td><td>2026-08-12T08:30:00Z</td><td><code>NETUSDT</code> / <code>NET-USDT-SWAP</code></td></tr><tr><td><code>RIOT</code></td><td>yes</td><td>2026-08-12T08:22:44Z</td><td>bybit</td><td>2026-08-12T08:22:44Z</td><td>2026-08-12T08:15:00Z</td><td><code>RIOTUSDT</code> / <code>RIOT-USDT-SWAP</code></td></tr><tr><td><code>XIAOMI</code></td><td>yes</td><td>2026-08-12T08:21:07Z</td><td>bybit</td><td>2026-08-12T08:21:07Z</td><td>2026-08-12T07:45:00Z</td><td><code>XIAOMIUSDT</code> / <code>XIAOMI-USDT-SWAP</code></td></tr><tr><td><code>POPMART</code></td><td>yes</td><td>2026-08-12T07:30:00Z</td><td>okx</td><td>2026-07-28T09:21:26Z</td><td>2026-08-12T07:30:00Z</td><td><code>POPMARTUSDT</code> / <code>POPMART-USDT-SWAP</code></td></tr><tr><td><code>DOS</code></td><td>yes</td><td>2026-08-12T06:12:10Z</td><td>bybit</td><td>2026-08-12T06:12:10Z</td><td>2026-08-10T12:00:00Z</td><td><code>DOSUSDT</code> / <code>DOS-USDT-SWAP</code></td></tr><tr><td><code>SKDD</code></td><td>yes</td><td>2026-08-10T09:53:11Z</td><td>bybit</td><td>2026-08-10T09:53:11Z</td><td>2026-08-10T09:15:00Z</td><td><code>SKDDUSDT</code> / <code>SKDD-USDT-SWAP</code></td></tr><tr><td><code>SKUU</code></td><td>yes</td><td>2026-08-10T09:48:21Z</td><td>bybit</td><td>2026-08-10T09:48:21Z</td><td>2026-08-10T09:00:00Z</td><td><code>SKUUUSDT</code> / <code>SKUU-USDT-SWAP</code></td></tr><tr><td><code>KO</code></td><td>yes</td><td>2026-08-10T09:30:00Z</td><td>okx</td><td>2026-07-30T10:00:18Z</td><td>2026-08-10T09:30:00Z</td><td><code>KOUSDT</code> / <code>KO-USDT-SWAP</code></td></tr><tr><td><code>SHOP</code></td><td>yes</td><td>2026-08-06T11:30:00Z</td><td>okx</td><td>2026-08-05T10:02:04Z</td><td>2026-08-06T11:30:00Z</td><td><code>SHOPUSDT</code> / <code>SHOP-USDT-SWAP</code></td></tr><tr><td><code>BRKB</code></td><td>yes</td><td>2026-08-06T11:15:00Z</td><td>okx</td><td>2026-07-30T09:53:38Z</td><td>2026-08-06T11:15:00Z</td><td><code>BRKBUSDT</code> / <code>BRKB-USDT-SWAP</code></td></tr><tr><td><code>RDDT</code></td><td>yes</td><td>2026-08-04T10:06:56Z</td><td>bybit</td><td>2026-08-04T10:06:56Z</td><td>2026-06-18T10:00:00Z</td><td><code>RDDTUSDT</code> / <code>RDDT-USDT-SWAP</code></td></tr><tr><td><code>JNJ</code></td><td>yes</td><td>2026-08-03T08:47:26Z</td><td>bybit</td><td>2026-08-03T08:47:26Z</td><td>2026-07-10T09:15:00Z</td><td><code>JNJUSDT</code> / <code>JNJ-USDT-SWAP</code></td></tr><tr><td><code>GRVT</code></td><td>yes</td><td>2026-07-31T12:01:39Z</td><td>bybit</td><td>2026-07-31T12:01:39Z</td><td>2026-07-30T15:00:00Z</td><td><code>GRVTUSDT</code> / <code>GRVT-USDT-SWAP</code></td></tr><tr><td><code>UNH</code></td><td>yes</td><td>2026-07-31T09:14:43Z</td><td>bybit</td><td>2026-07-31T09:14:43Z</td><td>2026-07-06T10:30:00Z</td><td><code>UNHUSDT</code> / <code>UNH-USDT-SWAP</code></td></tr><tr><td><code>INTW</code></td><td>yes</td><td>2026-07-30T09:30:00Z</td><td>okx</td><td>2026-07-14T08:00:53Z</td><td>2026-07-30T09:30:00Z</td><td><code>INTWUSDT</code> / <code>INTW-USDT-SWAP</code></td></tr><tr><td><code>CRM</code></td><td>yes</td><td>2026-07-30T09:15:00Z</td><td>okx</td><td>2026-07-23T09:42:36Z</td><td>2026-07-30T09:15:00Z</td><td><code>CRMUSDT</code> / <code>CRM-USDT-SWAP</code></td></tr><tr><td><code>TMF</code></td><td>yes</td><td>2026-07-29T09:38:15Z</td><td>bybit</td><td>2026-07-29T09:38:15Z</td><td>2026-07-29T09:00:00Z</td><td><code>TMFUSDT</code> / <code>TMF-USDT-SWAP</code></td></tr><tr><td><code>ZHIPU</code></td><td>yes</td><td>2026-07-28T09:19:13Z</td><td>bybit</td><td>2026-07-28T09:19:13Z</td><td>2026-06-24T07:00:00Z</td><td><code>ZHIPUUSDT</code> / <code>ZHIPU-USDT-SWAP</code></td></tr><tr><td><code>MINIMAX</code></td><td>yes</td><td>2026-07-28T09:18:00Z</td><td>bybit</td><td>2026-07-28T09:18:00Z</td><td>2026-06-24T07:15:00Z</td><td><code>MINIMAXUSDT</code> / <code>MINIMAX-USDT-SWAP</code></td></tr><tr><td><code>FLY</code></td><td>yes</td><td>2026-07-27T09:30:00Z</td><td>okx</td><td>2026-07-20T09:08:12Z</td><td>2026-07-27T09:30:00Z</td><td><code>FLYUSDT</code> / <code>FLY-USDT-SWAP</code></td></tr><tr><td><code>AEHR</code></td><td>yes</td><td>2026-07-27T09:15:00Z</td><td>okx</td><td>2026-07-16T09:20:22Z</td><td>2026-07-27T09:15:00Z</td><td><code>AEHRUSDT</code> / <code>AEHR-USDT-SWAP</code></td></tr><tr><td><code>FWDI</code></td><td>yes</td><td>2026-07-27T09:00:00Z</td><td>okx</td><td>2026-07-16T10:01:03Z</td><td>2026-07-27T09:00:00Z</td><td><code>FWDIUSDT</code> / <code>FWDI-USDT-SWAP</code></td></tr><tr><td><code>ON</code></td><td>yes</td><td>2026-07-21T09:30:18Z</td><td>bybit</td><td>2026-07-21T09:30:18Z</td><td>2026-07-06T09:15:00Z</td><td><code>ONUSDT</code> / <code>ON-USDT-SWAP</code></td></tr><tr><td><code>RIVN</code></td><td>yes</td><td>2026-07-20T09:06:58Z</td><td>bybit</td><td>2026-07-20T09:06:58Z</td><td>2026-06-18T09:30:00Z</td><td><code>RIVNUSDT</code> / <code>RIVN-USDT-SWAP</code></td></tr><tr><td><code>DKNG</code></td><td>yes</td><td>2026-07-20T09:05:52Z</td><td>bybit</td><td>2026-07-20T09:05:52Z</td><td>2026-06-18T09:45:00Z</td><td><code>DKNGUSDT</code> / <code>DKNG-USDT-SWAP</code></td></tr><tr><td><code>SNOW</code></td><td>yes</td><td>2026-07-17T11:30:00Z</td><td>okx</td><td>2026-07-10T09:52:19Z</td><td>2026-07-17T11:30:00Z</td><td><code>SNOWUSDT</code> / <code>SNOW-USDT-SWAP</code></td></tr><tr><td><code>APLD</code></td><td>yes</td><td>2026-07-17T10:50:33Z</td><td>bybit</td><td>2026-07-17T10:50:33Z</td><td>2026-07-06T09:30:00Z</td><td><code>APLDUSDT</code> / <code>APLD-USDT-SWAP</code></td></tr><tr><td><code>BX</code></td><td>yes</td><td>2026-07-17T10:49:21Z</td><td>bybit</td><td>2026-07-17T10:49:21Z</td><td>2026-06-12T09:15:00Z</td><td><code>BXUSDT</code> / <code>BX-USDT-SWAP</code></td></tr><tr><td><code>TSEM</code></td><td>yes</td><td>2026-07-17T10:48:07Z</td><td>bybit</td><td>2026-07-17T10:48:07Z</td><td>2026-06-25T10:45:00Z</td><td><code>TSEMUSDT</code> / <code>TSEM-USDT-SWAP</code></td></tr><tr><td><code>ZM</code></td><td>yes</td><td>2026-07-17T10:45:48Z</td><td>bybit</td><td>2026-07-17T10:45:48Z</td><td>2026-07-17T09:15:00Z</td><td><code>ZMUSDT</code> / <code>ZM-USDT-SWAP</code></td></tr><tr><td><code>SOXS</code></td><td>yes</td><td>2026-07-17T09:00:00Z</td><td>okx</td><td>2026-07-16T09:57:01Z</td><td>2026-07-17T09:00:00Z</td><td><code>SOXSUSDT</code> / <code>SOXS-USDT-SWAP</code></td></tr><tr><td><code>QNT</code></td><td>yes</td><td>2026-06-05T10:30:00Z</td><td>okx</td><td>2023-06-19T06:00:00Z</td><td>2026-06-05T10:30:00Z</td><td><code>QNTUSDT</code> / <code>QNT-USDT-SWAP</code></td></tr><tr><td><code>BB</code></td><td>yes</td><td>2026-06-01T09:00:00Z</td><td>okx</td><td>2024-05-14T11:41:00Z</td><td>2026-06-01T09:00:00Z</td><td><code>BBUSDT</code> / <code>BB-USDT-SWAP</code></td></tr><tr><td><code>USDC</code></td><td>yes</td><td>2023-03-12T07:55:00Z</td><td>okx</td><td>2022-06-28T07:00:12Z</td><td>2023-03-12T07:55:00Z</td><td><code>USDCUSDT</code> / <code>USDC-USDT-SWAP</code></td></tr>
+</tbody>
+</table>
+
+<h2>In live ∩, listed before freeze, missing from CSV</h2>
+<p class="note">Snapshot gap at freeze (filter, ROW slice, or matching), not growth after freeze.</p>
+<table>
+<thead><tr>
+<th>base</th><th>crypto</th><th>joint listed UTC</th><th>later venue</th>
+<th>Bybit launch</th><th>OKX list</th><th>symbols</th>
+</tr></thead>
+<tbody>
+<tr><td><code>AEHR</code></td><td>yes</td><td>2026-07-27T09:15:00Z</td><td>okx</td><td>2026-07-16T09:20:22Z</td><td>2026-07-27T09:15:00Z</td><td><code>AEHRUSDT</code> / <code>AEHR-USDT-SWAP</code></td></tr><tr><td><code>AEON</code></td><td>yes</td><td>2026-08-13T09:04:37Z</td><td>bybit</td><td>2026-08-13T09:04:37Z</td><td>2026-07-27T11:30:00Z</td><td><code>AEONUSDT</code> / <code>AEON-USDT-SWAP</code></td></tr><tr><td><code>APLD</code></td><td>yes</td><td>2026-07-17T10:50:33Z</td><td>bybit</td><td>2026-07-17T10:50:33Z</td><td>2026-07-06T09:30:00Z</td><td><code>APLDUSDT</code> / <code>APLD-USDT-SWAP</code></td></tr><tr><td><code>BB</code></td><td>yes</td><td>2026-06-01T09:00:00Z</td><td>okx</td><td>2024-05-14T11:41:00Z</td><td>2026-06-01T09:00:00Z</td><td><code>BBUSDT</code> / <code>BB-USDT-SWAP</code></td></tr><tr><td><code>BRKB</code></td><td>yes</td><td>2026-08-06T11:15:00Z</td><td>okx</td><td>2026-07-30T09:53:38Z</td><td>2026-08-06T11:15:00Z</td><td><code>BRKBUSDT</code> / <code>BRKB-USDT-SWAP</code></td></tr><tr><td><code>BX</code></td><td>yes</td><td>2026-07-17T10:49:21Z</td><td>bybit</td><td>2026-07-17T10:49:21Z</td><td>2026-06-12T09:15:00Z</td><td><code>BXUSDT</code> / <code>BX-USDT-SWAP</code></td></tr><tr><td><code>CRM</code></td><td>yes</td><td>2026-07-30T09:15:00Z</td><td>okx</td><td>2026-07-23T09:42:36Z</td><td>2026-07-30T09:15:00Z</td><td><code>CRMUSDT</code> / <code>CRM-USDT-SWAP</code></td></tr><tr><td><code>DKNG</code></td><td>yes</td><td>2026-07-20T09:05:52Z</td><td>bybit</td><td>2026-07-20T09:05:52Z</td><td>2026-06-18T09:45:00Z</td><td><code>DKNGUSDT</code> / <code>DKNG-USDT-SWAP</code></td></tr><tr><td><code>DOS</code></td><td>yes</td><td>2026-08-12T06:12:10Z</td><td>bybit</td><td>2026-08-12T06:12:10Z</td><td>2026-08-10T12:00:00Z</td><td><code>DOSUSDT</code> / <code>DOS-USDT-SWAP</code></td></tr><tr><td><code>FLY</code></td><td>yes</td><td>2026-07-27T09:30:00Z</td><td>okx</td><td>2026-07-20T09:08:12Z</td><td>2026-07-27T09:30:00Z</td><td><code>FLYUSDT</code> / <code>FLY-USDT-SWAP</code></td></tr><tr><td><code>FWDI</code></td><td>yes</td><td>2026-07-27T09:00:00Z</td><td>okx</td><td>2026-07-16T10:01:03Z</td><td>2026-07-27T09:00:00Z</td><td><code>FWDIUSDT</code> / <code>FWDI-USDT-SWAP</code></td></tr><tr><td><code>GRVT</code></td><td>yes</td><td>2026-07-31T12:01:39Z</td><td>bybit</td><td>2026-07-31T12:01:39Z</td><td>2026-07-30T15:00:00Z</td><td><code>GRVTUSDT</code> / <code>GRVT-USDT-SWAP</code></td></tr><tr><td><code>INTW</code></td><td>yes</td><td>2026-07-30T09:30:00Z</td><td>okx</td><td>2026-07-14T08:00:53Z</td><td>2026-07-30T09:30:00Z</td><td><code>INTWUSDT</code> / <code>INTW-USDT-SWAP</code></td></tr><tr><td><code>JNJ</code></td><td>yes</td><td>2026-08-03T08:47:26Z</td><td>bybit</td><td>2026-08-03T08:47:26Z</td><td>2026-07-10T09:15:00Z</td><td><code>JNJUSDT</code> / <code>JNJ-USDT-SWAP</code></td></tr><tr><td><code>KO</code></td><td>yes</td><td>2026-08-10T09:30:00Z</td><td>okx</td><td>2026-07-30T10:00:18Z</td><td>2026-08-10T09:30:00Z</td><td><code>KOUSDT</code> / <code>KO-USDT-SWAP</code></td></tr><tr><td><code>MINIMAX</code></td><td>yes</td><td>2026-07-28T09:18:00Z</td><td>bybit</td><td>2026-07-28T09:18:00Z</td><td>2026-06-24T07:15:00Z</td><td><code>MINIMAXUSDT</code> / <code>MINIMAX-USDT-SWAP</code></td></tr><tr><td><code>NET</code></td><td>yes</td><td>2026-08-12T08:30:00Z</td><td>okx</td><td>2026-08-06T09:36:26Z</td><td>2026-08-12T08:30:00Z</td><td><code>NETUSDT</code> / <code>NET-USDT-SWAP</code></td></tr><tr><td><code>ON</code></td><td>yes</td><td>2026-07-21T09:30:18Z</td><td>bybit</td><td>2026-07-21T09:30:18Z</td><td>2026-07-06T09:15:00Z</td><td><code>ONUSDT</code> / <code>ON-USDT-SWAP</code></td></tr><tr><td><code>POPMART</code></td><td>yes</td><td>2026-08-12T07:30:00Z</td><td>okx</td><td>2026-07-28T09:21:26Z</td><td>2026-08-12T07:30:00Z</td><td><code>POPMARTUSDT</code> / <code>POPMART-USDT-SWAP</code></td></tr><tr><td><code>QNT</code></td><td>yes</td><td>2026-06-05T10:30:00Z</td><td>okx</td><td>2023-06-19T06:00:00Z</td><td>2026-06-05T10:30:00Z</td><td><code>QNTUSDT</code> / <code>QNT-USDT-SWAP</code></td></tr><tr><td><code>RDDT</code></td><td>yes</td><td>2026-08-04T10:06:56Z</td><td>bybit</td><td>2026-08-04T10:06:56Z</td><td>2026-06-18T10:00:00Z</td><td><code>RDDTUSDT</code> / <code>RDDT-USDT-SWAP</code></td></tr><tr><td><code>RIOT</code></td><td>yes</td><td>2026-08-12T08:22:44Z</td><td>bybit</td><td>2026-08-12T08:22:44Z</td><td>2026-08-12T08:15:00Z</td><td><code>RIOTUSDT</code> / <code>RIOT-USDT-SWAP</code></td></tr><tr><td><code>RIVN</code></td><td>yes</td><td>2026-07-20T09:06:58Z</td><td>bybit</td><td>2026-07-20T09:06:58Z</td><td>2026-06-18T09:30:00Z</td><td><code>RIVNUSDT</code> / <code>RIVN-USDT-SWAP</code></td></tr><tr><td><code>SHOP</code></td><td>yes</td><td>2026-08-06T11:30:00Z</td><td>okx</td><td>2026-08-05T10:02:04Z</td><td>2026-08-06T11:30:00Z</td><td><code>SHOPUSDT</code> / <code>SHOP-USDT-SWAP</code></td></tr><tr><td><code>SKDD</code></td><td>yes</td><td>2026-08-10T09:53:11Z</td><td>bybit</td><td>2026-08-10T09:53:11Z</td><td>2026-08-10T09:15:00Z</td><td><code>SKDDUSDT</code> / <code>SKDD-USDT-SWAP</code></td></tr><tr><td><code>SKUU</code></td><td>yes</td><td>2026-08-10T09:48:21Z</td><td>bybit</td><td>2026-08-10T09:48:21Z</td><td>2026-08-10T09:00:00Z</td><td><code>SKUUUSDT</code> / <code>SKUU-USDT-SWAP</code></td></tr><tr><td><code>SNOW</code></td><td>yes</td><td>2026-07-17T11:30:00Z</td><td>okx</td><td>2026-07-10T09:52:19Z</td><td>2026-07-17T11:30:00Z</td><td><code>SNOWUSDT</code> / <code>SNOW-USDT-SWAP</code></td></tr><tr><td><code>SOXS</code></td><td>yes</td><td>2026-07-17T09:00:00Z</td><td>okx</td><td>2026-07-16T09:57:01Z</td><td>2026-07-17T09:00:00Z</td><td><code>SOXSUSDT</code> / <code>SOXS-USDT-SWAP</code></td></tr><tr><td><code>TMF</code></td><td>yes</td><td>2026-07-29T09:38:15Z</td><td>bybit</td><td>2026-07-29T09:38:15Z</td><td>2026-07-29T09:00:00Z</td><td><code>TMFUSDT</code> / <code>TMF-USDT-SWAP</code></td></tr><tr><td><code>TSEM</code></td><td>yes</td><td>2026-07-17T10:48:07Z</td><td>bybit</td><td>2026-07-17T10:48:07Z</td><td>2026-06-25T10:45:00Z</td><td><code>TSEMUSDT</code> / <code>TSEM-USDT-SWAP</code></td></tr><tr><td><code>UNH</code></td><td>yes</td><td>2026-07-31T09:14:43Z</td><td>bybit</td><td>2026-07-31T09:14:43Z</td><td>2026-07-06T10:30:00Z</td><td><code>UNHUSDT</code> / <code>UNH-USDT-SWAP</code></td></tr><tr><td><code>USDC</code></td><td>yes</td><td>2023-03-12T07:55:00Z</td><td>okx</td><td>2022-06-28T07:00:12Z</td><td>2023-03-12T07:55:00Z</td><td><code>USDCUSDT</code> / <code>USDC-USDT-SWAP</code></td></tr><tr><td><code>XIAOMI</code></td><td>yes</td><td>2026-08-12T08:21:07Z</td><td>bybit</td><td>2026-08-12T08:21:07Z</td><td>2026-08-12T07:45:00Z</td><td><code>XIAOMIUSDT</code> / <code>XIAOMI-USDT-SWAP</code></td></tr><tr><td><code>ZHIPU</code></td><td>yes</td><td>2026-07-28T09:19:13Z</td><td>bybit</td><td>2026-07-28T09:19:13Z</td><td>2026-06-24T07:00:00Z</td><td><code>ZHIPUUSDT</code> / <code>ZHIPU-USDT-SWAP</code></td></tr><tr><td><code>ZM</code></td><td>yes</td><td>2026-07-17T10:45:48Z</td><td>bybit</td><td>2026-07-17T10:45:48Z</td><td>2026-07-17T09:15:00Z</td><td><code>ZMUSDT</code> / <code>ZM-USDT-SWAP</code></td></tr>
+</tbody>
+</table>
+
+<h2>In CSV, missing from live ∩ (delist / rename / halt)</h2>
+<table>
+<thead><tr><th>base_coin</th></tr></thead>
+<tbody>
+<tr><td><code>ICX</code></td></tr><tr><td><code>LRC</code></td></tr>
+</tbody>
+</table>
+</body>
+</html>

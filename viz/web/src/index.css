@@ -1,0 +1,244 @@
+:root {
+  --bg: #f4f1ea;
+  --card: #fffdf8;
+  --ink: #1c1917;
+  --muted: #57534e;
+  --line: #e7e0d4;
+  --accent: #1d4ed8;
+  --accent-ink: #fff;
+  --gold: #fbbf24;
+  --gold-bg: #fff7db;
+  --danger: #b91c1c;
+}
+* {
+  box-sizing: border-box;
+}
+body {
+  margin: 0;
+  font-family: "Source Sans 3", "Segoe UI", system-ui, sans-serif;
+  background: var(--bg);
+  color: var(--ink);
+  line-height: 1.45;
+}
+.wrap {
+  max-width: 96rem;
+  margin: 0 auto;
+  padding: 1.1rem 1.4rem 3rem;
+}
+h1 {
+  font-size: 1.55rem;
+  font-weight: 700;
+  margin: 0.75rem 0 0.45rem;
+  letter-spacing: -0.02em;
+}
+h2 {
+  font-size: 1.2rem;
+  margin: 1.6rem 0 0.4rem;
+}
+p {
+  margin: 0.45rem 0;
+}
+a {
+  color: var(--accent);
+}
+.lede,
+.note,
+.meta {
+  max-width: 70rem;
+  color: var(--muted);
+}
+.meta {
+  font-size: 0.92rem;
+}
+.section-head {
+  display: flex;
+  align-items: baseline;
+  gap: 0.6rem;
+  margin-top: 1.4rem;
+}
+.count-pill {
+  background: var(--line);
+  border-radius: 999px;
+  padding: 0.15rem 0.55rem;
+  font-size: 0.85rem;
+  color: var(--muted);
+}
+.coin-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(7.2rem, 1fr));
+  gap: 0.45rem;
+  margin: 0.7rem 0 1.2rem;
+}
+.coin-chip {
+  display: block;
+  text-align: center;
+  text-decoration: none;
+  color: var(--ink);
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 0.45rem 0.35rem;
+  font-weight: 650;
+  font-size: 0.92rem;
+}
+.coin-chip:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+nav.coin-nav {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.55rem 0.75rem;
+  align-items: center;
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 0.65rem 0.9rem;
+  position: sticky;
+  top: 0.4rem;
+  z-index: 20;
+}
+a.nav-btn {
+  display: inline-block;
+  padding: 0.38rem 0.7rem;
+  border-radius: 8px;
+  font-weight: 650;
+  text-decoration: none;
+  font-size: 0.95rem;
+  background: var(--accent);
+  color: var(--accent-ink);
+}
+a.nav-home {
+  background: transparent;
+  border: 1px solid var(--line);
+  color: var(--ink);
+}
+.panel {
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 0.9rem 1rem;
+  margin: 0.9rem 0;
+  max-width: 70rem;
+}
+.panel label {
+  display: inline-flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  font-size: 0.88rem;
+  color: var(--muted);
+  margin-right: 0.75rem;
+  margin-bottom: 0.5rem;
+}
+.panel input {
+  font: inherit;
+  padding: 0.35rem 0.5rem;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  color: var(--ink);
+  background: #fff;
+}
+.panel button {
+  font: inherit;
+  font-weight: 650;
+  padding: 0.4rem 0.85rem;
+  border: none;
+  border-radius: 8px;
+  background: var(--accent);
+  color: var(--accent-ink);
+  cursor: pointer;
+}
+.panel button:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+.error {
+  color: var(--danger);
+  background: #fef2f2;
+  border: 1px solid #fecaca;
+  border-radius: 8px;
+  padding: 0.7rem 0.9rem;
+  max-width: 70rem;
+}
+.legend-topn {
+  display: flex;
+  gap: 0.7rem;
+  align-items: flex-start;
+  background: var(--gold-bg);
+  border: 1px solid var(--gold);
+  border-radius: 10px;
+  padding: 0.7rem 0.9rem;
+  margin: 0.8rem 0;
+  max-width: 70rem;
+}
+.chart-wrap {
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 0.4rem;
+  margin-top: 0.8rem;
+}
+.stats-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(13.5rem, 1fr));
+  gap: 0.65rem;
+  margin: 0.7rem 0 0.55rem;
+}
+.stat {
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 0.65rem 0.8rem;
+}
+.stat .k {
+  display: block;
+  font-size: 0.8rem;
+  color: var(--muted);
+}
+.stat .v {
+  display: block;
+  font-size: 1.02rem;
+  font-weight: 650;
+  margin-top: 0.15rem;
+}
+.table-wrap {
+  overflow: auto;
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  margin: 0.5rem 0 1.2rem;
+}
+table {
+  border-collapse: collapse;
+  width: 100%;
+}
+th,
+td {
+  border-bottom: 1px solid var(--line);
+  padding: 0.38rem 0.55rem;
+  font-size: 0.86rem;
+  text-align: left;
+}
+th {
+  background: #efe8dc;
+  position: sticky;
+  top: 0;
+  z-index: 1;
+}
+tbody tr:hover {
+  background: #faf6ee;
+}
+span.nav-disabled {
+  display: inline-block;
+  padding: 0.38rem 0.7rem;
+  border-radius: 8px;
+  background: #eeeae3;
+  color: #a8a29e;
+}
+.kbd {
+  font-size: 0.88rem;
+  color: var(--muted);
+}
+code {
+  font-size: 0.84rem;
+}

@@ -79,6 +79,7 @@ same tick. Opening the **other** side (flip) is not this rule.
 ```bash
 PYTHONPATH=. ./venv/bin/python -m unittest tests.test_gear22_backtest_policy
 PYTHONPATH=. ./venv/bin/python -m unittest tests.test_gear22_backtest_replay
+PYTHONPATH=. ./venv/bin/python -m unittest tests.test_gear22_backtest_plot_trades
 ```
 
 ## Replay (one UTC day)
@@ -108,8 +109,10 @@ wrong for gear-2 K=1).
 Pass-1: fill = that second's `spread_last` of the opened side; no Trade_Lat.
 Prints trade count only — not a PnL claim.
 
-Thin Jupyter driver (same knobs, table + one chart):
-`research/gear22_backtest/replay.ipynb`. Open from repo root:
+Thin Jupyter driver (frozen knobs, censoring table, trade Plotly):
+`research/gear22_backtest/replay.ipynb`. Graphs: `plot_trades.py` writes
+`output/gear22_backtest_trade_plots.html` (open in a browser; not `fig.show`).
+1 Hz `theta` / `p50` / `spread_last`, 15 min pad, dropdown + slider.
 `PYTHONPATH=. jupyter notebook research/gear22_backtest/replay.ipynb`.
 Keep `SLOT_MODE = "global"` and one `replay_hive` over the hive.
 

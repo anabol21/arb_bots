@@ -1,0 +1,708 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Private / Live Contour — карта для читателя bybit_ws.py</title>
+<style>
+  :root {
+    --bg: #0f1419;
+    --bg2: #1a2332;
+    --bg3: #243044;
+    --text: #e7ecf3;
+    --muted: #9aa8bc;
+    --border: #2e3d52;
+    --public: #3b82f6;
+    --private: #a855f7;
+    --prepare: #f59e0b;
+    --send: #22c55e;
+    --safety: #ef4444;
+    --signal: #06b6d4;
+    --warm: #ec4899;
+    --gap: #fb923c;
+    --card: #151d2a;
+    --code: #0b1220;
+  }
+  * { box-sizing: border-box; }
+  html { scroll-behavior: smooth; }
+  body {
+    margin: 0;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    line-height: 1.55;
+    font-size: 15px;
+  }
+  a { color: #7dd3fc; text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  code, .mono {
+    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+    font-size: 0.86em;
+  }
+  code {
+    background: var(--code);
+    padding: 0.12em 0.4em;
+    border-radius: 4px;
+    border: 1px solid var(--border);
+  }
+  .wrap { max-width: 1180px; margin: 0 auto; padding: 1.25rem 1.25rem 4rem; }
+  header.hero {
+    background: linear-gradient(135deg, #152036 0%, #1a1530 50%, #12241f 100%);
+    border: 1px solid var(--border);
+    border-radius: 14px;
+    padding: 1.5rem 1.6rem;
+    margin-bottom: 1rem;
+  }
+  header.hero h1 { margin: 0 0 0.4rem; font-size: 1.55rem; letter-spacing: -0.02em; }
+  header.hero .sub { color: var(--muted); margin: 0 0 1rem; max-width: 70ch; }
+  .badges { display: flex; flex-wrap: wrap; gap: 0.45rem; }
+  .badge {
+    display: inline-flex; align-items: center; gap: 0.35rem;
+    font-size: 0.75rem; font-weight: 600; letter-spacing: 0.02em;
+    padding: 0.28rem 0.55rem; border-radius: 999px; border: 1px solid transparent;
+  }
+  .b-public { background: rgba(59,130,246,.15); color: #93c5fd; border-color: rgba(59,130,246,.35); }
+  .b-private { background: rgba(168,85,247,.15); color: #d8b4fe; border-color: rgba(168,85,247,.35); }
+  .b-prepare { background: rgba(245,158,11,.15); color: #fcd34d; border-color: rgba(245,158,11,.35); }
+  .b-send { background: rgba(34,197,94,.15); color: #86efac; border-color: rgba(34,197,94,.35); }
+  .b-safety { background: rgba(239,68,68,.15); color: #fca5a5; border-color: rgba(239,68,68,.35); }
+  .b-signal { background: rgba(6,182,212,.15); color: #67e8f9; border-color: rgba(6,182,212,.35); }
+  .b-warm { background: rgba(236,72,153,.15); color: #f9a8d4; border-color: rgba(236,72,153,.35); }
+  .b-gap { background: rgba(251,146,60,.18); color: #fdba74; border-color: rgba(251,146,60,.4); }
+
+  nav.toc {
+    position: sticky; top: 0; z-index: 20;
+    background: rgba(15,20,25,.92); backdrop-filter: blur(8px);
+    border: 1px solid var(--border); border-radius: 12px;
+    padding: 0.65rem 0.85rem; margin: 0 0 1.25rem;
+  }
+  nav.toc .label { font-size: 0.7rem; text-transform: uppercase; letter-spacing: .08em; color: var(--muted); margin-bottom: 0.35rem; }
+  nav.toc .links { display: flex; flex-wrap: wrap; gap: 0.35rem; }
+  nav.toc a {
+    font-size: 0.78rem; padding: 0.28rem 0.5rem; border-radius: 8px;
+    background: var(--bg2); border: 1px solid var(--border); color: var(--text);
+  }
+  nav.toc a:hover { border-color: #5b7a9e; text-decoration: none; }
+
+  section.block {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 14px;
+    padding: 1.2rem 1.35rem 1.35rem;
+    margin-bottom: 1.1rem;
+    border-left: 4px solid var(--border);
+  }
+  section.block.public { border-left-color: var(--public); }
+  section.block.private { border-left-color: var(--private); }
+  section.block.prepare { border-left-color: var(--prepare); }
+  section.block.send { border-left-color: var(--send); }
+  section.block.safety { border-left-color: var(--safety); }
+  section.block.signal { border-left-color: var(--signal); }
+  section.block.warm { border-left-color: var(--warm); }
+  section.block.gap { border-left-color: var(--gap); }
+  section.block.start { border-left-color: #94a3b8; }
+
+  .block-head { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 0.5rem; margin-bottom: 0.65rem; }
+  .block-head h2 { margin: 0; font-size: 1.2rem; }
+  .path {
+    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+    font-size: 0.78rem; color: #cbd5e1;
+    background: var(--bg2); border: 1px solid var(--border);
+    padding: 0.25rem 0.55rem; border-radius: 8px;
+  }
+  .was {
+    margin: 0.75rem 0 0;
+    padding: 0.7rem 0.85rem;
+    background: rgba(125,211,252,.06);
+    border: 1px dashed rgba(125,211,252,.35);
+    border-radius: 10px;
+    color: #c7e7f8;
+    font-size: 0.92rem;
+  }
+  .was strong { color: #7dd3fc; }
+  .note { color: var(--muted); font-size: 0.9rem; margin: 0.4rem 0 0.8rem; }
+
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 0.7rem; margin-top: 0.7rem; }
+  .card {
+    background: var(--bg2);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 0.75rem 0.85rem;
+  }
+  .card h3 { margin: 0 0 0.35rem; font-size: 0.95rem; }
+  .card p { margin: 0; color: var(--muted); font-size: 0.86rem; }
+  .card .fn { color: #e2e8f0; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; font-size: 0.82rem; }
+
+  table.cmp {
+    width: 100%; border-collapse: collapse; margin-top: 0.85rem;
+    font-size: 0.88rem;
+  }
+  table.cmp th, table.cmp td {
+    border: 1px solid var(--border); padding: 0.55rem 0.65rem; text-align: left; vertical-align: top;
+  }
+  table.cmp th { background: var(--bg3); color: #cbd5e1; font-weight: 600; }
+  table.cmp td.old { color: #fde68a; width: 38%; }
+  table.cmp td.new { color: #bbf7d0; }
+  table.cmp tr:nth-child(even) td { background: rgba(255,255,255,.02); }
+
+  /* Pure CSS flowchart */
+  .flow {
+    margin: 1rem 0 0.4rem;
+    display: flex; flex-wrap: wrap; align-items: center; gap: 0.4rem;
+    font-size: 0.82rem;
+  }
+  .flow .node {
+    padding: 0.45rem 0.65rem; border-radius: 8px; border: 1px solid var(--border);
+    background: var(--bg2); font-weight: 600; white-space: nowrap;
+  }
+  .flow .arrow { color: var(--muted); font-weight: 700; }
+  .flow .n-public { border-color: rgba(59,130,246,.5); color: #93c5fd; }
+  .flow .n-signal { border-color: rgba(6,182,212,.5); color: #67e8f9; }
+  .flow .n-prepare { border-color: rgba(245,158,11,.5); color: #fcd34d; }
+  .flow .n-send { border-color: rgba(34,197,94,.5); color: #86efac; }
+  .flow .n-private { border-color: rgba(168,85,247,.5); color: #d8b4fe; }
+  .flow .n-safety { border-color: rgba(239,68,68,.5); color: #fca5a5; }
+
+  .two-col { display: grid; grid-template-columns: 1fr 1fr; gap: 0.8rem; }
+  @media (max-width: 800px) {
+    .two-col { grid-template-columns: 1fr; }
+    nav.toc { position: static; }
+  }
+  ul.tight { margin: 0.35rem 0 0; padding-left: 1.15rem; }
+  ul.tight li { margin: 0.2rem 0; }
+  footer {
+    margin-top: 1.5rem; color: var(--muted); font-size: 0.8rem;
+    border-top: 1px solid var(--border); padding-top: 0.9rem;
+  }
+  .warn-box {
+    background: rgba(251,146,60,.1);
+    border: 1px solid rgba(251,146,60,.45);
+    border-radius: 10px;
+    padding: 0.75rem 0.9rem;
+    margin-top: 0.7rem;
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header class="hero">
+  <h1>Private / Live Contour — шпаргалка</h1>
+  <p class="sub">
+    Для человека, который понимает код на уровне <code>else/bybit_ws.py</code>:
+    public listeners, private WS с <code>cmd_queue → sender → ws.send</code>,
+    <code>trade_manager</code>. Ниже — куда переехали те же роли в новом контуре
+    (<code>app/bot/**</code>), без дампа каждого private-метода.
+  </p>
+  <div class="badges">
+    <span class="badge b-public">public L1</span>
+    <span class="badge b-private">private warm</span>
+    <span class="badge b-signal">signal / policy</span>
+    <span class="badge b-prepare">prepare</span>
+    <span class="badge b-send">send / dual-leg</span>
+    <span class="badge b-safety">journal / safety</span>
+    <span class="badge b-warm">Warm-Lat</span>
+    <span class="badge b-gap">gap: live_broker</span>
+  </div>
+</header>
+
+<nav class="toc" aria-label="Содержание">
+  <div class="label">Навигация</div>
+  <div class="links">
+    <a href="#map">Карта bybit_ws → new</a>
+    <a href="#flow">Поток</a>
+    <a href="#s1">1. Старт</a>
+    <a href="#s2">2. Public L1</a>
+    <a href="#s3">3. Warm session</a>
+    <a href="#s4">4. Сигнал</a>
+    <a href="#s5">5. Prepare</a>
+    <a href="#s6">6. Send</a>
+    <a href="#s7">7. Journal</a>
+    <a href="#s8">8. Warm-Lat</a>
+    <a href="#s9">9. Gap live_broker</a>
+  </div>
+</nav>
+
+<section class="block start" id="map">
+  <div class="block-head">
+    <h2>Сравнительная таблица: bybit_ws.py → новый модуль</h2>
+  </div>
+  <p class="note">Эталон скорости: JSON → <code>queue.put</code> → long-lived sender → <code>ws.send</code>. Новый стек обязан быть корректнее (approval/lease/journal), но на send — не медленнее этой формы.</p>
+  <table class="cmp">
+    <thead>
+      <tr><th>В bybit_ws.py</th><th>В новом контуре</th><th>Цвет</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td class="old"><code>async def main()</code> + <code>asyncio.gather(...)</code></td>
+        <td class="new"><code>BotRuntime.run()</code> в <code>app/bot/runtime.py</code>; unit <code>spread-bbot-gear2</code>; env <code>BBOT_*</code> / <code>VENUE</code> / <code>LIVE_ORDERS</code></td>
+        <td>старт</td>
+      </tr>
+      <tr>
+        <td class="old"><code>bybit_listener</code> / <code>okx_listener</code> → globals bid/ask/spread</td>
+        <td class="new"><code>run_bybit_orderbook1</code> / <code>run_okx_books5</code> (<code>ws_books.py</code>) → <code>BotRuntime._on_book</code>; для W4 post-only ещё <code>PublicL1WsAdapter</code></td>
+        <td><span class="badge b-public">public</span></td>
+      </tr>
+      <tr>
+        <td class="old"><code>bybit_private_listener</code> / <code>okx_private_listener</code> + nested <code>sender()</code></td>
+        <td class="new"><code>PrivateWarmSession</code> + <code>PrivateStreamRuntime</code> + <code>WebsocketsClientSocket</code> (owner-loop); keepalive/reconnect</td>
+        <td><span class="badge b-private">private</span></td>
+      </tr>
+      <tr>
+        <td class="old"><code>trade_manager</code> (пороги + MA + dual <code>queue.put</code>)</td>
+        <td class="new">Policy: <code>decide_market_tick</code> / <code>decide</code>; оркестрация ног: W6/W7 / <code>LiveBroker.place</code></td>
+        <td><span class="badge b-signal">signal</span></td>
+      </tr>
+      <tr>
+        <td class="old"><code>await cmd_queue.put(order)</code></td>
+        <td class="new"><code>prepare_approved</code> → <code>enqueue_dual_dispatch</code> / <code>TradeSendQueue.put_text</code> → <code>dispatch_prepared</code></td>
+        <td><span class="badge b-prepare">prepare</span> + <span class="badge b-send">send</span></td>
+      </tr>
+      <tr>
+        <td class="old"><code>await ws.send(json.dumps(...))</code> в sender</td>
+        <td class="new"><code>TradeSendQueue</code> / socket <code>send_text</code> на тёплом trade WS; W7: barrier + parallel place</td>
+        <td><span class="badge b-send">send</span></td>
+      </tr>
+      <tr>
+        <td class="old">globals <code>*_position</code>, лог в <code>spread.log</code></td>
+        <td class="new"><code>PrivateJournalWriter</code> + <code>position.json</code> / stub pending; recovery через lease/journal</td>
+        <td><span class="badge b-safety">safety</span></td>
+      </tr>
+      <tr>
+        <td class="old">нет lease / approval / journal на send</td>
+        <td class="new">есть — но <strong>до</strong> enqueue (hot-path); на критическом send остаются fsync + venue RTT</td>
+        <td><span class="badge b-prepare">prepare</span></td>
+      </tr>
+    </tbody>
+  </table>
+</section>
+
+<section class="block start" id="flow">
+  <div class="block-head"><h2>Поток сигнала → place (после warm)</h2></div>
+  <div class="flow" aria-label="flowchart">
+    <span class="node n-public">Public L1</span>
+    <span class="arrow">→</span>
+    <span class="node n-signal">Policy / gear2</span>
+    <span class="arrow">→</span>
+    <span class="node n-prepare">Hot prepare</span>
+    <span class="arrow">→</span>
+    <span class="node n-send">Queue / dispatch</span>
+    <span class="arrow">→</span>
+    <span class="node n-private">Warm trade WS</span>
+    <span class="arrow">→</span>
+    <span class="node n-safety">Journal ack/fill</span>
+  </div>
+  <p class="note" style="margin-top:.7rem">
+    В старом мире всё после L1 жило в одном <code>trade_manager</code>.
+    Сейчас: policy решает <em>что</em>, prepare делает durable work, send — почти только network.
+  </p>
+</section>
+
+<!-- 1 START -->
+<section class="block start" id="s1">
+  <div class="block-head">
+    <h2>1. Старт / процесс</h2>
+    <span class="path">app/bot/runtime.py · app/bot/__main__.py · app/bot/private/__main__.py</span>
+  </div>
+  <p class="note">Один процесс = public L1 tasks + (опционально) warm private на жизнь процесса. Stub gear2 unit по умолчанию <em>не</em> шлёт.</p>
+  <div class="grid">
+    <div class="card">
+      <div class="fn">BotRuntime</div>
+      <p>Режим <code>BBOT_MODE=probe|policy</code>, профиль <code>gear1|gear2_would_send</code>, монеты, broker, journal, MA.</p>
+    </div>
+    <div class="card">
+      <div class="fn">BotRuntime.run()</div>
+      <p>Старт warm (если live send), затем heartbeat + пары WS на каждую монету; на выходе <code>clear_process_warm_session</code>.</p>
+    </div>
+    <div class="card">
+      <div class="fn">start_private_warm_if_live_send()</div>
+      <p>Включает warm при <code>VENUE=live</code> + <code>LIVE_ORDERS=1</code> (без отдельного opt-in флага).</p>
+    </div>
+    <div class="card">
+      <div class="fn">make_broker()</div>
+      <p><code>app/bot/broker.py</code>: сейчас только <code>stub|private_testnet</code>. Live ещё не смонтирован через factory.</p>
+    </div>
+    <div class="card">
+      <div class="fn">Unit / data</div>
+      <p>Gear2: <code>spread-bbot-gear2.service</code>, data <code>/data/bbot-gear2</code>, log <code>/var/log/spread/bbot-gear2.log</code>.</p>
+    </div>
+    <div class="card">
+      <div class="fn">Private CLI</div>
+      <p><code>python -m app.bot.private</code> — по умолчанию <strong>не</strong> открывает transport/WS (<code>assert_default_*</code>).</p>
+    </div>
+  </div>
+  <p class="was"><strong>В bybit_ws это было…</strong> <code>async def main()</code>: две очереди, <code>asyncio.gather</code> пяти корутин, ключи из <code>else/config.json</code>, <code>DRY_RUN</code>.</p>
+</section>
+
+<!-- 2 PUBLIC -->
+<section class="block public" id="s2">
+  <div class="block-head">
+    <h2>2. Public L1 (что слушает спред)</h2>
+    <span class="path">app/bot/ws_books.py · app/bot/private/ws_l1_public.py</span>
+  </div>
+  <div class="two-col">
+    <div>
+      <h3 style="margin:.2rem 0 .5rem;font-size:1rem;">Боевой bot path (много монет)</h3>
+      <div class="grid">
+        <div class="card">
+          <div class="fn">run_okx_books5</div>
+          <p>Public OKX books5 → store + callback.</p>
+        </div>
+        <div class="card">
+          <div class="fn">run_bybit_orderbook1</div>
+          <p>Public Bybit orderbook.1 → store + callback.</p>
+        </div>
+        <div class="card">
+          <div class="fn">compute_spreads / books_ready</div>
+          <p>Спред long/short из двух книг (аналог globals <code>spread_*</code>).</p>
+        </div>
+        <div class="card">
+          <div class="fn">BotRuntime._on_book → _handle_book</div>
+          <p>Coalesce тиков → validity gate → policy/probe.</p>
+        </div>
+      </div>
+    </div>
+    <div>
+      <h3 style="margin:.2rem 0 .5rem;font-size:1rem;">Private harness (W4 pricing)</h3>
+      <div class="grid">
+        <div class="card">
+          <div class="fn">PublicL1WsAdapter</div>
+          <p>Один символ, snapshot best ask для post-only.</p>
+        </div>
+        <div class="card">
+          <div class="fn">PublicL1Quote / limit_price_from_opposing_ask</div>
+          <p>ask×0.99 + tick align; freshness fail-closed.</p>
+        </div>
+      </div>
+    </div>
+  </div>
+  <p class="was"><strong>В bybit_ws это было…</strong> <code>bybit_listener</code> / <code>okx_listener</code>: subscribe tickers, пишут в globals <code>bybit_bid_price</code>… и считают <code>spread_long/short</code>.</p>
+</section>
+
+<!-- 3 WARM -->
+<section class="block private" id="s3">
+  <div class="block-head">
+    <h2>3. Private warm session (auth once, keepalive)</h2>
+    <span class="path">app/bot/private/ws_warm_session.py · ws_private.py · ws_socket.py</span>
+  </div>
+  <p class="note">Как public L1: сокеты на жизнь процесса. Нет нового auth+subscribe+REST reseed на каждый сигнал, если сессия здорова.</p>
+  <div class="grid">
+    <div class="card">
+      <div class="fn">PrivateWarmSession</div>
+      <p>Держит Bybit+OKX private/trade бандлы; <code>is_ready()</code>, handshake, stop.</p>
+    </div>
+    <div class="card">
+      <div class="fn">start_warm_private_session / start_warm_private_for_bot_process</div>
+      <p>Старт/reuse process session; production bot path с keepalive.</p>
+    </div>
+    <div class="card">
+      <div class="fn">start_keepalive / _keepalive_loop</div>
+      <p>Heartbeat/ping + reconnect с bounded backoff (в т.ч. на idle).</p>
+    </div>
+    <div class="card">
+      <div class="fn">place_io_section()</div>
+      <p>На окно place+ack паузит keepalive I/O, чтобы ACK не украли.</p>
+    </div>
+    <div class="card">
+      <div class="fn">PrivateStreamRuntime</div>
+      <p>Auth, subscribe, stream events, trade ack observation, reseed hooks.</p>
+    </div>
+    <div class="card">
+      <div class="fn">WebsocketsClientSocket</div>
+      <p>Owner-loop thread + <code>run_coroutine_threadsafe</code> + per-socket lock (thread-safe warm+parallel).</p>
+    </div>
+    <div class="card">
+      <div class="fn">get_process_warm_session / attach / clear</div>
+      <p>Процессный синглтон warm session для dual-leg send.</p>
+    </div>
+    <div class="card">
+      <div class="fn">WarmSocketBundle</div>
+      <p>Четыре сокета: bybit/okx × private/trade.</p>
+    </div>
+  </div>
+  <p class="was"><strong>В bybit_ws это было…</strong> <code>bybit_private_listener</code> / <code>okx_private_listener</code>: connect → auth → nested <code>sender()</code> читает очередь и делает <code>ws.send</code>; reconnect sleep(10).</p>
+</section>
+
+<!-- 4 SIGNAL -->
+<section class="block signal" id="s4">
+  <div class="block-head">
+    <h2>4. Сигнал / policy (gear2)</h2>
+    <span class="path">app/policy/* · app/bot/runtime.py · docs/b-bot-gear2-contour.md</span>
+  </div>
+  <div class="grid">
+    <div class="card">
+      <div class="fn">decide_market_tick</div>
+      <p><code>gear2_market_manager.py</code> — K=1, held_coin, pending_skip, ordering_key.</p>
+    </div>
+    <div class="card">
+      <div class="fn">MarketState / MarketDecision</div>
+      <p>Состояние слота и решение action/reason/counters.</p>
+    </div>
+    <div class="card">
+      <div class="fn">decide / variation_for_profile</div>
+      <p><code>trade_manager.py</code> — gear1-стиль и профили порогов/гиперпараметров.</p>
+    </div>
+    <div class="card">
+      <div class="fn">BotRuntime._gear2_maybe_act → _place_from_intent</div>
+      <p>Склеивает decision → <code>broker.place(...)</code> (stub would_send или live, когда смонтирован).</p>
+    </div>
+    <div class="card">
+      <div class="fn">Профиль gear2 would_send</div>
+      <p>BTC/ETH/SOL/XRP, пороги 0.02×4, MA 10s, Arm A, <code>Trade_Lat=100ms</code>, K=1.</p>
+    </div>
+    <div class="card">
+      <div class="fn">Private ≠ стратегия</div>
+      <p>Private стек исполняет; политика остаётся в Model/policy. Stub не sender.</p>
+    </div>
+  </div>
+  <p class="was"><strong>В bybit_ws это было…</strong> весь блок порогов/MA/open-close внутри <code>trade_manager</code>, плюс сразу сбор JSON и два <code>queue.put</code>. Стратегия и send были одним файлом.</p>
+</section>
+
+<!-- 5 PREPARE -->
+<section class="block prepare" id="s5">
+  <div class="block-head">
+    <h2>5. Hot-path prepare (до enqueue)</h2>
+    <span class="path">ws_dual_hot.py · order_sender.py · order_approval.py · order_lease.py · order_preflight.py · journal_v1.py</span>
+  </div>
+  <p class="note">Идея PR #14: journal / approval / lease / profile — <strong>до</strong> enqueue. На send остаётся почти только dispatch на тёплые trade WS.</p>
+  <div class="grid">
+    <div class="card">
+      <div class="fn">prefetch_dual_leg_hot_context</div>
+      <p>Один раз: profile/lease/preflight/TTL providers для обеих ног.</p>
+    </div>
+    <div class="card">
+      <div class="fn">wrap_hot_providers / DualLegHotContext</div>
+      <p>Контекст hot-path (кэши и обёртки провайдеров).</p>
+    </div>
+    <div class="card">
+      <div class="fn">issue_dual_leg_approvals</div>
+      <p>Выпуск approval для пары ног (vault index, не full rescan на каждом consume).</p>
+    </div>
+    <div class="card">
+      <div class="fn">ApprovalBoundSender.prepare_approved</div>
+      <p>Durable prepare одной ноги → <code>PreparedDispatch</code> (без WS send).</p>
+    </div>
+    <div class="card">
+      <div class="fn">prepare_dual_legs</div>
+      <p>Prepare обеих ног на caller thread <em>перед</em> enqueue/send.</p>
+    </div>
+    <div class="card">
+      <div class="fn">ApprovalVault / ApprovalToken</div>
+      <p>One-shot operator approval; индексы вместо полного скана approval rows.</p>
+    </div>
+    <div class="card">
+      <div class="fn">LeaseSupervisor / PostOnlyLease</div>
+      <p><code>assert_can_send</code>, TTL, cancel/recon paths.</p>
+    </div>
+    <div class="card">
+      <div class="fn">TtlCachingMetadataProvider / TtlCachingPositionModeProvider</div>
+      <p>HTTP mark/position-mode не на каждую ногу — TTL cache.</p>
+    </div>
+    <div class="card">
+      <div class="fn">PrivateJournalWriter hot indexes</div>
+      <p>O(1) consumed-approval; без full-tree <code>validate_journal_tree</code> на каждый <code>order_prepared</code>.</p>
+    </div>
+    <div class="card">
+      <div class="fn">assert_preflight_ready</div>
+      <p>Fail-closed проверка metadata + position mode перед send.</p>
+    </div>
+  </div>
+  <p class="was"><strong>В bybit_ws это было…</strong> ничего: сразу собрал dict ордера и <code>await cmd_queue.put</code>. Именно поэтому place был быстрый — и без safety rails.</p>
+</section>
+
+<!-- 6 SEND -->
+<section class="block send" id="s6">
+  <div class="block-head">
+    <h2>6. Send / dual-leg place (W6/W7, queue→send)</h2>
+    <span class="path">ws_dual_hot.py · order_sender.py · ws_w6_dual_leg.py · ws_w7_parallel_dual_leg.py · sized_dual_leg.py</span>
+  </div>
+  <div class="grid">
+    <div class="card">
+      <div class="fn">TradeSendQueue</div>
+      <p>Long-lived: <code>put_text</code> → worker → <code>socket.send_text</code>. Форма старого sender.</p>
+    </div>
+    <div class="card">
+      <div class="fn">enqueue_dual_dispatch</div>
+      <p>Барьер + near-parallel dispatch двух <code>PreparedDispatch</code> (старый dual <code>queue.put</code>).</p>
+    </div>
+    <div class="card">
+      <div class="fn">ApprovalBoundSender.dispatch_prepared</div>
+      <p>Только transport send + journal request_sent/ack (prepare уже сделан).</p>
+    </div>
+    <div class="card">
+      <div class="fn">send_approved</div>
+      <p>Старый «всё-в-одном» путь; hot-path режет его на prepare + dispatch.</p>
+    </div>
+    <div class="card">
+      <div class="fn">run_w6_dual_leg</div>
+      <p>Dual-leg market: serial open (W6) или parallel (флаги); flatten; recovery; TRUMP profile.</p>
+    </div>
+    <div class="card">
+      <div class="fn">_place_pair_parallel / _flatten_pair_parallel</div>
+      <p>Параллельные place/flatten на warm trade sockets.</p>
+    </div>
+    <div class="card">
+      <div class="fn">run_w7_parallel_dual_leg</div>
+      <p>Тонкая обёртка: W6 с <code>parallel_open/flatten=True</code>.</p>
+    </div>
+    <div class="card">
+      <div class="fn">open_w6_production_bindings</div>
+      <p>Собирает credentials, sockets, providers для live harness.</p>
+    </div>
+    <div class="card">
+      <div class="fn">build_ws_trade_transport</div>
+      <p>Transport поверх trade WS (не HTTP place на критическом пути).</p>
+    </div>
+    <div class="card">
+      <div class="fn">CLI gates</div>
+      <p>W6: <code>BBOT_PRIVATE_W6=1</code> + <code>--w6-approve-one-shot</code>; W7 аналогично. Default CLI send выключен.</p>
+    </div>
+  </div>
+  <p class="was"><strong>В bybit_ws это было…</strong> <code>await bybit_cmd_queue.put(...); await okx_cmd_queue.put(...)</code>, а nested <code>sender</code> делал <code>await ws.send</code>. Никакого W6/W7 — просто две ноги подряд в очереди.</p>
+</section>
+
+<!-- 7 JOURNAL -->
+<section class="block safety" id="s7">
+  <div class="block-head">
+    <h2>7. Journal / recovery / safety</h2>
+    <span class="path">journal_v1.py · order_lease.py · ws_gates.py · stub_broker.py · position.json</span>
+  </div>
+  <div class="grid">
+    <div class="card">
+      <div class="fn">PrivateJournalWriter</div>
+      <p>Append-only события без секретов; run_id; fsync; approval lock.</p>
+    </div>
+    <div class="card">
+      <div class="fn">validate_journal_tree / validate_event_stream</div>
+      <p>Полная проверка дерева — off hot-path (не на каждый prepare).</p>
+    </div>
+    <div class="card">
+      <div class="fn">derive_latency_intervals_from_op_events</div>
+      <p>request_sent → ack → terminal; RTT ≠ one-way.</p>
+    </div>
+    <div class="card">
+      <div class="fn">LeaseSupervisor.reconstruct / cancel</div>
+      <p>Ambiguity, TTL cancel, leftover recovery после half-leg.</p>
+    </div>
+    <div class="card">
+      <div class="fn">_recover_inflight_w6</div>
+      <p>Recovery внутри dual-leg harness при обрыве цикла.</p>
+    </div>
+    <div class="card">
+      <div class="fn">ws_gates.assert_ws_w6/w7/warm_*</div>
+      <p>Fail-closed env gates; <code>LIVE_ORDERS=1</code> сам по себе не шлёт.</p>
+    </div>
+    <div class="card">
+      <div class="fn">position.json / pending.json</div>
+      <p>StubBroker + LiveBroker: K=1 slot после рестарта (held_coin).</p>
+    </div>
+    <div class="card">
+      <div class="fn">JournalWriter (public bot)</div>
+      <p><code>app/bot/journal.py</code> — would_send intents gear2 stub контура.</p>
+    </div>
+  </div>
+  <p class="was"><strong>В bybit_ws это было…</strong> bool-globals <code>bybit_long_position</code>… и строки в <code>spread.log</code>. После краша — «что на бирже?» руками. Journal/lease — новая дисциплина.</p>
+</section>
+
+<!-- 8 WARM-LAT -->
+<section class="block warm" id="s8">
+  <div class="block-head">
+    <h2>8. Эксперименты Warm-Lat</h2>
+    <span class="path">ws_warm_latency.py · warm_latency_stages.py · docs/b-private-warm-latency-experiments.md</span>
+  </div>
+  <p class="note">Замер place-path <em>после</em> <code>warm ready=True</code>. Не переписывает production hot-path; измеряет Path A (queue→send shape) vs Path B (prepare).</p>
+  <div class="grid">
+    <div class="card">
+      <div class="fn">run_warm_latency_experiment</div>
+      <p>Оркестратор A/B/AB, dry/live, запись JSON/CSV.</p>
+    </div>
+    <div class="card">
+      <div class="fn">run_path_a_dry_cycles / _path_a_queue_send_cycle</div>
+      <p>Минимальная форма: pre-built JSON → queue → send (stub socket).</p>
+    </div>
+    <div class="card">
+      <div class="fn">run_path_b_dry_cycles</div>
+      <p>Реальный prepare (approval→lease→profile→journal), <code>dispatch_transport=False</code>.</p>
+    </div>
+    <div class="card">
+      <div class="fn">StageTrace / WarmLatencyReport</div>
+      <p>Стадии: warm_ready→intent→approval→lease→profile→order_prepared→request_sent→ack→terminal.</p>
+    </div>
+    <div class="card">
+      <div class="fn">print_vps_live_recipe</div>
+      <p><code>--warm-lat-print-vps-recipe</code> — точная VPS команда (человек, не агент).</p>
+    </div>
+    <div class="card">
+      <div class="fn">assert_ws_warm_lat_gates</div>
+      <p>Live: <code>BBOT_PRIVATE_WARM_LAT=1</code> + one-shot + VENUE/LIVE_ORDERS; n≤10.</p>
+    </div>
+  </div>
+  <ul class="tight">
+    <li>Результаты live: <code>/data/bbot-gear2/private/warm_lat/</code></li>
+    <li>Профиль: TRUMP ~$6–8/нога (как W6/W7), не SOL/XRP sizes</li>
+    <li>Не менять <code>Trade_Lat=100ms</code> по одному семплу</li>
+  </ul>
+  <p class="was"><strong>В bybit_ws это было…</strong> эталон скорости Path A (без замеров стадий). Warm-Lat как раз сравнивает «старую форму» с текущим prepare на тёплой сессии.</p>
+</section>
+
+<!-- 9 GAP -->
+<section class="block gap" id="s9">
+  <div class="block-head">
+    <h2>9. Gap: live_broker.py</h2>
+    <span class="path">app/bot/private/live_broker.py — LOCAL UNTRACKED</span>
+  </div>
+  <div class="warn-box">
+    <strong>Факт на 2026-09-04:</strong> файл есть локально и, по статусу, на VPS overlay, но
+    <code>git ls-files</code> его <strong>не знает</strong> (<code>??</code>). В PR #14/#15 его нет.
+    <code>make_broker()</code> по-прежнему принимает только <code>stub|private_testnet</code> и
+    отказывает live.
+  </div>
+  <div class="grid" style="margin-top:.7rem">
+    <div class="card">
+      <div class="fn">LiveBroker</div>
+      <p>K_live=1 sender для gear2-монет; <code>place</code> / <code>aplace</code>; position.json.</p>
+    </div>
+    <div class="card">
+      <div class="fn">default_live_send_pair</div>
+      <p>Сейчас зовёт W7-style <code>run_w6_dual_leg</code> (parallel) через production bindings.</p>
+    </div>
+    <div class="card">
+      <div class="fn">make_live_broker</div>
+      <p>Фабрика локального брокера — ещё не влита в <code>app/bot/broker.py</code>.</p>
+    </div>
+    <div class="card">
+      <div class="fn">Стык hot-path</div>
+      <p>Нужно: prefetch + prepare→enqueue из live_broker, не второй broker и не full-repo overlay на VPS.</p>
+    </div>
+  </div>
+  <p class="note" style="margin-top:.8rem">
+    Зависимость: live_broker импортирует <code>assert_gear2_live_send_gates</code> из <code>ws_gates</code> —
+    в tracked <code>ws_gates.py</code> на момент обзора видны W4–W7/warm/warm_lat gates; gear2-gate
+    может быть частью того же untracked/VPS слоя. Перед выкатом сверить.
+  </p>
+  <p class="was"><strong>В bybit_ws это было…</strong> «брокер» = сам <code>trade_manager</code>. Сейчас стратегия в runtime/policy, а live send — отдельный адаптер, который ещё не в git main path.</p>
+</section>
+
+<section class="block start">
+  <div class="block-head"><h2>Где что читать дальше</h2></div>
+  <table class="cmp">
+    <thead><tr><th>Документ</th><th>Зачем</th></tr></thead>
+    <tbody>
+      <tr><td><code>docs/REVIEW-private-latency-contour.md</code></td><td>Сводка PR #14 hot-path + PR #15 Warm-Lat на локальном main</td></tr>
+      <tr><td><code>docs/b-private-status.md</code></td><td>Статус адаптера, W3–W7, warm, latency notes</td></tr>
+      <tr><td><code>docs/b-private-warm-latency-experiments.md</code></td><td>Протокол A/B, VPS recipe, safety</td></tr>
+      <tr><td><code>docs/b-bot-gear2-contour.md</code></td><td>would_send GREEN + план live на том же контуре</td></tr>
+      <tr><td><code>docs/b-private-journal-contract.md</code></td><td>Контракт журнала v1</td></tr>
+      <tr><td><code>else/bybit_ws.py</code></td><td>Эталон формы queue→send</td></tr>
+    </tbody>
+  </table>
+</section>
+
+<footer>
+  Сгенерировано как локальный HTML в репо <code>spread/docs/</code>. Имена функций/классов сверены с деревом на Mac (main + hot-path + warm-lat + warm session).
+  Не деплой, не git push. Открыть: <code>open docs/private-contour-dashboard.html</code>
+</footer>
+
+</div>
+</body>
+</html>
