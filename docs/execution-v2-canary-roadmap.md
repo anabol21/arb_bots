@@ -257,6 +257,11 @@ EV2-12A1 has a narrow [synthetic exposure fence and legacy live-start block](tas
 EV2-12A or authorize live orders.
 EV2-12A2 adds the [fill-authoritative manager publication contract](task-packets/EV2-12A2-manager-exposure-projection.md);
 it remains pure until EV2-12B provides durable runtime wiring.
+EV2-12B1 adds the [fsynced WAL candidate fence](task-packets/EV2-12B1-durable-manager-candidate.md):
+queue acceptance cannot publish K=1 exposure, and exact durable replay is
+required before even proposing a lifecycle row. B2 venue reconciliation,
+manager-journal fsync, runtime wiring and fault injection are still open;
+the live-start block remains in place.
 
 Prepare a reviewable release without starting it.
 
