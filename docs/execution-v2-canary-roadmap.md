@@ -277,6 +277,10 @@ EV2-12C2a adds a [signed read-only WAL-bound quantity probe](task-packets/EV2-12
 It is not runtime-wired and always returns `publication_ready=false` while
 account UID, private reseed, OKX completeness and coherent recheck remain
 unproven. No live capability changes.
+EV2-12C2b adds [bounded complete OKX pending-order pagination and a double-sampled private-generation fence](task-packets/EV2-12C2b-pagination-private-fence.md).
+It remains a local, non-publishing read-only probe. Account UID ownership,
+cross-request consistency and trusted runtime integration are still open;
+live startup remains blocked.
 
 Prepare a reviewable release without starting it.
 

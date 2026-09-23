@@ -9,6 +9,7 @@ from dataclasses import replace
 from pathlib import Path
 
 from app.bot.execution.contracts import ExecutionEventType, Venue
+from app.bot.execution.engine import ReadinessSnapshot
 from app.bot.execution.durable_projection import inspect_durable_manager_candidate
 from app.bot.execution.signed_quantity_probe import (
     SignedQuantityProbeError,
@@ -38,6 +39,16 @@ from tests.test_execution_venue_quantity_compare import _POOL, _responses
 
 
 _NOW_MS = 1_700_000_000_000
+
+
+def _ready_snapshot(*, bybit_generation=1, okx_generation=1,
+                    okx_private_ready=True) -> ReadinessSnapshot:
+    return ReadinessSnapshot(
+        bybit_trade_ready=False, okx_trade_ready=False,
+        bybit_private_ready=True, okx_private_ready=okx_private_ready,
+        bybit_generation=bybit_generation, okx_generation=okx_generation,
+        kill_switch=False, pause=False,
+    )
 
 
 class _SignedReplies:
@@ -106,8 +117,9 @@ class SignedQuantityProbeTests(unittest.TestCase):
         self.assertFalse(result.publication_ready)
         self.assertTrue(result.account_ownership_required)
         self.assertTrue(result.private_reseed_required)
+        self.assertFalse(result.private_generation_stable)
         self.assertTrue(result.snapshot_consistency_required)
-        self.assertTrue(result.okx_pagination_required)
+        self.assertFalse(result.okx_pagination_required)
         self.assertEqual(result.elapsed_ms, 100)
         self.assertEqual(len(replies.calls), 4)
         self.assertTrue(all("/order/create" not in url for url, _ in replies.calls))
@@ -115,6 +127,84 @@ class SignedQuantityProbeTests(unittest.TestCase):
             ("X-BAPI-SIGN" in headers or "OK-ACCESS-SIGN" in headers)
             for _, headers in replies.calls
         ))
+
+    def test_okx_pending_pages_are_complete_and_signed(self) -> None:
+        replies = _SignedReplies()
+        first = [{"ordId": str(1000 - i), "instId": "OTHER-USDT-SWAP"}
+                 for i in range(100)]
+        original = replies.__call__
+
+        def paged(url, headers, *, timeout_sec):
+            if "/api/v5/trade/orders-pending" in url:
+                replies.calls.append((url, dict(headers)))
+                if "&after=901" in url:
+                    return {"code": "0", "data": [
+                        {"ordId": "900", "instId": "OTHER-USDT-SWAP"},
+                    ]}
+                return {"code": "0", "data": first}
+            return original(url, headers, timeout_sec=timeout_sec)
+
+        result = self.probe(paged)
+        self.assertTrue(result.comparison.matched)
+        self.assertFalse(result.publication_ready)
+        self.assertEqual(len(replies.calls), 5)
+        self.assertIn("&after=901", replies.calls[-1][0])
+        self.assertTrue(all("OK-ACCESS-SIGN" in headers
+                            for url, headers in replies.calls if "okx.com" in url))
+
+        def pool_order_on_second(url, headers, *, timeout_sec):
+            response = paged(url, headers, timeout_sec=timeout_sec)
+            if "&after=901" in url:
+                return {"code": "0", "data": [
+                    {"ordId": "900", "instId": "ETH-USDT-SWAP"},
+                ]}
+            return response
+
+        result = self.probe(pool_order_on_second)
+        self.assertFalse(result.comparison.matched)
+        self.assertEqual(result.comparison.reason, "pool_open_orders_present")
+
+    def test_okx_pending_pagination_ambiguity_fails_closed(self) -> None:
+        replies = _SignedReplies()
+        replies.responses["okx_open_orders"] = {"code": "0", "data": [
+            {"ordId": "1", "instId": "OTHER-USDT-SWAP"},
+            {"ordId": "1", "instId": "OTHER-USDT-SWAP"},
+        ]}
+        with self.assertRaisesRegex(SignedQuantityProbeError, "okx_pending_page_overlap"):
+            self.probe(replies)
+        replies.responses["okx_open_orders"] = {"code": "0", "data": [
+            {"ordId": "bad&after=2", "instId": "OTHER-USDT-SWAP"},
+        ]}
+        with self.assertRaisesRegex(SignedQuantityProbeError, "okx_pending_order_id_invalid"):
+            self.probe(replies)
+        replies.responses["okx_open_orders"] = {"code": "0", "data": [
+            {"ordId": str(1000 - i), "instId": "OTHER-USDT-SWAP"}
+            for i in range(100)
+        ]}
+        with self.assertRaisesRegex(SignedQuantityProbeError, "okx_pending_page_overlap"):
+            self.probe(replies)
+        replies.responses["okx_open_orders"] = {"code": "1", "data": []}
+        with self.assertRaisesRegex(SignedQuantityProbeError, "okx_pending_page_rejected"):
+            self.probe(replies)
+
+    def test_private_generation_fence_before_and_after_reads(self) -> None:
+        replies = _SignedReplies()
+        snapshots = iter((_ready_snapshot(), _ready_snapshot()))
+        result = self.probe(replies, private_readiness=snapshots.__next__)
+        self.assertTrue(result.private_reseed_required)
+        self.assertTrue(result.private_generation_stable)
+        self.assertTrue(result.account_ownership_required)
+        self.assertTrue(result.snapshot_consistency_required)
+        self.assertFalse(result.publication_ready)
+
+        replies = _SignedReplies()
+        snapshots = iter((_ready_snapshot(), _ready_snapshot(okx_generation=2)))
+        with self.assertRaisesRegex(SignedQuantityProbeError, "private_generation_changed"):
+            self.probe(replies, private_readiness=snapshots.__next__)
+        replies = _SignedReplies()
+        with self.assertRaisesRegex(SignedQuantityProbeError, "private_readiness_not_ready"):
+            self.probe(replies, private_readiness=lambda: _ready_snapshot(okx_private_ready=False))
+        self.assertEqual(replies.calls, [])
 
     def test_stale_bybit_response_or_slow_window_fails_closed(self) -> None:
         replies = _SignedReplies()
