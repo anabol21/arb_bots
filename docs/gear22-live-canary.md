@@ -1,7 +1,12 @@
 # Gear 2.2 live canary (Contour B dual-leg)
 
 **Track:** 3 Glue / B-private. **Gear:** 2.2 observation policy → parallel **live** canary.  
-**Status:** code + operator template only. **Do not deploy or enable on VPS from this change.**  
+**Status:** legacy code + operator template only. **Do not deploy or enable on VPS from this change.**
+This template predates the
+[EV2-12→EV2-14 private-production bridge](task-packets/EV2-12-to-gear22-private-prod-bridge.md).
+Its dual-ACK local slot is not a confirmed-filled or confirmed-flat proof;
+the bridge's exposure/WAL/reconciliation gates supersede any live-readiness
+implication here.
 **Not** a profitability claim and **not** a replacement for the stub would_send unit.
 
 Parallel live canary: **same HTML top30** and **frozen policy knobs** as VPS unit

@@ -245,6 +245,14 @@ the continuing `would_sent` contour.
 
 ### EV2-12 — immutable canary release and control plane
 
+Before preparing the immutable release, complete the EV2-12A–C execution
+hardening gates in
+[`EV2-12-to-gear22-private-prod-bridge.md`](task-packets/EV2-12-to-gear22-private-prod-bridge.md):
+ACK-versus-fill exposure semantics, durable live adapter/WAL integration, and
+quantity-aware two-venue reconciliation. EV2-11's no-order restart proof does
+not certify a fillable live CLOSE or a flat venue position. The release and
+control-plane work below is EV2-12D.
+
 Prepare a reviewable release without starting it.
 
 Deliverables:
@@ -264,12 +272,18 @@ file does not authorize installing, enabling or starting it.
 
 ### EV2-13 — bounded live canary ladder
 
+The detailed EV2-13A–D gates and EV2-14 production promotion are defined in
+[`EV2-12-to-gear22-private-prod-bridge.md`](task-packets/EV2-12-to-gear22-private-prod-bridge.md).
+In particular, dual order ACK is not a filled/flat proof; each live stage
+requires venue-confirmed per-leg exposure and independent reconciliation.
+
 Live steps require explicit user approval at every stage:
 
 1. preflight with live credentials but order sends disabled;
 2. an isolated one-round-trip real-order experiment at `$20/leg`, outside the
    continuing contour;
-3. independent flatness proof on both venues and full WAL/Sentry/Grok parity;
+3. independent filled-quantity and flatness proof on both venues, with full
+   WAL/Sentry/Grok parity;
 4. a bounded live synthetic-policy contour, still global `K_live=1`, with an
    explicit round-trip cap and stop conditions;
 5. only then enable the frozen real strategy in the continuing 30-coin canary.
