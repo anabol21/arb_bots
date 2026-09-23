@@ -262,6 +262,8 @@ queue acceptance cannot publish K=1 exposure, and exact durable replay is
 required before even proposing a lifecycle row. B2 venue reconciliation,
 manager-journal fsync, runtime wiring and fault injection are still open;
 the live-start block remains in place.
+EV2-12B2a closes the [first K=1 trade-history directory fsync gap](task-packets/EV2-12B2a-manager-journal-directory-durability.md).
+It does not publish EV2 candidates or change the live-start block.
 
 Prepare a reviewable release without starting it.
 

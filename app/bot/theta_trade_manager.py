@@ -780,8 +780,9 @@ class ThetaTradeJournalWriter:
                 fh.flush()
                 os.fsync(fh.fileno())
             if created:
-                # Persist both the new file entry and its new date partition.
-                for directory in (path.parent, path.parent.parent):
+                # Persist the file entry, date partition, and theta_trades
+                # entry in data_root before a lifecycle row changes K=1.
+                for directory in (path.parent, path.parent.parent, self.data_root):
                     fd = os.open(directory, os.O_RDONLY)
                     try:
                         os.fsync(fd)
