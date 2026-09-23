@@ -253,6 +253,9 @@ quantity-aware two-venue reconciliation. EV2-11's no-order restart proof does
 not certify a fillable live CLOSE or a flat venue position. The release and
 control-plane work below is EV2-12D.
 
+EV2-12A1 has a narrow [synthetic exposure fence and legacy live-start block](task-packets/EV2-12A-synthetic-exposure-fence.md). It does not complete
+EV2-12A or authorize live orders.
+
 Prepare a reviewable release without starting it.
 
 Deliverables:

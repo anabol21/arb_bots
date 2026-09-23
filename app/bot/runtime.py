@@ -232,6 +232,10 @@ class BotRuntime:
         assert_shadow_runtime_gates(self.profile)
         # Fail closed before broker/sentry when live canary is armed without LIVE_ORDERS.
         assert_theta_live_send_gates(self.profile)
+        # EV2-12A: the legacy Contour B path publishes K=1 on dual ACK, not
+        # confirmed per-leg fills. Do not let configuration alone arm it.
+        if theta_live_send_requested(self.profile):
+            raise RuntimeError("ev2_live_execution_adapter_not_integrated")
         
         # Initialize Sentry early (requires profile).
         from app.bot.sentry_setup import init_sentry

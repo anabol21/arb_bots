@@ -488,6 +488,27 @@ class RuntimeLiveCanaryTests(unittest.TestCase):
         __import__("importlib").util.find_spec("websockets") is not None,
         "websockets not installed",
     )
+    def test_runtime_refuses_legacy_dual_ack_live_path_even_when_armed(self) -> None:
+        env = {
+            "BBOT_MODE": "policy",
+            "BBOT_PROFILE": "gear22_live_canary",
+            "BBOT_BROKER": "private_live",
+            "BBOT_THETA_LIVE_SEND": "1",
+            "LIVE_ORDERS": "1",
+            "VENUE": "live",
+        }
+        with patch.dict("os.environ", env, clear=False):
+            from app.bot.runtime import BotRuntime
+
+            with self.assertRaisesRegex(
+                RuntimeError, "ev2_live_execution_adapter_not_integrated"
+            ):
+                BotRuntime()
+
+    @unittest.skipUnless(
+        __import__("importlib").util.find_spec("websockets") is not None,
+        "websockets not installed",
+    )
     def test_runtime_refuses_live_canary_without_live_orders(self) -> None:
         tmp = Path(tempfile.mkdtemp())
         env = {

@@ -887,9 +887,35 @@ def replay_theta_trade_history(
             if row.get("schema_version") != SCHEMA_VERSION:
                 raise ThetaTradeRecoveryError("unsupported_history_schema")
             event = str(row.get("event") or "").strip().lower()
+            live = bool(row.get("live_send"))
+            if event in {"open_attempt", "close_attempt"}:
+                if row.get("lifecycle_committed") is not False:
+                    raise ThetaTradeRecoveryError("committed_attempt")
+                if live or row.get("policy_id") != SYNTHETIC_ROLL_POLICY_ID:
+                    raise ThetaTradeRecoveryError("invalid_unfilled_lifecycle")
+                if (
+                    row.get("would_send") is not True
+                    or row.get("send") is not False
+                    or row.get("fill_size_ok") is not False
+                    or row.get("fill_ts_ms") is not None
+                ):
+                    raise ThetaTradeRecoveryError("invalid_attempt_evidence")
+                if event == "open_attempt" and position is not None:
+                    raise ThetaTradeRecoveryError("overlapping_open_attempt")
+                if event == "close_attempt":
+                    if position is None:
+                        raise ThetaTradeRecoveryError("orphan_close_attempt")
+                    if (
+                        str(row.get("trade_id") or "") != position.trade_id
+                        or str(row.get("base_coin") or "").upper() != position.base_coin
+                        or str(row.get("side") or "").lower() != position.side
+                    ):
+                        raise ThetaTradeRecoveryError("close_attempt_identity_mismatch")
+                continue
             if event not in {"open", "close"}:
                 continue
-            live = bool(row.get("live_send"))
+            if row.get("lifecycle_committed") is False:
+                raise ThetaTradeRecoveryError("invalid_unfilled_lifecycle")
             committed = row.get("send") is True if live else row.get("would_send") is True
             if not committed:
                 # A recorded live abort / size reject did not change exposure.
@@ -1047,6 +1073,40 @@ class ThetaTradeManager:
             raise ThetaTradeRecoveryError("trade_history_write_failed") from exc
         self.slot.position = position_after
 
+    def _synthetic_fill_position(
+        self,
+        row: dict[str, Any],
+        *,
+        fill_size: Mapping[str, Any],
+        position_after: Optional[OpenPosition],
+    ) -> Optional[OpenPosition]:
+        """Synthetic-roll fill is conditional; frozen would_sent stays unchanged."""
+
+        if self.config.policy_id != SYNTHETIC_ROLL_POLICY_ID:
+            return position_after
+        filled = bool(fill_size.get("size_ok"))
+        row["lifecycle_committed"] = filled
+        row["fill_outcome"] = "simulated_fill" if filled else "unfilled_insufficient_size"
+        if filled:
+            return position_after
+        event = str(row["event"])
+        row["event"] = f"{event}_attempt"
+        row["attempt_ts_ms"] = row["fill_ts_ms"]
+        row["attempt_spread"] = row["spread_fill"]
+        row["fill_ts_ms"] = None
+        row["spread_fill"] = None
+        row["slip_spread"] = None
+        row["latency_ms"] = None
+        if event == "close":
+            for key in (
+                "open_fill_spread",
+                "close_fill_spread",
+                "pnl_spread",
+                "pnl_usdt_approx",
+            ):
+                row.pop(key, None)
+        return self.slot.position
+
     def _books_for(self, quotes: Mapping[str, Any], coin: str) -> tuple[dict, dict]:
         books = quotes.get(coin) or {}
         return dict(books.get("okx") or {}), dict(books.get("bybit") or {})
@@ -1121,6 +1181,7 @@ class ThetaTradeManager:
             "intent_id": intent_id or trade_id,
             "live_send": bool(self.live_send),
             "fill_model": "venue_ack" if self.live_send else "synthetic_delay",
+            "policy_id": self.config.policy_id,
             "signal_ts_ms": int(signal_ts_ms),
             "fill_ts_ms": int(fill_ts_ms),
             "latency_ms": int(latency_ms),
@@ -1181,7 +1242,6 @@ class ThetaTradeManager:
         if live_abort:
             row["live_abort"] = live_abort
         if policy_decision is not None:
-            row["policy_id"] = self.config.policy_id
             row["policy_action"] = getattr(policy_decision, "action", None)
             row["policy_reason"] = getattr(policy_decision, "reason", None)
         return row
@@ -1197,8 +1257,8 @@ class ThetaTradeManager:
         """Apply decide + fill delay; return journal rows (0–1).
 
         Signal insufficient size → skip row with ``reject_reason`` (no trade_id
-        position). Signal OK but fill size bad → still journal would_fill with
-        ``fill_size_ok=false``.
+        position). Frozen would_sent keeps would-fill on a thin fill-time book;
+        synthetic-roll records an unfilled attempt without changing K=1.
         """
         self._assert_recovery_writable()
         if decision.action == "skip":
@@ -1395,9 +1455,12 @@ class ThetaTradeManager:
                     policy_decision=decision.policy_decision,
                 )
                 position_after = None
+            position_after = self._synthetic_fill_position(
+                row, fill_size=fill_size, position_after=position_after
+            )
             self._commit_lifecycle_row(row, position_after=position_after)
             self._log(
-                f"theta_trade_{decision.action} | trade_id={row['trade_id']} | "
+                f"theta_trade_{row['event']} | trade_id={row['trade_id']} | "
                 f"coin={row['base_coin']} | side={row['side']} | "
                 f"fill_size_ok={row.get('fill_size_ok')} | "
                 f"slip_spread={row.get('slip_spread')}"
@@ -1426,13 +1489,14 @@ class ThetaTradeManager:
                     "close_fill_spread": row.get("close_fill_spread"),
                 })
             
-            capture_trade_event(
-                event=decision.action,
-                trade_id=str(row["trade_id"]),
-                coin=str(row["base_coin"]),
-                side=str(row["side"]),
-                extras=sentry_extras,
-            )
+            if row.get("lifecycle_committed") is not False:
+                capture_trade_event(
+                    event=decision.action,
+                    trade_id=str(row["trade_id"]),
+                    coin=str(row["base_coin"]),
+                    side=str(row["side"]),
+                    extras=sentry_extras,
+                )
             
             return [row]
         finally:
@@ -1877,6 +1941,9 @@ class ThetaTradeManager:
                     policy_decision=decision.policy_decision,
                 )
                 position_after = None
+            position_after = self._synthetic_fill_position(
+                row, fill_size=fill_size, position_after=position_after
+            )
             try:
                 await asyncio.to_thread(self.journal.append_rows, [row])
             except Exception as exc:  # noqa: BLE001 - latch exposure fail-closed
@@ -1884,7 +1951,7 @@ class ThetaTradeManager:
                 raise ThetaTradeRecoveryError("trade_history_write_failed") from exc
             self.slot.position = position_after
             self._log(
-                f"theta_trade_{decision.action} | trade_id={row['trade_id']} | "
+                f"theta_trade_{row['event']} | trade_id={row['trade_id']} | "
                 f"coin={row['base_coin']} | side={row['side']} | "
                 f"fill_size_ok={row.get('fill_size_ok')} | "
                 f"slip_spread={row.get('slip_spread')}"
@@ -1913,13 +1980,14 @@ class ThetaTradeManager:
                     "close_fill_spread": row.get("close_fill_spread"),
                 })
             
-            capture_trade_event(
-                event=decision.action,
-                trade_id=str(row["trade_id"]),
-                coin=str(row["base_coin"]),
-                side=str(row["side"]),
-                extras=sentry_extras,
-            )
+            if row.get("lifecycle_committed") is not False:
+                capture_trade_event(
+                    event=decision.action,
+                    trade_id=str(row["trade_id"]),
+                    coin=str(row["base_coin"]),
+                    side=str(row["side"]),
+                    extras=sentry_extras,
+                )
             
             return [row]
         finally:

@@ -127,6 +127,54 @@ class ShadowRuntimeGateTests(unittest.TestCase):
 
 
 class ShadowRuntimeLifecycleTests(unittest.IsolatedAsyncioTestCase):
+    async def test_unfilled_synthetic_close_rejects_mirror_without_drop(self) -> None:
+        position = OpenPosition(
+            trade_id="7e881b50-9312-42b6-a453-93cbf9f14cac",
+            base_coin="KAITO",
+            side="long",
+            open_signal_ts_ms=1_700_000_000_000,
+            open_fill_ts_ms=1_700_000_000_070,
+            open_fill_spread=0.2,
+            open_notional=20.0,
+            open_theta_1m=0.4,
+            fill_spread_pp=0.2,
+        )
+        with tempfile.TemporaryDirectory() as td:
+            runtime = ExecutionShadowRuntime(
+                data_root=Path(td), log=lambda _message: None,
+                initial_position=position,
+                env={"BBOT_EV2_WARMUP_N": "0", "BBOT_EV2_COUNTED_N": "1"},
+            )
+            await runtime.start()
+            try:
+                snaps = [
+                    _snap("KAITO", "long", 0.30, floor=0.50, p50=0.80),
+                    _snap("KAITO", "short", 0.60, floor=0.60, p50=1.20),
+                ]
+                tick = await runtime.before_trade(
+                    snaps, _quotes(close=True), SlotState(position=position)
+                )
+                self.assertIsNotNone(tick.tick.intent)
+                await runtime.after_trade(
+                    tick,
+                    [{"event": "close_attempt", "lifecycle_committed": False}],
+                    _quotes(close=True),
+                )
+                self.assertEqual(runtime.state.status, SpreadStatus.OPEN)
+                self.assertEqual(runtime.summary["lifecycle_drops"], 0)
+                missing_tick = await runtime.before_trade(
+                    snaps, _quotes(close=True), SlotState(position=position)
+                )
+                self.assertIsNotNone(missing_tick.tick.intent)
+                await runtime.after_trade(missing_tick, [], _quotes(close=True))
+                self.assertEqual(runtime.summary["lifecycle_drops"], 1)
+            finally:
+                await runtime.stop()
+            journal = (Path(td) / "execution-v2-shadow.jsonl").read_text(
+                encoding="utf-8"
+            )
+            self.assertIn("synthetic_fill_unavailable", journal)
+
     async def test_restored_open_position_seeds_fsm_and_bridge_context(self) -> None:
         position = OpenPosition(
             trade_id="7e881b50-9312-42b6-a453-93cbf9f14cac",

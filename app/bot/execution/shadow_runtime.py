@@ -499,17 +499,33 @@ class ExecutionShadowRuntime:
         if intent is None:
             return
         event_name = intent.action.value
-        matched = any(str(row.get("event") or "") == event_name for row in rows)
+        matching_rows = [
+            row for row in rows if str(row.get("event") or "") == event_name
+        ]
+        attempt_rows = [
+            row for row in rows if str(row.get("event") or "") == f"{event_name}_attempt"
+        ]
+        matched = any(
+            row.get("lifecycle_committed") is not False for row in matching_rows
+        )
         if not matched:
             self.lane.bridge.clear_inflight_on_reject(intent.intent_id)
-            self._lifecycle_drops += 1
+            unfilled = any(
+                row.get("lifecycle_committed") is False for row in attempt_rows
+            )
+            if not unfilled:
+                self._lifecycle_drops += 1
             self.writer.emit(
                 {
                     "schema_version": SCHEMA_VERSION,
                     "event": "mirror_reject",
                     "run_id": self.run_id,
                     "intent_id": intent.intent_id,
-                    "reason": "would_sent_row_missing",
+                    "reason": (
+                        "synthetic_fill_unavailable"
+                        if unfilled
+                        else "would_sent_row_missing"
+                    ),
                     "orders_sent": 0,
                 }
             )

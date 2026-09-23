@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import ast
 import json
 import tempfile
@@ -24,6 +25,7 @@ from app.bot.theta_trade_manager import (
     SyntheticPolicyGateError,
     SlotState,
     ThetaTradeConfig,
+    ThetaDecision,
     ThetaTradeJournalWriter,
     ThetaTradeManager,
     ThetaTradeRecoveryError,
@@ -370,6 +372,93 @@ class SlipAndFillTests(unittest.TestCase):
         self.assertTrue(rows[0]["signal_size_ok"])
         self.assertFalse(rows[0]["fill_size_ok"])
         self.assertEqual(rows[0]["event"], "open")
+        self.assertIsNotNone(mgr.slot.position)  # frozen would_sent contract unchanged
+
+    def test_synthetic_unfilled_close_stays_open_across_restart(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            config = ThetaTradeConfig(
+                fill_delay_ms=70,
+                notional_usdt=20.0,
+                policy_params=PolicyParams(synthetic_roll_seed=7),
+                policy_id=SYNTHETIC_ROLL_POLICY_ID,
+            )
+            mgr = ThetaTradeManager(data_root=root, config=config, sleep_fn=lambda _s: None)
+            snaps = [_snap("BTC", "long", 0.01), _snap("BTC", "short", 0.01)]
+            quotes = {"BTC": _books()}
+            opened = mgr.execute_decision(
+                ThetaDecision("open", "BTC", "long", "synthetic_open_17"),
+                snapshots=snaps, quotes=quotes, now_ms=1_000_000,
+            )
+            self.assertTrue(opened[0]["lifecycle_committed"])
+            trade_id = opened[0]["trade_id"]
+
+            def shrink(_seconds: float) -> None:
+                quotes["BTC"] = _books(okx_bid_sz=0.001, bybit_ask_sz=0.001)
+
+            mgr._sleep_fn = shrink  # noqa: SLF001 - change only the fill-time book
+            attempted = mgr.execute_decision(
+                ThetaDecision("close", "BTC", "long", "synthetic_close_32"),
+                snapshots=snaps, quotes=quotes, now_ms=1_001_000,
+            )
+            self.assertEqual(attempted[0]["event"], "close_attempt")
+            self.assertFalse(attempted[0]["lifecycle_committed"])
+            self.assertEqual(attempted[0]["fill_outcome"], "unfilled_insufficient_size")
+            self.assertIsNone(attempted[0]["fill_ts_ms"])
+            self.assertIsNotNone(attempted[0]["attempt_ts_ms"])
+            self.assertNotIn("pnl_usdt_approx", attempted[0])
+            self.assertEqual(mgr.slot.position.trade_id, trade_id)
+            replayed = replay_theta_trade_history(root, expected_policy_id=SYNTHETIC_ROLL_POLICY_ID)
+            self.assertEqual(replayed.lifecycle_rows, 1)
+            self.assertEqual(replayed.position.trade_id, trade_id)
+            restarted = ThetaTradeManager(data_root=root, config=config)
+            self.assertEqual(restarted.slot.position.trade_id, trade_id)
+            quotes["BTC"] = _books()
+            restarted._sleep_fn = lambda _seconds: None  # noqa: SLF001
+            closed = restarted.execute_decision(
+                ThetaDecision("close", "BTC", "long", "synthetic_close_32"),
+                snapshots=snaps, quotes=quotes, now_ms=1_002_000,
+            )
+            self.assertEqual(closed[0]["event"], "close")
+            self.assertTrue(closed[0]["lifecycle_committed"])
+            self.assertEqual(closed[0]["trade_id"], trade_id)
+            self.assertIsNone(restarted.slot.position)
+            self.assertIsNone(
+                replay_theta_trade_history(
+                    root, expected_policy_id=SYNTHETIC_ROLL_POLICY_ID
+                ).position
+            )
+
+    def test_async_synthetic_unfilled_open_never_occupies_slot(self) -> None:
+        async def run() -> None:
+            with tempfile.TemporaryDirectory() as td:
+                root = Path(td)
+                config = ThetaTradeConfig(
+                    fill_delay_ms=70,
+                    notional_usdt=20.0,
+                    policy_params=PolicyParams(synthetic_roll_seed=7),
+                    policy_id=SYNTHETIC_ROLL_POLICY_ID,
+                )
+                quotes = {"BTC": _books()}
+
+                async def shrink(_seconds: float) -> None:
+                    quotes["BTC"] = _books(okx_ask_sz=0.001, bybit_bid_sz=0.001)
+
+                mgr = ThetaTradeManager(data_root=root, config=config, sleep_fn=shrink)
+                snaps = [_snap("BTC", "long", 0.01), _snap("BTC", "short", 0.01)]
+                rows = await mgr._execute_decision_async(  # noqa: SLF001
+                    ThetaDecision("open", "BTC", "long", "synthetic_open_17"),
+                    snapshots=snaps, quotes=quotes, now_ms=1_000_000,
+                )
+                self.assertFalse(rows[0]["lifecycle_committed"])
+                self.assertEqual(rows[0]["event"], "open_attempt")
+                self.assertIsNone(rows[0]["fill_ts_ms"])
+                self.assertIsNone(mgr.slot.position)
+                replayed = replay_theta_trade_history(root, expected_policy_id=SYNTHETIC_ROLL_POLICY_ID)
+                self.assertIsNone(replayed.position)
+                self.assertEqual(replayed.lifecycle_rows, 0)
+
+        asyncio.run(run())
 
 
 class JournalSchemaTests(unittest.TestCase):
