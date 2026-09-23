@@ -143,6 +143,22 @@ class LoopOwnedTradeSocket(Protocol):
         ...
 
 
+class NoOrderTradeSocket:
+    """Network-incapable owner-loop sentinel for prewrite audit only."""
+
+    __slots__ = ("owner_loop", "write_attempts")
+
+    def __init__(self, loop: asyncio.AbstractEventLoop) -> None:
+        if not isinstance(loop, asyncio.AbstractEventLoop):
+            raise TransportError("unknown_loop_ownership")
+        self.owner_loop = loop
+        self.write_attempts = 0
+
+    async def asend(self, text: str) -> None:
+        self.write_attempts += 1
+        raise RuntimeError("no_order_socket_forbids_asend")
+
+
 FrameFinalizer = Callable[..., str]
 DispatchGuard = Callable[[], bool]
 
@@ -697,6 +713,35 @@ class DispatchResult:
         )
 
 
+@dataclass(frozen=True)
+class PrewriteAuditResult:
+    """Finalized-and-fenced order candidate; no transport write occurred."""
+
+    intent_id: str
+    run_id: str
+    ready: bool
+    reason_code: Optional[str]
+    signal_to_prewrite_ns: Optional[int]
+    bybit_payload_bytes: int
+    okx_payload_bytes: int
+
+    def to_public_dict(self) -> dict[str, Any]:
+        out = {
+            "schema_version": SCHEMA_VERSION,
+            "intent_id": self.intent_id,
+            "run_id": self.run_id,
+            "ready": self.ready,
+            "reason_code": self.reason_code,
+            "signal_to_prewrite_ns": self.signal_to_prewrite_ns,
+            "bybit_payload_bytes": self.bybit_payload_bytes,
+            "okx_payload_bytes": self.okx_payload_bytes,
+            "orders_sent": 0,
+            "trade_socket_bound": False,
+        }
+        _assert_public(out)
+        return out
+
+
 def _not_attempted(frame: FrozenStaticFrame, *, reason_code: str) -> VenueWriteEvidence:
     return VenueWriteEvidence(
         venue=frame.venue,
@@ -1051,6 +1096,90 @@ class ExecutionTransport:
             raise TransportError("rejected_before_write", intent_id=prepared.intent.intent_id)
         return bybit_text, okx_text, _payload_bytes(bybit_text), _payload_bytes(okx_text)
 
+    def _prewrite(
+        self,
+        prepared: PreparedDualLeg,
+        pre_send_guard: Optional[DispatchGuard],
+    ) -> tuple[int, str, str, int, int] | DispatchResult:
+        rejected = self._preflight(prepared)
+        if rejected is not None:
+            return rejected
+        entry_ns = self._mono()
+        if entry_ns > prepared.fresh_until_mono_ns:
+            return self._reject(prepared, "stale_metadata", entry_ns=entry_ns)
+        try:
+            timestamp_ms = self._wall_ms()
+            if not isinstance(timestamp_ms, int) or isinstance(timestamp_ms, bool) or timestamp_ms < 0:
+                return self._reject(prepared, "clock_regression", entry_ns=entry_ns)
+            bybit_text, okx_text, bybit_bytes, okx_bytes = self._finalize(prepared, timestamp_ms)
+        except TransportError as exc:
+            return self._reject(prepared, exc.reason_code, entry_ns=entry_ns)
+        except Exception:
+            return self._reject(prepared, "rejected_before_write", entry_ns=entry_ns)
+
+        # Synchronous guard on the socket-owner loop: no await can invalidate
+        # the readiness lease before dispatch schedules both asend tasks.
+        if pre_send_guard is not None:
+            try:
+                allowed = pre_send_guard()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                allowed = False
+            if allowed is not True:
+                return self._reject(prepared, "readiness_changed", entry_ns=entry_ns)
+        return entry_ns, bybit_text, okx_text, bybit_bytes, okx_bytes
+
+    def audit_prewrite(
+        self,
+        prepared: PreparedDualLeg,
+        *,
+        pre_send_guard: DispatchGuard,
+    ) -> PrewriteAuditResult:
+        """Exercise dispatch prewrite logic without creating any send task.
+
+        Only network-incapable sentinels are accepted; this result is never a
+        DispatchResult, ACK, fill, or exposure proof.
+        """
+        if not isinstance(self._bybit_socket, NoOrderTradeSocket) or not isinstance(
+            self._okx_socket, NoOrderTradeSocket
+        ):
+            raise TransportError("invalid_socket")
+        if not callable(pre_send_guard):
+            raise TransportError("readiness_changed")
+        if self._bybit_socket.write_attempts or self._okx_socket.write_attempts:
+            raise TransportError("rejected_before_write")
+        prewrite = self._prewrite(prepared, pre_send_guard)
+        if isinstance(prewrite, DispatchResult):
+            return PrewriteAuditResult(
+                intent_id=prepared.intent.intent_id, run_id=prepared.intent.run_id,
+                ready=False, reason_code=prewrite.reason_code,
+                signal_to_prewrite_ns=None, bybit_payload_bytes=0,
+                okx_payload_bytes=0,
+            )
+        entry_ns, _, _, bybit_bytes, okx_bytes = prewrite
+        completed_ns = self._mono()
+        if (
+            completed_ns < entry_ns
+            or completed_ns < prepared.intent.signal_mono_ns
+            or self._bybit_socket.write_attempts
+            or self._okx_socket.write_attempts
+        ):
+            return PrewriteAuditResult(
+                intent_id=prepared.intent.intent_id, run_id=prepared.intent.run_id,
+                ready=False, reason_code="clock_regression"
+                if completed_ns < entry_ns or completed_ns < prepared.intent.signal_mono_ns
+                else "rejected_before_write",
+                signal_to_prewrite_ns=None, bybit_payload_bytes=0,
+                okx_payload_bytes=0,
+            )
+        return PrewriteAuditResult(
+            intent_id=prepared.intent.intent_id, run_id=prepared.intent.run_id,
+            ready=True, reason_code=None,
+            signal_to_prewrite_ns=completed_ns - prepared.intent.signal_mono_ns,
+            bybit_payload_bytes=bybit_bytes, okx_payload_bytes=okx_bytes,
+        )
+
     async def _write_one(
         self,
         *,
@@ -1189,34 +1318,10 @@ class ExecutionTransport:
 
         Never receives, never waits for ACK, never retries.
         """
-        rejected = self._preflight(prepared)
-        if rejected is not None:
-            return rejected
-        entry_ns = self._mono()
-        if entry_ns > prepared.fresh_until_mono_ns:
-            return self._reject(prepared, "stale_metadata", entry_ns=entry_ns)
-        try:
-            timestamp_ms = self._wall_ms()
-            if not isinstance(timestamp_ms, int) or isinstance(timestamp_ms, bool) or timestamp_ms < 0:
-                return self._reject(prepared, "clock_regression", entry_ns=entry_ns)
-            bybit_text, okx_text, bybit_bytes, okx_bytes = self._finalize(prepared, timestamp_ms)
-        except TransportError as exc:
-            return self._reject(prepared, exc.reason_code, entry_ns=entry_ns)
-        except Exception:
-            return self._reject(prepared, "rejected_before_write", entry_ns=entry_ns)
-
-        # There is deliberately no await between this final guard and scheduling
-        # both writes. On the socket-owning event loop a readiness publisher
-        # therefore cannot invalidate the lease between the two create_task calls.
-        if pre_send_guard is not None:
-            try:
-                allowed = pre_send_guard()
-            except asyncio.CancelledError:
-                raise
-            except Exception:
-                allowed = False
-            if allowed is not True:
-                return self._reject(prepared, "readiness_changed", entry_ns=entry_ns)
+        prewrite = self._prewrite(prepared, pre_send_guard)
+        if isinstance(prewrite, DispatchResult):
+            return prewrite
+        entry_ns, bybit_text, okx_text, bybit_bytes, okx_bytes = prewrite
 
         bybit_task = self._loop.create_task(
             self._write_one(

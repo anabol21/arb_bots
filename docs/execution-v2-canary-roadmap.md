@@ -281,6 +281,12 @@ EV2-12C2b adds [bounded complete OKX pending-order pagination and a double-sampl
 It remains a local, non-publishing read-only probe. Account UID ownership,
 cross-request consistency and trusted runtime integration are still open;
 live startup remains blocked.
+EV2-12B3a adds a [local no-order prewrite audit seam](task-packets/EV2-12B3a-no-order-prewrite-audit.md).
+It shares final frame construction, metadata expiry and the last readiness
+guard with the dual-leg dispatch kernel, but uses network-incapable sockets,
+never calls `asend`, and reports `signal_to_prewrite` rather than write latency.
+It is not yet connected to the policy/WAL/manager runtime and cannot start
+the final EV2-13A canary by itself.
 
 Prepare a reviewable release without starting it.
 
