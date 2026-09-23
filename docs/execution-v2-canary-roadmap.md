@@ -287,6 +287,12 @@ guard with the dual-leg dispatch kernel, but uses network-incapable sockets,
 never calls `asend`, and reports `signal_to_prewrite` rather than write latency.
 It is not yet connected to the policy/WAL/manager runtime and cannot start
 the final EV2-13A canary by itself.
+EV2-12B3b adds a [local private-only engine audit path](task-packets/EV2-12B3b-no-order-engine-audit.md):
+OPEN risk/ownership/WAL gates and an immutable private-readiness lease feed
+B3a; an atomic audit-marked accepted/rejected WAL pair leaves the FSM IDLE,
+with no `REQUEST_SENT` or simulated fill. This is not yet connected to the
+deployed policy, private companions, manager journal or production finalizer;
+EV2-13A remains unstarted and the live-start block remains in force.
 
 Prepare a reviewable release without starting it.
 

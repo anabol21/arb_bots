@@ -70,6 +70,7 @@ _PAYLOAD_ALLOWED_KEYS = frozenset(
     {
         "action",
         "ack_status",
+        "audit_mode",
         "canary_stage",
         "client_id",
         "coin",
@@ -87,6 +88,7 @@ _PAYLOAD_ALLOWED_KEYS = frozenset(
         "policy_version",
         "position_quantity",
         "positions_flat",
+        "prewrite_passed",
         "quantity",
         "reason_code",
         "reduce_only",
@@ -409,12 +411,17 @@ def _freeze_payload(payload: Mapping[str, Any]) -> Mapping[str, Any]:
             "open_orders_flat",
             "working",
             "confirmed_unfilled",
+            "prewrite_passed",
         }:
             frozen[key] = _require_bool(value, field=f"payload.{key}")
         elif key in {"open_order_count", "stream_generation"}:
             frozen[key] = _require_int(value, field=f"payload.{key}", min_value=0)
         elif key == "action":
             frozen[key] = _require_enum(value, IntentAction, field="payload.action").value
+        elif key == "audit_mode":
+            if value != "no_order_prewrite":
+                raise ContractValidationError("payload.audit_mode invalid")
+            frozen[key] = value
         elif key == "spread_direction":
             frozen[key] = _require_enum(
                 value, SpreadDirection, field="payload.spread_direction"
@@ -746,6 +753,14 @@ class ExecutionEvent:
 
 def _validate_event_shape(event: ExecutionEvent) -> None:
     et = event.event_type
+    audit_fields = {"audit_mode", "prewrite_passed"}
+    if audit_fields.intersection(event.payload) and (
+        et is not ExecutionEventType.INTENT_REJECTED
+        or not audit_fields.issubset(event.payload)
+        or event.payload.get("action") != IntentAction.OPEN.value
+        or event.payload.get("reason_code") != "intent_rejected"
+    ):
+        raise ContractValidationError("no-order audit marker invalid")
     needs_leg = et in {
         ExecutionEventType.REQUEST_SENT,
         ExecutionEventType.ACK_ACCEPTED,

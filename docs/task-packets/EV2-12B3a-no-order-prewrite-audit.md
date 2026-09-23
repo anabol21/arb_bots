@@ -17,7 +17,8 @@ out of `ExecutionTransport.dispatch`. `audit_prewrite` invokes that same
 section but requires both sockets to be `NoOrderTradeSocket` sentinels and a
 callable final guard. The sentinels own no host, credentials, connection or
 trade channel; an accidental `asend` raises and increments an attempt
-counter. The audit rejects any prior attempt. It returns a distinct
+counter. Normal `dispatch` rejects sentinel sockets before any `asend`;
+the audit also rejects any prior attempt. It returns a distinct
 `PrewriteAuditResult`, never a `DispatchResult` or `REQUEST_SENT` event.
 The public result contains sizes and `signal_to_prewrite_ns`, never the
 finalized text, signature or a claimed signal-to-*write* latency.
@@ -43,7 +44,7 @@ never synthesize ACK/fill, OPEN/FLAT, or release an uncertain live K=1 slot.
 Tests verify zero `asend` calls, no exposure/dispatch result, finalizer and
 guard execution, stale/readiness/finalizer/clock failures, refusal of real
 sockets, and an accidental dispatch attempt staying network-incapable.
-Existing transport tests must still pass unchanged. Run everything locally;
+Existing transport tests must still pass. Run everything locally;
 no target-VPS evidence is claimed.
 
 Next: wire this seam behind a dedicated no-order runtime mode through the

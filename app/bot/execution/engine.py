@@ -62,6 +62,7 @@ from app.bot.execution.transport import (
     DispatchStatus,
     ExecutionTransport,
     InstrumentCache,
+    PrewriteAuditResult,
     TransportError,
     VenueWriteEvidence,
     WriteOutcome,
@@ -107,6 +108,9 @@ ENGINE_REASON_CODES = frozenset(
         "adapter_capacity",
         "adapter_transition",
         "adapter_empty",
+        "no_order_only",
+        "clock_regression",
+        "rejected_before_write",
     }
 )
 
@@ -309,6 +313,14 @@ class RecoveryReadinessLease:
     venue: Venue
 
 
+@dataclass(frozen=True)
+class NoOrderReadinessLease:
+    """Private-only audit lease; never valid for a trade dispatch."""
+
+    revision: int
+    snapshot: ReadinessSnapshot
+
+
 class DualReadinessFence:
     """Same-loop readiness publication with generation/revision invalidation.
 
@@ -390,6 +402,24 @@ class DualReadinessFence:
                 and not self._snapshot.kill_switch
             )
         return True
+
+    def acquire_no_order(self) -> tuple[Optional[NoOrderReadinessLease], Optional[str]]:
+        snapshot = self._snapshot
+        if snapshot.bybit_trade_ready or snapshot.okx_trade_ready:
+            return None, "no_order_only"
+        if snapshot.pause:
+            return None, "pause"
+        if snapshot.kill_switch:
+            return None, "kill_switch"
+        if not snapshot.bybit_private_ready or not snapshot.okx_private_ready:
+            return None, "private_stream_not_ready"
+        return NoOrderReadinessLease(self._revision, snapshot), None
+
+    def validate_no_order(self, lease: NoOrderReadinessLease) -> bool:
+        if not isinstance(lease, NoOrderReadinessLease):
+            return False
+        current, reason = self.acquire_no_order()
+        return current is not None and reason is None and current.revision == lease.revision
 
     def acquire_recovery(
         self, venue: Venue
@@ -477,6 +507,32 @@ class SubmitResult:
             f"status={self.status.value!r}, intent_id={self.intent_id!r}, "
             f"run_id={self.run_id!r}, reason_code={self.reason_code!r})"
         )
+
+
+@dataclass(frozen=True)
+class NoOrderAuditResult:
+    """One audit attempt; WAL admission is not a durable fsync claim."""
+
+    intent_id: str
+    run_id: str
+    prewrite: Optional[PrewriteAuditResult]
+    wal_accepted: bool
+    reason_code: Optional[str]
+
+    def to_public_dict(self) -> dict[str, Any]:
+        out = {
+            "schema_version": SCHEMA_VERSION,
+            "intent_id": self.intent_id,
+            "run_id": self.run_id,
+            "prewrite": None if self.prewrite is None else self.prewrite.to_public_dict(),
+            "wal_accepted": self.wal_accepted,
+            "wal_durable": False,
+            "reason_code": self.reason_code,
+            "orders_sent": 0,
+            "trade_socket_bound": False,
+        }
+        _assert_public(out)
+        return out
 
 
 @dataclass(frozen=True)
@@ -771,7 +827,8 @@ class ExecutionEngine:
         return self._recovery(intent, reason_code)
 
     def _open_gate(
-        self, intent: TradeIntent, readiness: ReadinessSnapshot
+        self, intent: TradeIntent, readiness: ReadinessSnapshot,
+        *, require_trade_socket: bool = True,
     ) -> Optional[str]:
         now = self._now()
         if now >= intent.expiry_mono_ns:
@@ -786,7 +843,12 @@ class ExecutionEngine:
             return "pause"
         if readiness.kill_switch:
             return "kill_switch"
-        connectivity_reason = readiness.connectivity_reason()
+        if require_trade_socket:
+            connectivity_reason = readiness.connectivity_reason()
+        elif not readiness.bybit_private_ready or not readiness.okx_private_ready:
+            connectivity_reason = "private_stream_not_ready"
+        else:
+            connectivity_reason = None
         if connectivity_reason is not None:
             return connectivity_reason
         if self._restart_unproven:
@@ -1140,6 +1202,117 @@ class ExecutionEngine:
     async def submit(self, intent: TradeIntent) -> SubmitResult:
         async with self._lock:
             return await self._submit_locked(intent)
+
+    async def audit_intent(self, intent: TradeIntent) -> NoOrderAuditResult:
+        """No-order OPEN probe through risk, owner, private readiness and WAL.
+
+        A successful audit stages an atomic accepted/rejected pair, never a
+        REQUEST_SENT. WAL enqueue is not fsync; consumers must drain and
+        verify durable replay before counting this as canary evidence.
+        """
+        async with self._lock:
+            def result(
+                reason: Optional[str], *, prewrite: Optional[PrewriteAuditResult] = None,
+                wal_accepted: bool = False,
+            ) -> NoOrderAuditResult:
+                return NoOrderAuditResult(
+                    intent_id=intent.intent_id if isinstance(intent, TradeIntent) else "invalid",
+                    run_id=self._run_id,
+                    prewrite=prewrite,
+                    wal_accepted=wal_accepted,
+                    reason_code=reason,
+                )
+
+            if not isinstance(intent, TradeIntent) or intent.run_id != self._run_id:
+                return result("invalid_intent")
+            if intent.action is not IntentAction.OPEN:
+                return result("no_order_only")
+            if not self._transport.no_order_audit_capable:
+                return result("no_order_only")
+            if self._state.status is not SpreadStatus.IDLE:
+                return result("opens_not_allowed")
+            if intent.intent_id in self._state.accepted_intent_ids:
+                return result("opens_not_allowed")
+            try:
+                self._ownership.assert_owned(self._ownership_claim)
+            except OwnershipError:
+                return result("ownership_not_held")
+            lease, lease_reason = self._readiness_fence.acquire_no_order()
+            if lease is None:
+                return result(lease_reason or "readiness_changed")
+            gate_reason = self._open_gate(
+                intent, lease.snapshot, require_trade_socket=False,
+            )
+            if gate_reason is not None:
+                return result(gate_reason)
+            try:
+                bybit, okx = _split_plans(intent, self._plan_resolver(intent))
+            except EngineError as exc:
+                return result(exc.reason_code)
+            except (TypeError, ValueError, ContractValidationError):
+                return result("invalid_plan_set")
+            if self._validate_plan_reduce_only(intent, bybit, okx) is not None:
+                return result("invalid_plan_set")
+            try:
+                prepared = prepare_dual_leg(
+                    intent, (bybit, okx), self._cache, now_mono_ns=self._now(),
+                )
+            except TransportError as exc:
+                return result(
+                    "stale_metadata" if exc.reason_code in {
+                        "stale_metadata", "missing_metadata", "invalid_metadata",
+                    } else "invalid_plan_set"
+                )
+            try:
+                self._ownership.assert_owned(self._ownership_claim)
+            except OwnershipError:
+                return result("ownership_not_held")
+            if self._now() >= intent.expiry_mono_ns:
+                return result("ttl_expired")
+            if not self._readiness_fence.validate_no_order(lease):
+                return result("readiness_changed")
+            try:
+                prewrite = self._transport.audit_prewrite(
+                    prepared,
+                    pre_send_guard=lambda: self._readiness_fence.validate_no_order(lease),
+                )
+            except TransportError:
+                return result("transport_rejected")
+            if not self._readiness_fence.validate_no_order(lease):
+                return result("readiness_changed", prewrite=prewrite)
+            try:
+                self._ownership.assert_owned(self._ownership_claim)
+            except OwnershipError:
+                return result("ownership_not_held", prewrite=prewrite)
+
+            mono = self._mono_at_least(None)
+            accepted = self._accepted_event(intent, 1, mono)
+            rejected = self._build_event(
+                intent=intent,
+                event_type=ExecutionEventType.INTENT_REJECTED,
+                sequence=2,
+                monotonic_ns=self._mono_at_least(mono),
+                venue=None,
+                leg_id=None,
+                payload={
+                    "reason_code": "intent_rejected",
+                    "action": IntentAction.OPEN.value,
+                    "audit_mode": "no_order_prewrite",
+                    "prewrite_passed": prewrite.ready,
+                },
+                dedupe="no_order_prewrite",
+            )
+            folded = self._fold((accepted, rejected))
+            if folded is None or folded.status is not SpreadStatus.IDLE:
+                return result("opens_not_allowed", prewrite=prewrite)
+            if not self._wal.can_admit(2, open_intent=True):
+                return result("wal_capacity", prewrite=prewrite)
+            if not self._commit_events((accepted, rejected), folded):
+                return result("wal_capacity", prewrite=prewrite)
+            return result(
+                None if prewrite.ready else prewrite.reason_code or "transport_rejected",
+                prewrite=prewrite, wal_accepted=True,
+            )
 
     async def _submit_locked(self, intent: TradeIntent) -> SubmitResult:
         if not isinstance(intent, TradeIntent):

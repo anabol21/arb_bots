@@ -850,6 +850,15 @@ class ExecutionTransport:
     def loop(self) -> asyncio.AbstractEventLoop:
         return self._loop
 
+    @property
+    def no_order_audit_capable(self) -> bool:
+        return (
+            isinstance(self._bybit_socket, NoOrderTradeSocket)
+            and isinstance(self._okx_socket, NoOrderTradeSocket)
+            and self._bybit_socket.write_attempts == 0
+            and self._okx_socket.write_attempts == 0
+        )
+
     def _mono(self) -> int:
         value = self._monotonic_ns()
         return _require_int(value, field="monotonic_ns")
@@ -1318,6 +1327,12 @@ class ExecutionTransport:
 
         Never receives, never waits for ACK, never retries.
         """
+        if not isinstance(prepared, PreparedDualLeg):
+            raise TransportError("invalid_leg_set")
+        if isinstance(self._bybit_socket, NoOrderTradeSocket) or isinstance(
+            self._okx_socket, NoOrderTradeSocket
+        ):
+            return self._reject(prepared, "invalid_socket")
         prewrite = self._prewrite(prepared, pre_send_guard)
         if isinstance(prewrite, DispatchResult):
             return prewrite

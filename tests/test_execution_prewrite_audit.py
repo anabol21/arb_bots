@@ -119,10 +119,10 @@ class PrewriteAuditTests(unittest.IsolatedAsyncioTestCase):
     async def test_accidental_dispatch_on_sentinels_cannot_reach_network(self) -> None:
         transport, bybit, okx = self.make_transport(clock=lambda: 1_500)
         result = await transport.dispatch(_prepare(), pre_send_guard=lambda: True)
-        self.assertNotEqual(result.status.value, "both_completed")
-        self.assertEqual((bybit.write_attempts, okx.write_attempts), (1, 1))
-        with self.assertRaisesRegex(TransportError, "rejected_before_write"):
-            transport.audit_prewrite(_prepare(), pre_send_guard=lambda: True)
+        self.assertEqual(result.status.value, "rejected")
+        self.assertEqual(result.reason_code, "invalid_socket")
+        self.assertEqual((bybit.write_attempts, okx.write_attempts), (0, 0))
+        self.assertTrue(transport.audit_prewrite(_prepare(), pre_send_guard=lambda: True).ready)
 
 
 if __name__ == "__main__":
