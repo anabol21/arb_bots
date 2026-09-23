@@ -136,6 +136,19 @@ def _record(event: ExecutionEvent, wal_seq: int, prev_hash: str = GENESIS_HASH):
 
 
 class MapperTests(unittest.TestCase):
+    def test_frozen_h_coin_is_exported_with_its_identity(self) -> None:
+        event = _event(
+            Clock(), ExecutionEventType.INTENT_ACCEPTED,
+            payload={
+                "action": "open", "coin": "H", "spread_direction": "long",
+                "lot_tolerance": "0",
+            },
+        )
+        envelope = map_lifecycle_to_sentry_envelope(event)
+        self.assertIsNotNone(envelope)
+        assert envelope is not None
+        self.assertEqual(envelope.tags["coin"], "H")
+
     def test_open_and_close_envelopes_match_theta_k1_fingerprints(self) -> None:
         clock = Clock()
         open_env = map_lifecycle_to_sentry_envelope(_open_intent(clock))

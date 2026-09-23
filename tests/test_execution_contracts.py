@@ -111,6 +111,12 @@ class ClientIdDerivationTests(unittest.TestCase):
 
 
 class PublicRoundTripTests(unittest.TestCase):
+    def test_frozen_single_letter_h_coin_round_trip(self) -> None:
+        intent = _intent(coin="H")
+        self.assertEqual(TradeIntent.from_public_dict(intent.to_public_dict()), intent)
+        with self.assertRaises(ContractValidationError):
+            _intent(coin="X")
+
     def test_trade_intent_round_trip(self) -> None:
         intent = _intent()
         restored = TradeIntent.from_public_dict(intent.to_public_dict())

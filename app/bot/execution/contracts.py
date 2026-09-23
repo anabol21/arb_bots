@@ -21,7 +21,8 @@ _OKX_CLIENT_ID_RE = re.compile(r"^[A-Za-z0-9]{1,32}$")
 _BYBIT_CLIENT_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,36}$")
 _ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
 _HEX_RE = re.compile(r"^[0-9a-f]+$")
-_COIN_RE = re.compile(r"^[A-Z0-9]{2,16}$")
+# H is an exchange-listed member of the frozen Gear 2.2 thirty-coin universe.
+_COIN_RE = re.compile(r"^(?:H|[A-Z0-9]{2,16})$")
 _INSTRUMENT_RE = re.compile(r"^[A-Z0-9][A-Z0-9._:-]{1,63}$")
 
 _FORBIDDEN_KEYS = frozenset(

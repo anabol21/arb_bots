@@ -34,7 +34,7 @@ SENTRY_FINGERPRINT_PREFIX = "theta_k1"
 SENTRY_CONTOUR = "gear22_theta_k1"
 SENTRY_KIND = "trade"
 SENTRY_LEVEL = "error"
-_PUBLIC_COIN_RE = re.compile(r"^[A-Z0-9]{2,16}$")
+_PUBLIC_COIN_RE = re.compile(r"^(?:H|[A-Z0-9]{2,16})$")
 _PUBLIC_SIDES = frozenset({SpreadDirection.LONG.value, SpreadDirection.SHORT.value})
 
 _FORBIDDEN_PUBLIC_KEYS = frozenset(

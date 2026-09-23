@@ -2,13 +2,15 @@
 
 from __future__ import annotations
 
+from decimal import Decimal
 from pathlib import Path
 from unittest.mock import patch
 
-from app.bot.execution.engine import ExecutionEngine
+from app.bot.execution.engine import ExecutionEngine, RiskPolicy
 from app.bot.execution.no_order_audit_lane import NoOrderAuditLane
 from app.bot.execution.no_order_audit_lane import NoOrderAuditBridge
 from app.bot.stub_broker import InstrumentMeta
+from app.bot.theta_trade_manager import GEAR22_HTML_TOP30
 from app.bot.execution.transport import ExecutionTransport, NoOrderTradeSocket, unsigned_frame_finalizer
 from app.bot.execution.wal import WalError
 from tests.test_execution_engine import (
@@ -18,6 +20,14 @@ from tests.test_execution_engine import (
 
 
 class NoOrderAuditLaneTests(EngineHarness):
+    async def test_frozen_top30_includes_single_letter_h(self) -> None:
+        self.assertIn("H", GEAR22_HTML_TOP30)
+        policy = RiskPolicy(
+            allowed_coins=frozenset(GEAR22_HTML_TOP30),
+            max_notional_usdt=Decimal("20"),
+        )
+        self.assertEqual(len(policy.allowed_coins), 30)
+
     async def test_bridge_uses_topology_metadata_and_stub_size_rounding(self) -> None:
         meta = InstrumentMeta(
             base_coin="BTC", okx_symbol="BTC-USDT-SWAP", bybit_symbol="BTCUSDT",

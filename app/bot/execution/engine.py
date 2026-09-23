@@ -221,7 +221,7 @@ class RiskPolicy:
             object.__setattr__(self, "allowed_coins", coins)
         frozen: set[str] = set()
         for coin in coins:
-            if not isinstance(coin, str) or not (2 <= len(coin) <= 16):
+            if not isinstance(coin, str) or not (2 <= len(coin) <= 16 or coin == "H"):
                 raise EngineError("coin_not_allowed")
             if any(ch not in _COIN_RE_OK for ch in coin):
                 raise EngineError("coin_not_allowed")
