@@ -1219,6 +1219,12 @@ class PrivateStreamRuntime:
             ok = str(data.get("code", "0")) == "0"
             return ParsedStreamEvent(kind="sub_ack", ack_ok=ok)
         if event == "error":
+            _safe_log(
+                "okx_private_error",
+                code=sanitize_venue_code(data.get("code")) or "unknown",
+                has_arg=isinstance(data.get("arg"), Mapping) and bool(data.get("arg")),
+                authenticated=self.authenticated,
+            )
             # 64003 / fee-tier is a channel subscribe nack (often ``arg: null``).
             # Never treat that as auth_reject — that un-auths the warm session
             # and starts the ~10s private login reconnect storm.
