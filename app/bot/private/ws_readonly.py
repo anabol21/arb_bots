@@ -21,6 +21,7 @@ from app.bot.private.order_symbols import (
     resolve_private_subscribe_pool,
 )
 from app.bot.private.paths import resolve_data_root
+from app.bot.private.readiness_status import ReadonlyStatusWriter
 from app.bot.private.secrets import LiveSecrets, load_live_secrets
 from app.bot.private.venue import endpoints_for_venue
 from app.bot.private.ws_gates import (
@@ -118,6 +119,7 @@ def run_ws_readonly_preflight(
     credentials: Optional[LiveCredentials] = None,
     journal: Optional[PrivateJournalWriter] = None,
     coins: Optional[Sequence[str]] = None,
+    status_path: Optional[Path] = None,
 ) -> WsReadonlyReport:
     """Auth → one-symbol subscribe → REST reseed → heartbeat/silence loop.
 
@@ -186,6 +188,11 @@ def run_ws_readonly_preflight(
         rest_reseed=reseed_port,
         subscribe_symbols=subscribe_symbols,
     )
+    status_writer = (
+        ReadonlyStatusWriter(status_path, exchange) if status_path is not None else None
+    )
+    if status_writer is not None:
+        status_writer.publish(runtime)
 
     bound_factory = False
     try:
@@ -260,6 +267,8 @@ def run_ws_readonly_preflight(
                 journal=j,
                 reseed_matched=False,
             )
+        if status_writer is not None:
+            status_writer.publish(runtime, ready=True)
 
         # Heartbeat / silence loop (read-only; no trade WS)
         silence_timeouts = 0
@@ -299,6 +308,8 @@ def run_ws_readonly_preflight(
                     cycles=cycles,
                     silence_timeouts=silence_timeouts,
                 )
+            if status_writer is not None:
+                status_writer.publish(runtime, ready=True)
 
         return _report_from_runtime(
             runtime,
@@ -314,8 +325,12 @@ def run_ws_readonly_preflight(
                 runtime.private_socket.close()
             except Exception:  # noqa: BLE001
                 pass
-        if bound_factory:
-            unbind_socket_factory()
+        try:
+            if status_writer is not None:
+                status_writer.publish(runtime, ready=False)
+        finally:
+            if bound_factory:
+                unbind_socket_factory()
 
 
 def _report_from_runtime(
@@ -363,6 +378,7 @@ def main_ws_readonly(
     recv_timeout_sec = DEFAULT_RECV_TIMEOUT_SEC
     heartbeat_every_sec = DEFAULT_HEARTBEAT_EVERY_SEC
     coins: tuple[str, ...] = ()
+    status_path: Optional[Path] = None
     for arg in argv:
         if arg.startswith("--exchange="):
             exchange = arg.split("=", 1)[1].strip().lower()
@@ -380,6 +396,8 @@ def main_ws_readonly(
                 for item in arg.split("=", 1)[1].split(",")
                 if item.strip()
             )
+        elif arg.startswith("--status-path="):
+            status_path = Path(arg.split("=", 1)[1])
     if max_cycles < 1:
         raise ValueError("--max-cycles must be >= 1")
     report = run_ws_readonly_preflight(
@@ -390,6 +408,7 @@ def main_ws_readonly(
         recv_timeout_sec=recv_timeout_sec,
         heartbeat_every_sec=heartbeat_every_sec,
         coins=coins or None,
+        status_path=status_path,
     )
     print(json.dumps(report.as_public_dict(), ensure_ascii=False, indent=2, sort_keys=True))
     if report.status == "ok":

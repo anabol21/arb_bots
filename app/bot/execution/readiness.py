@@ -8,9 +8,11 @@ from __future__ import annotations
 
 import asyncio
 import threading
+from pathlib import Path
 from typing import Any, Callable, Optional
 
 from app.bot.execution.engine import ReadinessSnapshot
+from app.bot.private.readiness_status import read_readonly_status
 
 ReadinessPublish = Callable[[ReadinessSnapshot], object]
 
@@ -60,6 +62,37 @@ def snapshot_from_warm_session(
         okx_trade_ready=okx_trade,
         bybit_private_ready=bybit_private,
         okx_private_ready=okx_private,
+        bybit_generation=bybit_generation,
+        okx_generation=okx_generation,
+        kill_switch=bool(kill_switch),
+        pause=bool(pause),
+    )
+
+
+def snapshot_from_readonly_companions(
+    bybit_path: Path,
+    okx_path: Path,
+    *,
+    max_age_ns: int,
+    pause: bool = False,
+    kill_switch: bool = False,
+) -> ReadinessSnapshot:
+    """Sample separate read-only processes for a no-order audit only.
+
+    This snapshot deliberately never asserts trade readiness. It must be
+    sampled immediately before each audit; it is not a live-send lease.
+    """
+    bybit_ready, bybit_generation = read_readonly_status(
+        bybit_path, "bybit", max_age_ns=max_age_ns,
+    )
+    okx_ready, okx_generation = read_readonly_status(
+        okx_path, "okx", max_age_ns=max_age_ns,
+    )
+    return ReadinessSnapshot(
+        bybit_trade_ready=False,
+        okx_trade_ready=False,
+        bybit_private_ready=bybit_ready,
+        okx_private_ready=okx_ready,
         bybit_generation=bybit_generation,
         okx_generation=okx_generation,
         kill_switch=bool(kill_switch),
