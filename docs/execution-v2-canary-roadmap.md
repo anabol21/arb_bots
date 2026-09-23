@@ -230,7 +230,20 @@ root, log root and run id. Order capability remains physically absent. The run
 must exercise repeated OPEN/CLOSE lifecycle cycles plus controlled private
 disconnect/reconnect cases through the EV2-09C/09D readiness path.
 
-### EV2-11 — immutable canary release and control plane
+### EV2-11 — restart-safe trade state recovery
+
+Persist each committed synthetic or live open/close lifecycle before publishing
+the K=1 slot state. On restart, strictly replay the trade journal into the
+manager and shadow FSM. For live send, require signed read-only position and
+open-order reconciliation on both venues before enabling decisions. Ambiguous
+or mismatched exposure blocks new sends; it is never inferred as flat.
+
+Qualify this with a separate two-hour no-order restart canary: commit a
+synthetic OPEN, restart only its isolated unit, prove the same `trade_id` is
+restored, then observe a CLOSE on the new process. Preserve the collector and
+the continuing `would_sent` contour.
+
+### EV2-12 — immutable canary release and control plane
 
 Prepare a reviewable release without starting it.
 
@@ -249,7 +262,7 @@ Deliverables:
 Gate: deployment dry-run and rollback rehearsal succeed. Creating the unit
 file does not authorize installing, enabling or starting it.
 
-### EV2-12 — bounded live canary ladder
+### EV2-13 — bounded live canary ladder
 
 Live steps require explicit user approval at every stage:
 
@@ -280,7 +293,7 @@ a correctness gate; it is not used to claim a statistically meaningful p99.
 
 ## Canary-ready definition
 
-The branch is ready to request a live canary only when EV2-03 through EV2-11
+The branch is ready to request a live canary only when EV2-03 through EV2-12
 are reviewed and green, the 30-coin universe and frozen strategy manifest
 match the existing `would_sent` contour, the shadow/latency gates pass on the
 target VPS, recovery fault injection is green, and the Grok/MCP handoff can

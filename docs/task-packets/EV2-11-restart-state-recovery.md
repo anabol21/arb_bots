@@ -81,3 +81,25 @@ process restart
 Deploy EV2-11 as a no-order restart canary first. Then run a separate, explicitly armed
 small real-order restart experiment. Keep auto-repair/auto-flatten out of scope until the
 ambiguous ACK-to-fsync crash case is covered by the execution WAL protocol.
+
+## VPS canary in progress — 2026-09-23
+
+- Release commit: `8579dd0`; release path: `/root/spread_ev2_11`.
+- Isolated data: `/data/bbot-ev2-11-restart`; dedicated main and two private read-only units.
+- First start: 09:47:09 UTC. Planned restart: 09:50:02 UTC. Current shadow run:
+  `shadow_3c09db2c0b49458ea943c8542be2243e`.
+- Before restart, the journal committed a synthetic `OPEN` for RVN short with
+  `trade_id=a35759e7-b84b-4e5e-9e0a-2e886c4415a9`, `send=false`.
+- After restart, manager replay and shadow FSM restored the same trade; the
+  second process committed its `CLOSE` with that same trade ID at 09:51:59 UTC.
+  Shadow mirror transitioned to FLAT.
+- Main and private companions were active with zero unplanned restarts at the
+  09:53 UTC check; `orders_sent=0`, `trade_socket_bound=false`. The current
+  collector is `spread-collector-next.service`, active with zero restarts; the
+  continuing `spread-bbot-theta-k1-canary.service` was also active with zero.
+- Both private companions recorded auth success and matched REST reconciliation
+  on both starts. OKX also recorded two known misclassified auth failure frames
+  per start (four total); track any increase as a new anomaly.
+- The two-hour window is still running. `RuntimeMaxSec=7200` is measured from
+  the second start, so expected auto-stop is no earlier than 11:50:02 UTC.
+  Final metrics and verdict belong to the post-stop report.
