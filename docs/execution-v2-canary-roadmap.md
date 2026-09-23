@@ -269,6 +269,10 @@ It is idempotent after single-writer restart and latches K=1 while venue
 reconciliation is outstanding; it does not publish a lifecycle or wire live
 runtime. Signed two-venue proof, pending resolution and the crash matrix
 remain open.
+EV2-12C1 adds a [pure native-quantity comparator](task-packets/EV2-12C1-native-quantity-compare.md)
+for both venue legs and declared pool orders. Its match is not signed,
+fresh, account-owned or plan-bound evidence; C2 and B2c remain required
+before pending resolution or K=1 publication.
 
 Prepare a reviewable release without starting it.
 
