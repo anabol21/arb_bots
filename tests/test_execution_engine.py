@@ -1431,6 +1431,7 @@ class LivePrivateBridgeTests(EngineHarness):
                     "symbol": "BTCUSDT",
                     "orderLinkId": _plans(INTENT_A)[0].client_id,
                     "orderStatus": "Filled", "cumExecQty": "1",
+                    "execTime": "1750000000001",
                 }],
             }),
             earlier_receive,
@@ -1444,6 +1445,7 @@ class LivePrivateBridgeTests(EngineHarness):
                     "instId": "BTC-USDT-SWAP",
                     "clOrdId": _plans(INTENT_A)[1].client_id,
                     "state": "filled", "accFillSz": "1",
+                    "fillTime": "1750000000002",
                 }],
             }),
             earlier_receive,
@@ -1453,9 +1455,15 @@ class LivePrivateBridgeTests(EngineHarness):
         self.assertEqual(bridge.pending_count, 4)
         bridge.bind_submitted(
             intent, _resolver(intent), bybit_generation=1, okx_generation=1,
+            dispatch=sent.dispatch,
         )
         self.assertEqual(await bridge.drain(), 4)
         self.assertEqual(engine.state.status, SpreadStatus.OPEN)
+        milestones = {item.venue: item for item in bridge.chronometry.snapshot()}
+        self.assertEqual(milestones[Venue.BYBIT].first_fill_exchange_ms, 1750000000001)
+        self.assertEqual(milestones[Venue.OKX].full_fill_exchange_ms, 1750000000002)
+        self.assertEqual(milestones[Venue.BYBIT].ack_receive_mono_ns, earlier_receive)
+        self.assertIsNotNone(milestones[Venue.OKX].send_done_mono_ns)
         self.assertEqual(engine._wal.health().queue_depth, 0)
         self.assertEqual(engine._wal.replay().state, engine.state)
 

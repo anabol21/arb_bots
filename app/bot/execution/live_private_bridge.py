@@ -15,6 +15,8 @@ from typing import Any, Mapping, Optional, Sequence
 from app.bot.execution.adapters import PrivateEventAdapter
 from app.bot.execution.contracts import LegPlan, TradeIntent, Venue
 from app.bot.execution.engine import ExecutionEngine
+from app.bot.execution.live_chronometry import LiveChronometry
+from app.bot.execution.transport import DispatchResult
 
 
 class LivePrivateBridgeError(RuntimeError):
@@ -85,6 +87,7 @@ class LivePrivateEvidenceBridge:
         self._fatal: Optional[str] = None
         self._capturing = False
         self._expected_clients: dict[Venue, str] = {}
+        self.chronometry = LiveChronometry()
 
     @property
     def fatal_reason(self) -> Optional[str]:
@@ -197,6 +200,7 @@ class LivePrivateEvidenceBridge:
         *,
         bybit_generation: int,
         okx_generation: int,
+        dispatch: Optional[DispatchResult] = None,
     ) -> None:
         """Bind only after EV2 has committed its local send events."""
         if self._fatal is not None or self._adapter is not None:
@@ -220,6 +224,8 @@ class LivePrivateEvidenceBridge:
             last_monotonic_ns=state.last_monotonic_ns,
         )
         adapter.register(intent, tuple(plans))
+        if dispatch is not None:
+            self.chronometry.bind_dispatch(intent, plans, dispatch)
         self._adapter = adapter
         self._intent_id = intent.intent_id
 
@@ -247,6 +253,12 @@ class LivePrivateEvidenceBridge:
                 if not result.accepted:
                     self._fatal = result.reason_code or "private_ingest_failed"
                     raise LivePrivateBridgeError(self._fatal)
+                self.chronometry.record_accepted_batch(
+                    batch.events,
+                    payload=frame.payload,
+                    venue=frame.venue,
+                    receive_mono_ns=frame.receive_mono_ns,
+                )
                 count += result.applied_count
         finally:
             self._draining = False
@@ -276,6 +288,12 @@ class LivePrivateEvidenceBridge:
         if not result.accepted:
             self._fatal = result.reason_code or "ack_ingest_failed"
             raise LivePrivateBridgeError(self._fatal)
+        self.chronometry.record_accepted_batch(
+            batch.events,
+            payload=payload,
+            venue=venue,
+            receive_mono_ns=receive_mono_ns,
+        )
         return result.applied_count
 
     async def ingest_complete_rest_snapshot(
