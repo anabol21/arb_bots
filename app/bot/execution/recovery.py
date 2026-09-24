@@ -55,6 +55,7 @@ RECOVERY_REASON_CODES = frozenset(
         "stream_blocked",
         "trade_socket_not_ready",
         "wal_capacity",
+        "wal_unhealthy",
         "ownership_not_held",
         "halt",
         "nothing_to_do",

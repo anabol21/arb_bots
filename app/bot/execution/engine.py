@@ -2317,6 +2317,16 @@ class ExecutionEngine:
             return self._recovery_result(
                 RecoveryStatus.BLOCKED, RecoveryActionKind.PROVE_FLAT, "wal_capacity"
             )
+        if self._durable_prewrite:
+            try:
+                proven = self._wal.drain_and_prove_last(event)
+            except Exception:
+                proven = False
+            if not proven:
+                self._latch_live_ingest_failure()
+                return self._recovery_result(
+                    RecoveryStatus.BLOCKED, RecoveryActionKind.PROVE_FLAT, "wal_unhealthy"
+                )
         self._recovery_attempts = 0
         return self._recovery_result(
             RecoveryStatus.APPLIED, RecoveryActionKind.PROVE_FLAT, "prove_flat"

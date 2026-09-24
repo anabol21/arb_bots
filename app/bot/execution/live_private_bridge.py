@@ -277,3 +277,37 @@ class LivePrivateEvidenceBridge:
             self._fatal = result.reason_code or "ack_ingest_failed"
             raise LivePrivateBridgeError(self._fatal)
         return result.applied_count
+
+    async def ingest_complete_rest_snapshot(
+        self,
+        payload: Mapping[str, Any],
+        *,
+        venue: Venue,
+        source: str,
+        generation: int,
+        receive_mono_ns: int,
+    ) -> int:
+        """Durable REST reconciliation; caller must have proved all pages.
+
+        This API never infers completeness from an empty first page.  A live
+        caller must reject cursors, missing pages and generation changes
+        before setting ``snapshot_complete`` here.
+        """
+        if source not in {"rest_positions", "rest_open_orders"}:
+            raise LivePrivateBridgeError("invalid_rest_source")
+        adapter = self._adapter
+        if self._fatal is not None or adapter is None or self._pending:
+            raise LivePrivateBridgeError(self._fatal or "private_evidence_unsettled")
+        batch = adapter.adapt(
+            payload,
+            venue=venue,
+            source=source,
+            generation=generation,
+            receive_mono_ns=receive_mono_ns,
+            snapshot_complete=True,
+        )
+        result = await self._engine.ingest_adapter_batch_durable(batch)
+        if not result.accepted:
+            self._fatal = result.reason_code or "rest_ingest_failed"
+            raise LivePrivateBridgeError(self._fatal)
+        return result.applied_count

@@ -44,6 +44,7 @@ from app.bot.execution.live_private_bridge import (
     LivePrivateEvidenceBridge,
 )
 from app.bot.execution.ownership import FileOwnershipFence, OwnershipError
+from app.bot.execution.recovery import RecoveryActionKind, RecoveryStatus
 from app.bot.execution.state_machine import apply_events, initial_spread_state
 from app.bot.execution.transport import (
     SCHEMA_VERSION as TRANSPORT_SCHEMA,
@@ -1456,6 +1457,60 @@ class LivePrivateBridgeTests(EngineHarness):
         self.assertEqual(await bridge.drain(), 4)
         self.assertEqual(engine.state.status, SpreadStatus.OPEN)
         self.assertEqual(engine._wal.health().queue_depth, 0)
+        self.assertEqual(engine._wal.replay().state, engine.state)
+
+        close_intent = _intent(intent_id=INTENT_B, action=IntentAction.CLOSE)
+        close_plans = _resolver(close_intent)
+        bridge.begin_submission(close_plans)
+        self.assertEqual((await engine.submit(close_intent)).status, SubmitStatus.ACCEPTED)
+        bridge.bind_submitted(
+            close_intent, close_plans, bybit_generation=1, okx_generation=1,
+        )
+        bridge.observe(
+            json.dumps({
+                "topic": "order",
+                "data": [{
+                    "symbol": "BTCUSDT", "orderLinkId": close_plans[0].client_id,
+                    "orderStatus": "Filled", "cumExecQty": "1",
+                }],
+            }),
+            engine.state.last_monotonic_ns + 1,
+            venue=Venue.BYBIT,
+            generation=1,
+        )
+        bridge.observe(
+            json.dumps({
+                "arg": {"channel": "orders"},
+                "data": [{
+                    "instId": "BTC-USDT-SWAP", "clOrdId": close_plans[1].client_id,
+                    "state": "filled", "accFillSz": "1",
+                }],
+            }),
+            engine.state.last_monotonic_ns + 2,
+            venue=Venue.OKX,
+            generation=1,
+        )
+        self.assertEqual(await bridge.drain(), 2)
+        self.assertEqual(engine.state.status, SpreadStatus.CLOSING)
+        self.assertEqual(engine._wal.replay().state, engine.state)
+        for venue in (Venue.BYBIT, Venue.OKX):
+            empty = (
+                {"retCode": 0, "result": {"list": []}}
+                if venue is Venue.BYBIT else {"code": "0", "data": []}
+            )
+            for source in ("rest_positions", "rest_open_orders"):
+                await bridge.ingest_complete_rest_snapshot(
+                    empty,
+                    venue=venue,
+                    source=source,
+                    generation=1,
+                    receive_mono_ns=engine.state.last_monotonic_ns + 1,
+                )
+        prove = await engine.plan_recovery()
+        self.assertEqual(prove.kind, RecoveryActionKind.PROVE_FLAT)
+        result = await engine.apply_recovery_step(prove)
+        self.assertEqual(result.status, RecoveryStatus.APPLIED)
+        self.assertEqual(engine.state.status, SpreadStatus.FLAT)
         self.assertEqual(engine._wal.replay().state, engine.state)
 
     async def test_unknown_cap_order_fails_closed(self) -> None:
