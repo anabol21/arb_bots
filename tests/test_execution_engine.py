@@ -742,6 +742,45 @@ class OwnershipTests(unittest.TestCase):
 
 
 class SubmitHappyPathTests(EngineHarness):
+    async def test_restart_restores_original_primary_plans_from_durable_wal(self) -> None:
+        engine = self._engine(durable_prewrite=True)
+        intent = _intent()
+        sent = await engine.submit(intent)
+        self.assertEqual(sent.status, SubmitStatus.ACCEPTED)
+        engine._wal.drain_all()
+        replay = engine._wal.replay()
+        await engine.begin_restart(replay)
+        bybit, okx = _resolver(intent)
+        self.assertEqual(engine._trusted_primary(Venue.BYBIT), bybit)
+        self.assertEqual(engine._trusted_primary(Venue.OKX), okx)
+        self.assertEqual(engine.state, replay.state)
+        self.assertTrue(engine._restart_unproven)
+
+    async def test_restart_preserves_okx_contract_base_multiplier(self) -> None:
+        engine = self._engine(
+            durable_prewrite=True,
+            cache=_cache("CAP"),
+            policy=_policy("CAP"),
+        )
+        intent = _intent(coin="CAP", notional=Decimal("10"))
+        plans = (
+            LegPlan.build(
+                intent_id=intent.intent_id, leg_id="leg_bybit", venue=Venue.BYBIT,
+                instrument="CAPUSDT", side="sell", quantity=Decimal("100"),
+            ),
+            LegPlan.build(
+                intent_id=intent.intent_id, leg_id="leg_okx", venue=Venue.OKX,
+                instrument="CAP-USDT-SWAP", side="buy", quantity=Decimal("1"),
+                base_multiplier=Decimal("100"),
+            ),
+        )
+        sent = await engine.submit(intent, prepared_plans=plans)
+        self.assertEqual(sent.status, SubmitStatus.ACCEPTED)
+        engine._wal.drain_all()
+        await engine.begin_restart(engine._wal.replay())
+        self.assertEqual(engine._trusted_primary(Venue.BYBIT), plans[0])
+        self.assertEqual(engine._trusted_primary(Venue.OKX), plans[1])
+
     async def test_prepared_live_plans_are_not_resolved_again_before_send(self) -> None:
         engine = self._engine(durable_prewrite=True)
         intent = _intent()

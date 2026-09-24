@@ -1786,7 +1786,7 @@ class ExecutionEngine:
             self._note_seeds((), state)
             self._recovery_attempts = 0
             self._last_intent = None
-            self._primary_by_venue = {}
+            self._primary_by_venue = self._primary_plans_from_replay(replay)
             self._restart_unproven = True
             self._wal.begin_restart()
             if self._adapter is not None:
@@ -1801,6 +1801,62 @@ class ExecutionEngine:
                 restart_intent_id=restart_correlation_id(state, self._run_id),
                 reason_code="restart_unproven",
             )
+
+    @staticmethod
+    def _primary_plans_from_replay(replay: ReplayResult) -> dict[Venue, LegPlan]:
+        """Recover only original open legs from the verified durable WAL.
+
+        A missing or conflicting request is never guessed from current
+        position data. Reconciliation must still independently prove exposure
+        before any recovery write can be considered.
+        """
+        state = replay.state
+        if not replay.integrity_ok or replay.torn_tail or state.open_intent_id is None:
+            return {}
+        requests: dict[Venue, ExecutionEvent] = {}
+        conflicting: set[Venue] = set()
+        for record in replay.records:
+            event = record.event
+            if (
+                event.intent_id != state.open_intent_id
+                or event.event_type is not ExecutionEventType.REQUEST_SENT
+                or event.payload.get("reduce_only") is not False
+                or event.venue not in {Venue.BYBIT, Venue.OKX}
+            ):
+                continue
+            venue = event.venue
+            if venue in requests:
+                conflicting.add(venue)
+            else:
+                requests[venue] = event
+        restored: dict[Venue, LegPlan] = {}
+        for venue, event in requests.items():
+            if venue in conflicting or event.leg_id is None:
+                continue
+            try:
+                plan = LegPlan.build(
+                    intent_id=event.intent_id,
+                    leg_id=event.leg_id,
+                    venue=venue,
+                    instrument=str(event.payload["instrument"]),
+                    side=str(event.payload["side"]),
+                    quantity=Decimal(str(event.payload["quantity"])),
+                    base_multiplier=Decimal(str(event.payload.get("base_multiplier", "1"))),
+                )
+            except (KeyError, TypeError, ValueError, ContractValidationError):
+                continue
+            if event.payload.get("client_id") != plan.client_id:
+                continue
+            current = next((leg for leg in state.legs if leg.venue is venue), None)
+            if (
+                current is None
+                or current.leg_id != plan.leg_id
+                or current.base_multiplier != plan.base_multiplier
+                or (not current.reduce_only and current.planned_quantity != plan.quantity)
+            ):
+                continue
+            restored[venue] = plan
+        return restored
 
     async def acknowledge_reconciliation(self, token: str) -> None:
         async with self._lock:
