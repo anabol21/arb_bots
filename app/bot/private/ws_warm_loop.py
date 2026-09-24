@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import asyncio
 import concurrent.futures
+import inspect
 import logging
 import queue
 import threading
@@ -236,6 +237,7 @@ class SocketSlot:
     on_up: Optional[Callable[[LoopOwnedSocket], None]] = None
     on_down: Optional[Callable[[LoopOwnedSocket], None]] = None
     place_inflight_fn: Optional[Callable[[], bool]] = None
+    private_frame_observer: Optional[Callable[[str, int], Any]] = None
     heartbeat_every_sec: float = 10.0
     silence_timeout_sec: float = 45.0
     stop_event: Any = None
@@ -354,6 +356,20 @@ class PrivateWarmLoop:
 
     def slot(self, exchange: str, channel: str) -> Optional[SocketSlot]:
         return self._slots.get(f"{str(exchange).lower()}:{str(channel).lower()}")
+
+    def set_private_frame_observer(
+        self, exchange: str, observer: Optional[Callable[[str, int], Any]]
+    ) -> None:
+        """Opt-in owner-loop fanout after legacy private parsing.
+
+        The observer must ingest or fail closed; an exception tears down the
+        private socket so the normal reconnect/reseed gate blocks sends.
+        Trade ACK frames are intentionally not delivered through this hook.
+        """
+        slot = self.slot(exchange, "private")
+        if slot is None or (observer is not None and not callable(observer)):
+            raise ValueError("invalid_private_observer")
+        slot.private_frame_observer = observer
 
     def _run_loop(self) -> None:
         loop = asyncio.new_event_loop()
@@ -526,6 +542,11 @@ class PrivateWarmLoop:
                         runtime.handle_inbound_text(text)
                     except Exception:  # noqa: BLE001
                         raise
+                    observer = slot.private_frame_observer
+                    if observer is not None:
+                        observed = observer(text, sock.last_recv_mono_ns or 0)
+                        if inspect.isawaitable(observed):
+                            await observed
                     continue
             sock.push_inbound(text)
 
