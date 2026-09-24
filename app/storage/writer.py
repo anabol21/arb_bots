@@ -20,6 +20,7 @@ import pandas as pd
 import pyarrow as pa
 import pyarrow.parquet as pq
 
+from app.schema.hl_l1 import HL_L1_BODY_COLS, HL_L1_BOOK_COLS, HL_L1_TS_COLS
 from app.schema.lean_event import LEAN_BAR_5M_BODY_COLS, LEAN_TICK_BODY_COLS
 from app.schema.parquet_layout import PARTITION_DATE_COL
 from app.schema.spread_event import SPREAD_EVENT_BODY_COLS, lean_schema_enabled
@@ -55,7 +56,9 @@ def _tmp_owned_by_pid(path: Path, pid: int) -> bool:
     return parts[1] == str(pid)
 
 # Tick schemas: "v1" (canary default) | "lean". Bars: "bar_5m".
+# "hl_l1" is the Hyperliquid contour only. Env flags never select it.
 SchemaMode = str
+_SCHEMA_MODES = {"v1", "lean", "bar_5m", "hl_l1"}
 
 _LEAN_TS_COLS: tuple[str, ...] = (
     "event_local_ts_ms",
@@ -332,6 +335,74 @@ def normalize_bar_records(records: list[dict[str, Any]]) -> NormalizedBatch:
     return _finalize_normalized(records, accepted, reasons, LEAN_BAR_5M_BODY_COLS)
 
 
+def _finite_mask(series: pd.Series, *, allow_zero: bool) -> pd.Series:
+    finite = series.notna() & (series != float("inf")) & (series != float("-inf"))
+    if allow_zero:
+        return finite & series.ge(0)
+    return finite & series.gt(0)
+
+
+def normalize_hl_l1_records(records: list[dict[str, Any]]) -> NormalizedBatch:
+    """Hyperliquid L1 body. Hive ``event_date`` is derived, then dropped on write.
+
+    Spread, OKX, and Bybit columns are not part of the body even if a raw
+    record carries them.
+    """
+    if not records:
+        return NormalizedBatch(pd.DataFrame(), [])
+
+    df = pd.DataFrame(records)
+    if df.empty:
+        return NormalizedBatch(pd.DataFrame(), [])
+
+    reasons: list[list[str]] = [[] for _ in records]
+    for col in (*HL_L1_TS_COLS, *HL_L1_BOOK_COLS):
+        if col not in df.columns:
+            df[col] = None
+        df[col] = pd.to_numeric(df[col], errors="coerce")
+
+    if "base_coin" not in df.columns:
+        df["base_coin"] = None
+    valid_base_coin = df["base_coin"].notna() & df["base_coin"].astype(str).str.strip().ne("")
+    for index in df.index[~valid_base_coin]:
+        reasons[int(index)].append("invalid_base_coin")
+    df["base_coin"] = df["base_coin"].astype(str).str.strip()
+
+    checks = (
+        ("event_local_ts_ms", False, "invalid_event_local_ts_ms"),
+        ("hl_local_recv_ts_ms", False, "invalid_hl_local_recv_ts_ms"),
+        ("hl_ts_ms", False, "invalid_hl_ts_ms"),
+        ("hl_bid_price", False, "invalid_hl_bid_price"),
+        ("hl_bid_size", True, "invalid_hl_bid_size"),
+        ("hl_ask_price", False, "invalid_hl_ask_price"),
+        ("hl_ask_size", True, "invalid_hl_ask_size"),
+    )
+    valid_parts = [valid_base_coin]
+    for col, allow_zero, reason in checks:
+        valid = _finite_mask(df[col], allow_zero=allow_zero)
+        valid_parts.append(valid)
+        for index in df.index[~valid]:
+            reasons[int(index)].append(reason)
+
+    accepted_mask = valid_parts[0]
+    for part in valid_parts[1:]:
+        accepted_mask = accepted_mask & part
+    accepted = df.loc[accepted_mask].copy()
+    if not accepted.empty:
+        stamps = pd.to_datetime(
+            accepted["event_local_ts_ms"],
+            unit="ms",
+            errors="coerce",
+        )
+        accepted["event_date"] = stamps.dt.strftime("%Y-%m-%d")
+        bad_date = accepted["event_date"].isna() | accepted["event_date"].eq("")
+        if bool(bad_date.any()):
+            raise AssertionError("hl_l1 event_date missing after a valid timestamp")
+        accepted = _cast_int64_ms(accepted, HL_L1_TS_COLS)
+
+    return _finalize_normalized(records, accepted, reasons, HL_L1_BODY_COLS)
+
+
 def normalize_records(
     records: list[dict[str, Any]],
     *,
@@ -343,6 +414,7 @@ def normalize_records(
     - ``None`` / omitted: env-driven tick mode (``v1`` default, ``lean`` if flagged)
     - ``v1`` / ``lean``: tick bodies
     - ``bar_5m``: closed candle volume rows
+    - ``hl_l1``: Hyperliquid L1 body; never selected by ``SPREAD_LEAN_SCHEMA``
     """
     mode = resolve_tick_schema_mode() if schema_mode is None else schema_mode
     if mode == "bar_5m":
@@ -351,13 +423,15 @@ def normalize_records(
         return normalize_lean_tick_records(records)
     if mode == "v1":
         return normalize_v1_records(records)
+    if mode == "hl_l1":
+        return normalize_hl_l1_records(records)
     raise ValueError(f"unsupported schema_mode: {mode!r}")
 
 
 def _sort_column_for_mode(schema_mode: SchemaMode) -> str:
     if schema_mode == "bar_5m":
         return "bar_start_ts_ms"
-    if schema_mode == "lean":
+    if schema_mode in {"lean", "hl_l1"}:
         return "event_local_ts_ms"
     return "event_dt"
 
@@ -382,7 +456,7 @@ class ParquetPublisher:
             raise ValueError(f"parquet_root must be absolute, got: {parquet_root}")
         if max_queue < 1:
             raise ValueError("max_queue must be >= 1")
-        if schema_mode is not None and schema_mode not in {"v1", "lean", "bar_5m"}:
+        if schema_mode is not None and schema_mode not in _SCHEMA_MODES:
             raise ValueError(f"unsupported schema_mode: {schema_mode!r}")
 
         self.parquet_root = parquet_root

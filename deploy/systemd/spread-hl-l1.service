@@ -1,0 +1,34 @@
+# Git template only. Do not systemctl enable or start in this change.
+# Separate from spread-collector-next. Does not write /data/live, /data/spool,
+# or /data/spool-next. Remote backup prefix spread-hl is a later gate:
+# docs/hl-l1-storage-contract.md and spread-hl-backup-transfer.service.
+[Unit]
+Description=Hyperliquid L1 bbo collector (template, not enabled)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/root/spread_staging
+Environment=HL_PARQUET_ROOT=/data/live-hl
+Environment=HL_SPOOL_ROOT=/data/spool-hl
+Environment=HL_RUNTIME_LOG=/var/log/spread/hl-l1.log
+Environment=HL_FAILED_BATCHES_LOG=/var/log/spread/hl-l1-failed-batches.log
+Environment=HL_UNIVERSE=/root/spread_staging/bybit_okx_universe.csv
+Environment=HL_INFO_URL=https://api.hyperliquid.xyz/info
+Environment=HL_WS_URL=wss://api.hyperliquid.xyz/ws
+ExecStartPre=/usr/bin/mkdir -p /data/live-hl /data/spool-hl /var/log/spread
+ExecStart=/root/venv/bin/python -m app.hl
+LimitNOFILE=65535
+Restart=always
+RestartSec=5
+StartLimitIntervalSec=300
+StartLimitBurst=20
+KillSignal=SIGTERM
+TimeoutStopSec=120
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

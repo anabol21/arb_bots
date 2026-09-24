@@ -1,0 +1,31 @@
+# Git template only. Do not enable, do not add a timer, do not install.
+# Later gate, after SSH and an explicit approval:
+#   own compactor publishes /data/hl-compacted (not /data/compacted),
+#   then this oneshot may upload with rclone prefix spread-hl
+#   (not spread-compacted). Remote parquet read is the durability check.
+# No [Install] section: systemctl enable has no target until that gate.
+[Unit]
+Description=HL L1 compacted backup template (do not enable)
+
+[Service]
+Type=oneshot
+User=root
+WorkingDirectory=/root/spread_staging
+Environment=BACKUP_COMPACTED_DIR=/data/hl-compacted
+Environment=BACKUP_RCLONE_BINARY=/opt/rclone-1.74.4/rclone
+Environment=BACKUP_RCLONE_REMOTE=backup1tb
+Environment=BACKUP_RCLONE_PATH=spread-hl
+Environment=BACKUP_SFTP_KEY_PATH=/root/.ssh/id_ed25519_uploader
+Environment=BACKUP_RCLONE_SFTP_CONCURRENCY=8
+Environment=BACKUP_RCLONE_SFTP_CHUNK_SIZE=128k
+Environment=BACKUP_TRANSFER_LOCK_PATH=/run/spread-hl-backup.lock
+Environment=BACKUP_SENT_RETENTION_HOURS=12
+ExecStart=/root/venv/bin/python -m app.storage.backup_transfer \
+  --compacted-dir /data/hl-compacted \
+  --remote-path spread-hl \
+  --sent-retention-hours 12
+StandardOutput=append:/var/log/spread/hl-backup-transfer.log
+StandardError=append:/var/log/spread/hl-backup-transfer.log
+Nice=10
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7
