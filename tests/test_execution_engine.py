@@ -1380,6 +1380,48 @@ class TransportMappingTests(EngineHarness):
 
 
 class AdapterIngestTests(EngineHarness):
+    async def test_live_ingest_fsyncs_fill_before_return(self) -> None:
+        engine = self._engine()
+        await engine.submit(_intent())
+        fill = _event(
+            ExecutionEventType.FILL,
+            intent_id=INTENT_A,
+            sequence=engine.state.last_sequence + 1,
+            monotonic_ns=engine.state.last_monotonic_ns + 1,
+            venue=Venue.BYBIT,
+            leg_id="leg_bybit",
+            payload={"quantity": "1"},
+        )
+        result = await engine.ingest_adapter_batch_durable(
+            AdapterBatch(schema_version=ADAPTER_SCHEMA, events=(fill,), issues=())
+        )
+        self.assertTrue(result.accepted)
+        self.assertEqual(engine._wal.health().queue_depth, 0)
+        self.assertEqual(engine._wal.replay().records[-1].event, fill)
+
+    async def test_live_ingest_wal_failure_latches_kill_switch(self) -> None:
+        engine = self._engine()
+        await engine.submit(_intent())
+        fill = _event(
+            ExecutionEventType.FILL,
+            intent_id=INTENT_A,
+            sequence=engine.state.last_sequence + 1,
+            monotonic_ns=engine.state.last_monotonic_ns + 1,
+            venue=Venue.BYBIT,
+            leg_id="leg_bybit",
+            payload={"quantity": "1"},
+        )
+        with patch.object(engine._wal, "drain_and_prove_last", side_effect=WalError("write_failed")):
+            result = await engine.ingest_adapter_batch_durable(
+                AdapterBatch(schema_version=ADAPTER_SCHEMA, events=(fill,), issues=())
+            )
+        self.assertFalse(result.accepted)
+        self.assertEqual(result.reason_code, "wal_unhealthy")
+        self.assertTrue(result.recovery_required)
+        self.assertTrue(engine.readiness.kill_switch)
+        engine.publish_readiness(_ready())
+        self.assertTrue(engine.readiness.kill_switch)
+
     async def test_adapter_batch_is_atomic(self) -> None:
         engine = self._engine()
         accepted = await engine.submit(_intent())

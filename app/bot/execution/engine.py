@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from decimal import Decimal
 from enum import Enum
 from types import MappingProxyType
@@ -717,6 +717,7 @@ class ExecutionEngine:
         self._wal_drain = wal_drain
         self._snapshot_provider = snapshot_provider
         self._durable_prewrite = durable_prewrite
+        self._live_ingest_halted = False
         self._recovery_attempts = 0
         self._last_intent: Optional[TradeIntent] = None
         self._primary_by_venue: dict[Venue, LegPlan] = {}
@@ -743,7 +744,13 @@ class ExecutionEngine:
 
     def publish_readiness(self, snapshot: ReadinessSnapshot) -> bool:
         """Publish from a same-loop socket callback without waiting on submit."""
+        if self._live_ingest_halted and isinstance(snapshot, ReadinessSnapshot):
+            snapshot = replace(snapshot, kill_switch=True)
         return self._readiness_fence.publish(snapshot)
+
+    def _latch_live_ingest_failure(self) -> None:
+        self._live_ingest_halted = True
+        self.publish_readiness(replace(self.readiness, kill_switch=True))
 
     def _note_seeds(
         self, events: Sequence[ExecutionEvent], state: Optional[SpreadState]
@@ -1565,6 +1572,50 @@ class ExecutionEngine:
     async def ingest_adapter_batch(self, batch: AdapterBatch) -> IngestResult:
         async with self._lock:
             return self._ingest_locked(batch)
+
+    async def ingest_adapter_batch_durable(self, batch: AdapterBatch) -> IngestResult:
+        """Live-only private evidence: fold and fsync under one engine lock.
+
+        An adapter issue or uncertain writer latches the kill switch; replay
+        and signed venue reconciliation must settle exposure before rearming.
+        The ordinary no-order ingest API keeps its historical async-WAL mode.
+        """
+        async with self._lock:
+            if not isinstance(batch, AdapterBatch) or batch.issues:
+                self._latch_live_ingest_failure()
+                return IngestResult(
+                    schema_version=SCHEMA_VERSION,
+                    accepted=False,
+                    applied_count=0,
+                    reason_code="adapter_invalid",
+                    recovery_required=True,
+                )
+            result = self._ingest_locked(batch)
+            if not result.accepted:
+                self._latch_live_ingest_failure()
+                return IngestResult(
+                    schema_version=SCHEMA_VERSION,
+                    accepted=False,
+                    applied_count=0,
+                    reason_code=result.reason_code,
+                    recovery_required=True,
+                )
+            if not batch.events:
+                return result
+            try:
+                proven = self._wal.drain_and_prove_last(batch.events[-1])
+            except Exception:
+                proven = False
+            if not proven:
+                self._latch_live_ingest_failure()
+                return IngestResult(
+                    schema_version=SCHEMA_VERSION,
+                    accepted=False,
+                    applied_count=0,
+                    reason_code="wal_unhealthy",
+                    recovery_required=True,
+                )
+            return result
 
     def _ingest_locked(self, batch: AdapterBatch) -> IngestResult:
         if not isinstance(batch, AdapterBatch):
