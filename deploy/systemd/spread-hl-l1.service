@@ -10,17 +10,23 @@ Wants=network-online.target
 [Service]
 Type=simple
 User=root
-WorkingDirectory=/root/spread_staging
+WorkingDirectory=/root/spread_hl
 Environment=HL_PARQUET_ROOT=/data/live-hl
 Environment=HL_SPOOL_ROOT=/data/spool-hl
 Environment=HL_RUNTIME_LOG=/var/log/spread/hl-l1.log
 Environment=HL_FAILED_BATCHES_LOG=/var/log/spread/hl-l1-failed-batches.log
-Environment=HL_UNIVERSE=/root/spread_staging/bybit_okx_universe.csv
+Environment=HL_UNIVERSE=/root/spread_hl/bybit_okx_universe.csv
 Environment=HL_INFO_URL=https://api.hyperliquid.xyz/info
 Environment=HL_WS_URL=wss://api.hyperliquid.xyz/ws
 ExecStartPre=/usr/bin/mkdir -p /data/live-hl /data/spool-hl /var/log/spread
 ExecStart=/root/venv/bin/python -m app.hl
 LimitNOFILE=65535
+# Host nproc=6. systemd CPUQuota is 100% per core, so 40% of the machine is 240%.
+CPUQuota=240%
+MemoryHigh=7G
+MemoryMax=8G
+MemorySwapMax=0
+InaccessiblePaths=/data/live /data/spool /data/spool-next
 Restart=always
 RestartSec=5
 StartLimitIntervalSec=300
