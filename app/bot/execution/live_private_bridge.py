@@ -98,6 +98,10 @@ class LivePrivateEvidenceBridge:
     def pending_count(self) -> int:
         return len(self._pending)
 
+    @property
+    def bound(self) -> bool:
+        return self._adapter is not None
+
     def begin_submission(self, plans: Sequence[LegPlan]) -> None:
         if self._fatal is not None or self._pending or self._draining:
             raise LivePrivateBridgeError("private_evidence_unsettled")
@@ -112,6 +116,18 @@ class LivePrivateEvidenceBridge:
         self._intent_id = None
         self._expected_clients = {venue: plan.client_id for venue, plan in expected.items()}
         self._capturing = True
+
+    def abort_unwritten_submission(self) -> None:
+        """Release capture only when no target evidence arrived and no write exists.
+
+        The caller must independently prove that its EV2 submit produced no
+        REQUEST_SENT leg. Any queued CAP frame instead freezes the route.
+        """
+        if self._pending or self._adapter is not None or self._fatal is not None:
+            raise LivePrivateBridgeError("private_evidence_unsettled")
+        self._capturing = False
+        self._expected_clients = {}
+        self._intent_id = None
 
     def observe(
         self, text: str, receive_mono_ns: int, *, venue: Venue, generation: int
@@ -212,7 +228,8 @@ class LivePrivateEvidenceBridge:
         if (
             state.intent_id != intent.intent_id
             or set(expected) != {Venue.BYBIT, Venue.OKX}
-            or observed != expected
+            or not observed
+            or not set(observed.items()).issubset(set(expected.items()))
             or expected != self._expected_clients
         ):
             raise LivePrivateBridgeError("request_not_committed")

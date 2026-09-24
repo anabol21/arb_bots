@@ -12,8 +12,9 @@ import tempfile
 import unittest
 from decimal import Decimal
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, Optional
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 from app.bot.execution.adapters import SCHEMA_VERSION as ADAPTER_SCHEMA, AdapterBatch
 from app.bot.execution.contracts import (
@@ -43,6 +44,7 @@ from app.bot.execution.live_private_bridge import (
     LivePrivateBridgeError,
     LivePrivateEvidenceBridge,
 )
+from app.bot.execution.live_owner_route import LiveOwnerLoopRoute, LiveOwnerRouteError
 from app.bot.execution.live_rest_flat import CompleteLiveRestSnapshot
 from app.bot.execution.ownership import FileOwnershipFence, OwnershipError
 from app.bot.execution.recovery import RecoveryActionKind, RecoveryStatus
@@ -1396,6 +1398,23 @@ class LivePrivateBridgeTests(EngineHarness):
             },
         )
 
+    async def test_partial_write_keeps_private_correlation_for_recovery(self) -> None:
+        self.okx.error = RuntimeError("peer_down")
+        engine = self._engine(durable_prewrite=True)
+        bridge = self._bridge(engine)
+        intent = _intent()
+        plans = _resolver(intent)
+        bridge.begin_submission(plans)
+        result = await engine.submit(intent)
+        self.assertEqual(result.status, SubmitStatus.RECOVERY_REQUIRED)
+        bridge.bind_submitted(
+            intent, plans, bybit_generation=1, okx_generation=1,
+            dispatch=result.dispatch,
+        )
+        self.assertTrue(bridge.bound)
+        self.assertIs(engine._adapter, bridge._adapter)
+        self.assertTrue(engine.state.recovery_required)
+
     async def test_buffered_private_fills_fold_only_after_request_sent(self) -> None:
         engine = self._engine(durable_prewrite=True)
         bridge = self._bridge(engine)
@@ -1573,6 +1592,125 @@ class LivePrivateBridgeTests(EngineHarness):
             generation=1,
         )
         self.assertEqual(bridge.pending_count, 1)
+
+
+class LiveOwnerLoopRouteTests(EngineHarness):
+    async def test_write_without_committed_wal_state_freezes_route(self) -> None:
+        engine = self._engine(durable_prewrite=True)
+        bridge = LivePrivateEvidenceBridge(
+            engine=engine,
+            symbols_by_venue={Venue.BYBIT: "BTCUSDT", Venue.OKX: "BTC-USDT-SWAP"},
+        )
+        route = LiveOwnerLoopRoute(
+            owner_loop=self.loop, engine=engine, private_bridge=bridge,
+            plan_resolver=_resolver,
+        )
+        warm = SimpleNamespace(
+            loop=self.loop,
+            set_private_frame_observer=lambda *_: None,
+            set_trade_frame_observer=lambda *_: None,
+        )
+        session = SimpleNamespace(
+            bybit_runtime=SimpleNamespace(reconnect_generation=1),
+            okx_runtime=SimpleNamespace(reconnect_generation=1),
+        )
+        await route.start(warm_loop=warm, session=session)
+        fake_result = SubmitResult(
+            schema_version=ENGINE_SCHEMA,
+            status=SubmitStatus.ACCEPTED,
+            intent_id=INTENT_A,
+            run_id=RUN_ID,
+            reason_code=None,
+            recovery_required=False,
+            dispatch=_dispatch_result(),
+        )
+        with patch.object(engine, "submit", new_callable=AsyncMock, return_value=fake_result):
+            with self.assertRaisesRegex(LiveOwnerRouteError, "write_without_committed_state"):
+                await route.submit_intent(_intent())
+        self.assertEqual(route.planned_submissions, 1)
+        self.assertTrue(engine.readiness.kill_switch)
+        await route.stop()
+
+    async def test_private_frames_buffer_during_send_then_prove_open(self) -> None:
+        engine = self._engine(durable_prewrite=True)
+        bridge = LivePrivateEvidenceBridge(
+            engine=engine,
+            symbols_by_venue={Venue.BYBIT: "BTCUSDT", Venue.OKX: "BTC-USDT-SWAP"},
+        )
+
+        class Warm:
+            def __init__(self, loop: asyncio.AbstractEventLoop) -> None:
+                self.loop = loop
+                self.private: dict[str, Any] = {}
+                self.trade: dict[str, Any] = {}
+
+            def set_private_frame_observer(self, name: str, callback: Any) -> None:
+                self.private[name] = callback
+
+            def set_trade_frame_observer(self, name: str, callback: Any) -> None:
+                self.trade[name] = callback
+
+        warm = Warm(self.loop)
+        session = SimpleNamespace(
+            bybit_runtime=SimpleNamespace(reconnect_generation=1),
+            okx_runtime=SimpleNamespace(reconnect_generation=1),
+        )
+        route = LiveOwnerLoopRoute(
+            owner_loop=self.loop, engine=engine, private_bridge=bridge,
+            plan_resolver=_resolver, max_planned_submissions=1,
+        )
+        await route.start(warm_loop=warm, session=session)
+        self.bybit.block = True
+        self.okx.block = True
+        intent = _intent()
+        task = asyncio.create_task(route.submit_intent(intent))
+        await asyncio.wait_for(self.bybit.started.wait(), timeout=1)
+        await asyncio.wait_for(self.okx.started.wait(), timeout=1)
+        plans = _resolver(intent)
+        warm.trade["bybit"](
+            json.dumps({"op": "order.create", "reqId": plans[0].client_id, "retCode": 0}),
+            self.clock.n + 10,
+        )
+        warm.trade["okx"](
+            json.dumps({
+                "op": "order", "id": plans[1].client_id, "code": "0",
+                "data": [{"sCode": "0"}],
+            }),
+            self.clock.n + 11,
+        )
+        warm.private["bybit"](
+            json.dumps({"topic": "order", "data": [{
+                "symbol": "BTCUSDT", "orderLinkId": plans[0].client_id,
+                "orderStatus": "Filled", "cumExecQty": "1",
+                "execTime": "1750000000001",
+            }]}),
+            self.clock.n + 12,
+        )
+        warm.private["okx"](
+            json.dumps({"arg": {"channel": "orders"}, "data": [{
+                "instId": "BTC-USDT-SWAP", "clOrdId": plans[1].client_id,
+                "state": "filled", "accFillSz": "1",
+                "fillTime": "1750000000002",
+            }]}),
+            self.clock.n + 13,
+        )
+        self.assertEqual(bridge.pending_count, 4)
+        self.bybit.release.set()
+        self.okx.release.set()
+        result = await asyncio.wait_for(task, timeout=1)
+        self.assertEqual(result.status, SubmitStatus.ACCEPTED)
+        for _ in range(30):
+            if engine.state.status is SpreadStatus.OPEN:
+                break
+            await asyncio.sleep(0.001)
+        self.assertEqual(engine.state.status, SpreadStatus.OPEN)
+        self.assertEqual(route.planned_submissions, 1)
+        self.assertIsNone(route.fatal_reason)
+        with self.assertRaisesRegex(LiveOwnerRouteError, "budget_exhausted"):
+            await route.submit_intent(_intent(intent_id=INTENT_B, action=IntentAction.CLOSE))
+        await route.stop()
+        self.assertIsNone(warm.private["bybit"])
+        self.assertIsNone(warm.trade["okx"])
 
 
 class AdapterIngestTests(EngineHarness):
