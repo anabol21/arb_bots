@@ -16,6 +16,7 @@ from app.bot.execution.adapters import PrivateEventAdapter
 from app.bot.execution.contracts import LegPlan, TradeIntent, Venue
 from app.bot.execution.engine import ExecutionEngine
 from app.bot.execution.live_chronometry import LiveChronometry
+from app.bot.execution.live_rest_flat import CompleteLiveRestSnapshot
 from app.bot.execution.transport import DispatchResult
 
 
@@ -352,3 +353,32 @@ class LivePrivateEvidenceBridge:
             self._fatal = result.reason_code or "rest_ingest_failed"
             raise LivePrivateBridgeError(self._fatal)
         return result.applied_count
+
+    async def ingest_complete_account_snapshot(
+        self, snapshot: CompleteLiveRestSnapshot, *, receive_mono_ns: int
+    ) -> int:
+        """Fold a complete, generation-stable all-account flat proof after CLOSE."""
+        if not isinstance(snapshot, CompleteLiveRestSnapshot):
+            raise LivePrivateBridgeError("invalid_rest_snapshot")
+        snapshot.assert_account_flat()
+        readiness = self._engine.readiness
+        if (
+            snapshot.generations != (readiness.bybit_generation, readiness.okx_generation)
+            or not readiness.bybit_private_ready or not readiness.okx_private_ready
+            or self._pending
+        ):
+            raise LivePrivateBridgeError("rest_generation_or_stream_changed")
+        total = 0
+        for venue, positions, orders, generation in (
+            (Venue.BYBIT, snapshot.bybit_positions, snapshot.bybit_open_orders, snapshot.generations[0]),
+            (Venue.OKX, snapshot.okx_positions, snapshot.okx_open_orders, snapshot.generations[1]),
+        ):
+            total += await self.ingest_complete_rest_snapshot(
+                positions, venue=venue, source="rest_positions",
+                generation=generation, receive_mono_ns=receive_mono_ns,
+            )
+            total += await self.ingest_complete_rest_snapshot(
+                orders, venue=venue, source="rest_open_orders",
+                generation=generation, receive_mono_ns=receive_mono_ns,
+            )
+        return total

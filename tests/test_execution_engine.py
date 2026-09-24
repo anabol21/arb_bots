@@ -43,6 +43,7 @@ from app.bot.execution.live_private_bridge import (
     LivePrivateBridgeError,
     LivePrivateEvidenceBridge,
 )
+from app.bot.execution.live_rest_flat import CompleteLiveRestSnapshot
 from app.bot.execution.ownership import FileOwnershipFence, OwnershipError
 from app.bot.execution.recovery import RecoveryActionKind, RecoveryStatus
 from app.bot.execution.state_machine import apply_events, initial_spread_state
@@ -1502,19 +1503,17 @@ class LivePrivateBridgeTests(EngineHarness):
         self.assertEqual(await bridge.drain(), 2)
         self.assertEqual(engine.state.status, SpreadStatus.CLOSING)
         self.assertEqual(engine._wal.replay().state, engine.state)
-        for venue in (Venue.BYBIT, Venue.OKX):
-            empty = (
-                {"retCode": 0, "result": {"list": []}}
-                if venue is Venue.BYBIT else {"code": "0", "data": []}
-            )
-            for source in ("rest_positions", "rest_open_orders"):
-                await bridge.ingest_complete_rest_snapshot(
-                    empty,
-                    venue=venue,
-                    source=source,
-                    generation=1,
-                    receive_mono_ns=engine.state.last_monotonic_ns + 1,
-                )
+        await bridge.ingest_complete_account_snapshot(
+            CompleteLiveRestSnapshot(
+                bybit_positions={"retCode": 0, "result": {"list": []}},
+                bybit_open_orders={"retCode": 0, "result": {"list": []}},
+                okx_positions={"code": "0", "data": []},
+                okx_open_orders={"code": "0", "data": []},
+                generations=(1, 1),
+                elapsed_ms=5,
+            ),
+            receive_mono_ns=engine.state.last_monotonic_ns + 1,
+        )
         prove = await engine.plan_recovery()
         self.assertEqual(prove.kind, RecoveryActionKind.PROVE_FLAT)
         result = await engine.apply_recovery_step(prove)
