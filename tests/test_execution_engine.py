@@ -52,6 +52,10 @@ from app.bot.execution.transport import (
     unsigned_frame_finalizer,
 )
 from app.bot.execution.wal import (
+    CRASH_AFTER_FLUSH_BEFORE_FSYNC,
+    CRASH_AFTER_FSYNC_BEFORE_ACK,
+    CRASH_BEFORE_WRITE,
+    CRASH_TORN_WRITE,
     SUBMIT_WORST_CASE_EVENTS,
     ExecutionWal,
     WalError,
@@ -474,8 +478,9 @@ class EngineHarness(unittest.IsolatedAsyncioTestCase):
                 max_queue=max_queue,
                 reserved_tail=reserved_tail,
             )
+        anchor = wal.replay() if durable_prewrite else None
         if durable_prewrite and state is None:
-            state = wal.replay().state
+            state = anchor.state
         return ExecutionEngine(
             run_id=RUN_ID,
             wal=wal,
@@ -488,6 +493,7 @@ class EngineHarness(unittest.IsolatedAsyncioTestCase):
             monotonic_ns=self.clock,
             state=state,
             durable_prewrite=durable_prewrite,
+            prewrite_anchor=anchor,
         )
 
 
@@ -746,7 +752,7 @@ class SubmitHappyPathTests(EngineHarness):
 
     async def test_opt_in_prewrite_failure_never_sends_and_requires_recovery(self) -> None:
         engine = self._engine(durable_prewrite=True)
-        with patch.object(engine._wal, "drain_all", side_effect=WalError("write_failed")):
+        with patch.object(engine._wal, "drain_and_prove_last", side_effect=WalError("write_failed")):
             result = await engine.submit(_intent())
         self.assertEqual(result.status, SubmitStatus.RECOVERY_REQUIRED)
         self.assertEqual(result.reason_code, "wal_unhealthy")
@@ -754,27 +760,67 @@ class SubmitHappyPathTests(EngineHarness):
         self.assertEqual(self.bybit.asend_calls, 0)
         self.assertEqual(self.okx.asend_calls, 0)
 
-    async def test_opt_in_prewrite_rejects_unreplayed_prior_wal_state(self) -> None:
-        engine = self._engine(
-            durable_prewrite=True,
-            state=initial_spread_state(run_id=RUN_ID),
-        )
+    async def test_opt_in_prewrite_does_not_replay_on_signal(self) -> None:
+        engine = self._engine(durable_prewrite=True)
+        with patch.object(engine._wal, "replay", side_effect=AssertionError("hot_path_replay")):
+            result = await engine.submit(_intent())
+        self.assertEqual(result.status, SubmitStatus.ACCEPTED)
+        self.assertEqual(self.bybit.asend_calls, 1)
+
+    async def test_opt_in_prewrite_rejects_external_wal_append(self) -> None:
+        engine = self._engine(durable_prewrite=True)
+        with engine._wal.path.open("ab") as handle:
+            handle.write(b"external\n")
         result = await engine.submit(_intent())
+        self.assertEqual(result.status, SubmitStatus.RECOVERY_REQUIRED)
+        self.assertEqual(self.bybit.asend_calls, 0)
+        self.assertEqual(self.okx.asend_calls, 0)
+
+    async def _assert_prewrite_crash_fails_closed(self, stage: str) -> None:
+        engine = self._engine(durable_prewrite=True)
+
+        def crash(at: str) -> None:
+            if at == stage:
+                raise RuntimeError("injected_crash")
+
+        with patch.object(engine._wal, "_maybe_crash", side_effect=crash):
+            result = await engine.submit(_intent())
         self.assertEqual(result.status, SubmitStatus.RECOVERY_REQUIRED)
         self.assertEqual(result.reason_code, "wal_unhealthy")
         self.assertEqual(self.bybit.asend_calls, 0)
         self.assertEqual(self.okx.asend_calls, 0)
 
+    async def test_prewrite_crash_before_write_fails_closed(self) -> None:
+        await self._assert_prewrite_crash_fails_closed(CRASH_BEFORE_WRITE)
+
+    async def test_prewrite_torn_write_fails_closed(self) -> None:
+        await self._assert_prewrite_crash_fails_closed(CRASH_TORN_WRITE)
+
+    async def test_prewrite_crash_before_fsync_fails_closed(self) -> None:
+        await self._assert_prewrite_crash_fails_closed(CRASH_AFTER_FLUSH_BEFORE_FSYNC)
+
+    async def test_prewrite_crash_after_fsync_before_ack_fails_closed(self) -> None:
+        await self._assert_prewrite_crash_fails_closed(CRASH_AFTER_FSYNC_BEFORE_ACK)
+
+    async def test_opt_in_prewrite_rejects_unreplayed_prior_wal_state(self) -> None:
+        with self.assertRaises(EngineError):
+            self._engine(
+                durable_prewrite=True,
+                state=initial_spread_state(run_id=RUN_ID),
+            )
+        self.assertEqual(self.bybit.asend_calls, 0)
+        self.assertEqual(self.okx.asend_calls, 0)
+
     async def test_opt_in_prewrite_rechecks_ttl_after_fsync(self) -> None:
         engine = self._engine(durable_prewrite=True)
-        original_drain = engine._wal.drain_all
+        original_drain = engine._wal.drain_and_prove_last
 
-        def expire_after_drain() -> Any:
-            acks = original_drain()
+        def expire_after_drain(event: ExecutionEvent) -> Any:
+            proof = original_drain(event)
             self.clock.n = 1_000_000
-            return acks
+            return proof
 
-        with patch.object(engine._wal, "drain_all", side_effect=expire_after_drain):
+        with patch.object(engine._wal, "drain_and_prove_last", side_effect=expire_after_drain):
             result = await engine.submit(_intent())
         self.assertEqual(result.status, SubmitStatus.REJECTED)
         self.assertEqual(result.reason_code, "ttl_expired")

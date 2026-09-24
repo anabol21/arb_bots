@@ -170,6 +170,7 @@ def _engine(
         finalize_frame=unsigned_frame_finalizer,
         monotonic_ns=time.monotonic_ns,
     )
+    anchor = wal.replay()
     return TimedPrewriteEngine(
         run_id=run_id,
         wal=wal,
@@ -181,8 +182,9 @@ def _engine(
         readiness=_readiness(simulated_trade=simulated_trade),
         ownership=ownership,
         monotonic_ns=time.monotonic_ns,
-        state=wal.replay().state,
+        state=anchor.state,
         durable_prewrite=durable_prewrite,
+        prewrite_anchor=anchor if durable_prewrite else None,
     )
 
 
@@ -213,6 +215,7 @@ async def run_benchmark(*, samples: int, history: int) -> dict[str, object]:
     first_asend_ns: list[int] = []
     slowest_asend_ns: list[int] = []
     history_total_ns: list[int] = []
+    grown_exact: dict[str, float | int] = {}
     with tempfile.TemporaryDirectory(prefix="ev2-prewrite-no-order-") as tmp:
         root = Path(tmp)
         for index in range(samples):
@@ -272,11 +275,36 @@ async def run_benchmark(*, samples: int, history: int) -> dict[str, object]:
             history_bytes = wal.path.stat().st_size
             if wal.health().queue_depth != 0:
                 raise RuntimeError("benchmark_history_wal_not_durable")
+            # One exact engine signal after a long audit-only WAL proves the
+            # hot-path fence is not replaying the entire accumulated file.
+            ownership.release()
+            ownership.acquire()
+            bybit_exact = MemoryOnlySocket(loop)
+            okx_exact = MemoryOnlySocket(loop)
+            exact_engine = _engine(
+                loop=loop, run_id=run_id, wal=wal, ownership=ownership,
+                bybit=bybit_exact, okx=okx_exact, simulated_trade=True,
+                durable_prewrite=True,
+            )
+            exact_intent = _intent(run_id)
+            exact_result = await exact_engine.submit(exact_intent)
+            if exact_result.status is not SubmitStatus.ACCEPTED:
+                raise RuntimeError(f"benchmark_grown_exact_failed:{exact_result.reason_code}")
+            if bybit_exact.start_ns is None or okx_exact.start_ns is None:
+                raise RuntimeError("benchmark_grown_exact_missing_memory_asend")
+            grown_exact = {
+                "prior_wal_bytes": history_bytes,
+                "prior_history_attempts": history,
+                "fence_us": round(exact_engine.fence_elapsed_ns / 1_000, 3),
+                "signal_to_first_memory_asend_us": round(
+                    (min(bybit_exact.start_ns, okx_exact.start_ns) - exact_intent.signal_mono_ns) / 1_000, 3
+                ),
+            }
         finally:
             ownership.release()
     quartile = max(5, history // 4)
     return {
-        "schema_version": "bbot.ev2.prewrite_no_order_benchmark.v1",
+        "schema_version": "bbot.ev2.prewrite_no_order_benchmark.v2",
         "timestamp_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "host": platform.node(),
         "python": platform.python_version(),
@@ -284,6 +312,7 @@ async def run_benchmark(*, samples: int, history: int) -> dict[str, object]:
         "network_capable_sockets": False,
         "private_status_simulated": True,
         "live_latency_gate_eligible": False,
+        "latency_boundary": "memory_asend_not_ws_write_or_exchange_fill",
         "fresh_wal_exact_engine_fence": {
             "fence": _stats(fence_ns),
             "signal_to_first_memory_asend": _stats(first_asend_ns),
@@ -296,6 +325,7 @@ async def run_benchmark(*, samples: int, history: int) -> dict[str, object]:
             "first_quartile": _stats(history_total_ns[:quartile]),
             "last_quartile": _stats(history_total_ns[-quartile:]),
         },
+        "grown_wal_exact_engine_single_sample": grown_exact,
     }
 
 

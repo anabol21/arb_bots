@@ -3,8 +3,8 @@
 Stdlib plus frozen EV2 contracts, FSM, transport, adapters and WAL
 admission. Import and construction perform no sockets, disk drain, fsync,
 Sentry, logging, REST or live send. ``submit`` awaits only parallel
-transport socket writes by default. The opt-in durable-prewrite mode fsyncs
-and replays the accepted intent before any transport dispatch.
+transport socket writes by default. The opt-in durable-prewrite mode requires
+a startup replay anchor and fsyncs/proves the accepted tail before dispatch.
 """
 
 from __future__ import annotations
@@ -657,6 +657,7 @@ class ExecutionEngine:
         wal_drain: Optional[WalDrainPort] = None,
         snapshot_provider: Optional[SnapshotPort] = None,
         durable_prewrite: bool = False,
+        prewrite_anchor: Optional[ReplayResult] = None,
     ) -> None:
         if not isinstance(wal, ExecutionWal):
             raise EngineError("invalid_intent")
@@ -682,6 +683,12 @@ class ExecutionEngine:
             )
         if not isinstance(state, SpreadState) or state.run_id != run_id:
             raise EngineError("invalid_intent")
+        if durable_prewrite and (
+            prewrite_anchor is None
+            or not wal.matches_replay_anchor(prewrite_anchor)
+            or prewrite_anchor.state != state
+        ):
+            raise EngineError("wal_unhealthy")
         self._run_id = run_id
         self._wal = wal
         self._transport = transport
@@ -1076,24 +1083,9 @@ class ExecutionEngine:
         if not self._durable_prewrite:
             return True
         try:
-            self._wal.drain_all()
-            replay = self._wal.replay()
-            health = self._wal.health()
+            return self._wal.drain_and_prove_last(accepted_event)
         except Exception:
             return False
-        return (
-            not health.writer_unhealthy
-            and not health.integrity_unhealthy
-            and not health.torn_tail
-            and health.queue_depth == 0
-            and health.durable_lag == 0
-            and bool(replay.records)
-            and replay.integrity_ok
-            and not replay.torn_tail
-            and replay.durable_watermark == health.durable_wal_seq
-            and replay.records[-1].event == accepted_event
-            and replay.state == self._state
-        )
 
     def _validate_plan_reduce_only(
         self, intent: TradeIntent, bybit: LegPlan, okx: LegPlan

@@ -752,6 +752,7 @@ class ExecutionWal:
         self._enqueue_prev_hash = GENESIS_HASH
         self._durable_seq = 0
         self._durable_hash = GENESIS_HASH
+        self._durable_file_size = 0
         self._durable_records: list[WalRecord] = []
         self._writer_unhealthy = False
         self._integrity_unhealthy = False
@@ -903,6 +904,10 @@ class ExecutionWal:
         if pending.record.prev_hash != self._durable_hash:
             self._integrity_unhealthy = True
             raise WalIntegrityError("chain_break")
+        disk_size = self._path.stat().st_size if self._path.exists() else 0
+        if disk_size != self._durable_file_size:
+            self._integrity_unhealthy = True
+            raise WalIntegrityError("external_wal_change")
         try:
             self._maybe_crash(CRASH_BEFORE_WRITE)
             self._ensure_parent()
@@ -923,6 +928,7 @@ class ExecutionWal:
                 fsync_fn = self._fsync_fn if self._fsync_fn is not None else os.fsync
                 fsync_fn(fh.fileno())
                 self._fsync_count += 1
+                self._durable_file_size += len(pending.line)
         except WalError:
             self._writer_unhealthy = True
             raise
@@ -948,6 +954,60 @@ class ExecutionWal:
                 break
             acks.append(ack)
         return tuple(acks)
+
+    def matches_replay_anchor(self, replay: ReplayResult) -> bool:
+        """Bind a live writer to a verified startup replay, not caller state alone."""
+        if not isinstance(replay, ReplayResult):
+            return False
+        tail = replay.records[-1] if replay.records else None
+        return bool(
+            self._scanned
+            and replay.integrity_ok
+            and not replay.torn_tail
+            and not self._writer_unhealthy
+            and not self._integrity_unhealthy
+            and not self._torn_tail
+            and not self._queue
+            and replay.durable_watermark == self._durable_seq
+            and len(replay.records) == len(self._durable_records)
+            and (tail.record_hash if tail else GENESIS_HASH) == self._durable_hash
+            and (tail.run_id if tail else self._run_id) == self._run_id
+        )
+
+    def drain_and_prove_last(self, expected_event: ExecutionEvent) -> bool:
+        """Fsync queued records and prove the accepted tail without replay.
+
+        The caller must serialize all WAL enqueues through the execution-engine
+        lock, after validating a startup replay anchor. A write error never
+        produces a dispatch proof, including after-fsync/before-ACK failures.
+        """
+        if (
+            not self._scanned
+            or self._writer_unhealthy
+            or self._integrity_unhealthy
+            or self._torn_tail
+            or not self._queue
+            or self._queue[-1].event != expected_event
+        ):
+            return False
+        expected = self._queue[-1].record
+        acks = self.drain_all()
+        health = self.health()
+        return bool(
+            acks
+            and acks[-1].durable
+            and acks[-1].wal_seq == expected.wal_seq
+            and acks[-1].record_hash == expected.record_hash
+            and self._durable_records
+            and self._durable_records[-1] == expected
+            and self._durable_seq == expected.wal_seq
+            and self._durable_hash == expected.record_hash
+            and not health.writer_unhealthy
+            and not health.integrity_unhealthy
+            and not health.torn_tail
+            and health.queue_depth == 0
+            and health.durable_lag == 0
+        )
 
     def replay(self) -> ReplayResult:
         records, torn_tail = self._read_prefix(apply_to_runtime=True)
@@ -1213,6 +1273,7 @@ class ExecutionWal:
             self._durable_records = list(records)
             self._durable_seq = records[-1].wal_seq if records else 0
             self._durable_hash = records[-1].record_hash if records else GENESIS_HASH
+            self._durable_file_size = len(data)
             if not self._queue:
                 self._next_seq = self._durable_seq + 1
                 self._enqueue_prev_hash = self._durable_hash
