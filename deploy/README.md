@@ -5,6 +5,8 @@ Artifacts for VPS production/staging packaging:
 | Path | Role |
 |---|---|
 | `deploy/systemd/spread-collector.service` | Long-running collector |
+| `deploy/systemd/spread-hl-l1.service` | Hyperliquid L1 template. **Do not enable** in this step. |
+| `deploy/systemd/spread-hl-backup-transfer.service` | Later rclone prefix `spread-hl`. No `[Install]`, no timer. **Do not enable.** |
 | `deploy/systemd/spread-compactor.service` + `.timer` | Compactor every 5m under flock |
 | `deploy/systemd/spread-backup-transfer.service` + `.timer` | Tick compacted transfer every 5m (offset) |
 | `deploy/systemd/spread-bars-backup-transfer.service` + `.timer` | Bars hive → `backup1tb:spread-bars` every 5m |

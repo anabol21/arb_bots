@@ -7,7 +7,7 @@ Read this before non-trivial work. Do not treat chat memory as source of truth.
 
 ## 1. One-liner
 
-VPS-local public spread collector (D) writes lean parquet + optional bars; a separate asyncio bot (`python -m app.bot`) decides on its own public books and either journals dual-leg `would_send` (stub) or, when gated, sends live dual-leg orders (B-private Contour B). Historical model is offline simulation only.
+VPS-local public spread collector (D) writes lean parquet + optional bars; a separate asyncio bot (`python -m app.bot`) decides on its own public books and either journals dual-leg `would_send` (stub) or, when gated, sends live dual-leg orders (B-private Contour B). Historical model is offline simulation only. A separate Hyperliquid L1 process (`python -m app.hl`) is a git template only: it is not enabled, writes `/data/live-hl`, and does not write the D trees.
 
 ---
 
@@ -35,7 +35,7 @@ HOT_ADD is in this tree: `app/discovery/`, `docs/hot-add-new-coins.md`, and `SPR
 
 | Track | Owner-ish code | What it is |
 |---|---|---|
-| 1 Collection / storage | `app/screaner_b_o.py`, `app/storage/*`, `app/schema/*`, `deploy/systemd/spread-collector*`, compactors, D backups | Public L1 ingest → parquet → compact → rclone. **Current reliability priority.** |
+| 1 Collection / storage | `app/screaner_b_o.py`, `app/hl/**`, `app/storage/*`, `app/schema/*`, `deploy/systemd/spread-collector*`, `deploy/systemd/spread-hl-*`, compactors, D backups | Public L1 ingest → parquet → compact → rclone. Hyperliquid L1 is a separate process and root. **Current reliability priority.** |
 | 2 Model | `model.ipynb`, `model_gear2.ipynb`, `docs/strategy-gears.md`, `research/gear22_backtest/` | Historical simulation only. No live orders. |
 | 3 Glue | `docs/b-v0-block-diagram.md`, `app/bot/**`, `app/policy/**`, `app/bot/private/**` | Live stub + B-private send. Isolated from D trees. |
 
@@ -53,6 +53,7 @@ Long-running (`Type=simple`):
 | `spread-bbot-gear2.service` | `python -m app.bot` | Gear-2 `would_send` stub (`BBOT_BROKER` unset → stub). `/data/bbot-gear2`. |
 | `spread-bbot-canary-wal-eden.service` | `python -m app.bot` | Live-send canary Contour B (`BBOT_BROKER=private_live`). `/data/bbot-canary-wal-eden`. Secrets via `EnvironmentFile=-/etc/spread/bbot-canary-wal-eden.env`. |
 | `spread-bbot-gear22-live-canary.service` | `python -m app.bot` | Gear 2.2 live canary (`BBOT_PROFILE=gear22_live_canary`, `BBOT_THETA_LIVE_SEND=1`). `/data/bbot-gear22-live-canary`. Secrets via `EnvironmentFile=-/etc/spread/bbot-gear22-live-canary.env`. |
+| `spread-hl-l1.service` | `python -m app.hl` | Hyperliquid `bbo` → `/data/live-hl`, spool `/data/spool-hl`. **Git template only. Do not enable.** Does not start the D collector. |
 
 Oneshot + timer (D storage):
 
@@ -73,6 +74,8 @@ Oneshot + timer (B, isolated prefixes):
 | `spread-bbot-gear2-backup-transfer.service` + `.timer` | `python -m app.bot.backup` | same module, prefix `spread-bbot-gear2`. |
 
 No backup units in this tree for `/data/bbot-canary-wal-eden` or `/data/bbot-gear22-live-canary`.
+
+`spread-hl-backup-transfer.service` is a git template for rclone prefix `spread-hl` and directory `/data/hl-compacted`. It has no `[Install]` section and no timer. Do not enable it. There is no HL compactor in this tree. Remote durability of HL L1 is not claimed.
 
 ### Documented on VPS, **not** in `deploy/systemd/` this rev
 
@@ -115,6 +118,7 @@ flowchart TB
     Bcan["spread-bbot-canary-wal-eden\nBBOT_BROKER=private_live"]
     Blive["spread-bbot-gear22-live-canary\nprivate_live + theta live send"]
     Bbak["bbot backup timers\napp.bot.backup"]
+    HL["spread-hl-l1 template\npython -m app.hl\nnot enabled"]
   end
   subgraph disk [VPS-local first materialization]
     live["/data/live ticks"]
@@ -127,6 +131,8 @@ flowchart TB
     gear2["/data/bbot-gear2"]
     wal["/data/bbot-canary-wal-eden"]
     g22["/data/bbot-gear22-live-canary"]
+    livehl["/data/live-hl"]
+    spoolhl["/data/spool-hl"]
   end
   subgraph remote [rclone durable copy]
     r1["backup1tb:spread-compacted"]
@@ -165,9 +171,15 @@ flowchart TB
   okxPriv --> Blive
   bybitPriv --> Blive
   Blive --> g22
+  hlPub["Hyperliquid public WS"]
+  hlPub --> HL
+  HL --> livehl
+  HL --> spoolhl
 ```
 
-Isolation coded in bot units: `InaccessiblePaths=` D trees (`/data/live`, `/data/bars`, `/data/compacted`, `/data/spool`). Live canary also denies `/data/bbot`, `/data/bbot-gear2`, `/data/bbot-canary-wal-eden`, `/data/bbot-theta-k1-canary`, `/data/bbot-gear22`. Bot path resolver refuses those D prefixes (`app/bot/paths.py`). Private writer also refuses `/data/bbot/journal` (`app/bot/private/paths.py`).
+`HL` has no edge to rclone. Prefix `spread-hl` exists only as a unit template. First materialization `/data/live-hl` is not a remote copy.
+
+Isolation coded in bot units: `InaccessiblePaths=` D trees (`/data/live`, `/data/bars`, `/data/compacted`, `/data/spool`). Live canary also denies `/data/bbot`, `/data/bbot-gear2`, `/data/bbot-canary-wal-eden`, `/data/bbot-theta-k1-canary`, `/data/bbot-gear22`. Bot path resolver refuses those D prefixes (`app/bot/paths.py`). Private writer also refuses `/data/bbot/journal` (`app/bot/private/paths.py`). HL path checks refuse `/data/live`, `/data/spool`, `/data/spool-next`, bars, gaps, compacted, and `bbot*` (`app/hl/paths.py`). `/data/live-hl` is a different directory from `/data/live`.
 
 ---
 
@@ -191,6 +203,24 @@ flowchart LR
 ```
 
 Production collector unit: `SPREAD_LEAN_SCHEMA=1`, `SPREAD_COLLECT_BARS=0`, `SPREAD_WS_RECONNECT_V2=1`. Bars still have compact/backup units (source tree `/data/bars` may be historical or filled by other means — **TODO verify** VPS).
+
+### Hyperliquid L1 (separate process, not enabled)
+
+```mermaid
+flowchart LR
+  universe[take=yes universe] --> screen[exact intersect HL perp meta]
+  screen --> ws[one bbo websocket]
+  ws --> buf[bounded buffer]
+  buf --> pub[ParquetPublisher schema_mode=hl_l1]
+  pub -->|ok| hive["/data/live-hl"]
+  pub -->|publish failure| spool["/data/spool-hl"]
+  spool --> rec[SpoolRecoveryWorker]
+  rec --> hive
+```
+
+Coins: `load_take_yes_pairs` on `bybit_okx_universe.csv`, then exact `name` match against Hyperliquid perp `meta`. Unmatched names are logged. No alias guess. Body columns are `HL_L1_BODY_COLS` (`docs/hl-l1-storage-contract.md`). No spread columns. Publish failure does not block the websocket thread.
+
+Not in this step: VPS deploy, `systemctl enable`, an HL compactor, or rclone. Later gate: SSH, explicit approval, own compactor and timer, prefix `spread-hl`, then a remote parquet read. Until that read, remote durability is not claimed.
 
 ### B bot: signal → decision → would_send / send → journal
 
@@ -272,6 +302,16 @@ Journals for live: theta_trades `send` flag; private `events.jsonl` (`bbot.priva
 
 `model.ipynb` / `research/gear22_backtest/`: read parquet; `policy.decide`; dummy 1 Hz replay; fill = `spread_last`, not `Trade_Lat`. Gear 2.2 observation is **closed**. Gear 2.5 blocked until unlock. Not live-ready.
 
+### E. Hyperliquid L1 (template, not a live VPS process yet)
+
+1. `python -m app.hl` with `HL_PARQUET_ROOT=/data/live-hl` and `HL_SPOOL_ROOT=/data/spool-hl`.
+2. Screen `take=yes` ∩ Hyperliquid perp meta. Exact names only.
+3. One public websocket. `bbo` subscribe per matched coin.
+4. `ParquetPublisher` (`schema_mode=hl_l1`) writes hive parquet. On storage failure, `DurableSpool` under `/data/spool-hl`, then `SpoolRecoveryWorker`.
+5. Compaction and `spread-hl` backup are a later gate. Do not point `spread-compactor` or `spread-compacted` at this root.
+
+First materialization: `/data/live-hl`. Logs: `HL_RUNTIME_LOG`, `HL_FAILED_BATCHES_LOG` (unit template: `/var/log/spread/hl-l1.log`). A local parquet read does not prove the VPS or the remote copy.
+
 ---
 
 ## 7. Config & Environment
@@ -297,6 +337,20 @@ Journals for live: theta_trades `send` flag; private `events.jsonl` (`bbot.priva
 | `BACKUP_COMPACTED_DIR`, `BACKUP_LAYOUT`, `BACKUP_RCLONE_BINARY`, `BACKUP_RCLONE_REMOTE`, `BACKUP_RCLONE_PATH`, `BACKUP_SFTP_KEY_PATH`, `BACKUP_RCLONE_SFTP_CONCURRENCY`, `BACKUP_RCLONE_SFTP_CHUNK_SIZE`, `BACKUP_TRANSFER_LOCK_PATH`, `BACKUP_SENT_RETENTION_HOURS`, `BACKUP_HIVE_BATCH_SIZE`, `BACKUP_MAX_FILES`, `BACKUP_SKIP_SHA_VERIFY_BELOW_BYTES`, `BACKUP_SHARED_LOCK_PATH` | D rclone transfer |
 
 Local lean only: `SPREAD_LEAN_PARQUET_ROOT`, `SPREAD_LEAN_BARS_ROOT`, `SPREAD_LEAN_RUNTIME_LOG`, `SPREAD_LEAN_UNIVERSE`, `SPREAD_LEAN_ROW_START`, `SPREAD_LEAN_ROW_END`, `SPREAD_LEAN_PERSIST_EVERY`.
+
+### Hyperliquid L1 (`HL_*`)
+
+Not `SPREAD_*`. Setting collector env does not point this process at `/data/live`.
+
+| Name | Where |
+|---|---|
+| `HL_PARQUET_ROOT` | hive root; template: `/data/live-hl` |
+| `HL_SPOOL_ROOT` | spool; template: `/data/spool-hl` |
+| `HL_RUNTIME_LOG`, `HL_FAILED_BATCHES_LOG` | process logs |
+| `HL_UNIVERSE` | `bybit_okx_universe.csv` path |
+| `HL_INFO_URL`, `HL_WS_URL`, `HL_INFO_TIMEOUT_SEC` | public info POST and `bbo` websocket |
+
+Later backup template only: `BACKUP_RCLONE_PATH=spread-hl`, `BACKUP_COMPACTED_DIR=/data/hl-compacted`. Do not enable that unit in this step.
 
 ### Bot (`BBOT_*`)
 
@@ -354,6 +408,18 @@ Key **names** in `app/bot/private/secrets.py`: `BYBIT_TESTNET_API_KEY`, `BYBIT_T
 | `/data/gaps/event_date=*/gaps.jsonl` | WS reconnect gaps (`app/schema/ws_gap.py`) |
 | `/var/log/spread/runtime.log`, `failed_batches.log`, `compactor.log`, `backup-transfer.log`, `bars-*.log` | D logs |
 
+### Hyperliquid L1 trees
+
+Not mixed into the D hive. Unit template only until the later gate in `docs/hl-l1-storage-contract.md`.
+
+| Path | What |
+|---|---|
+| `/data/live-hl/base_coin=*/event_date=*/*.parquet` | HL L1 hive. First write. Not a remote copy. |
+| `/data/spool-hl` | HL spool when publish fails |
+| `/var/log/spread/hl-l1.log`, `hl-l1-failed-batches.log` | HL logs, when the unit env is set |
+
+Schema: `HL_L1_BODY_COLS` in `app/schema/hl_l1.py`. Contract: `docs/hl-l1-storage-contract.md`.
+
 Schema: lean ticks `LEAN_TICK_BODY_COLS`; v1 `SPREAD_EVENT_BODY_COLS`; bars `LEAN_BAR_5M_BODY_COLS`. Contract: `docs/storage-contract.md`. Spreads are **derived at read** from complete L1 in lean mode.
 
 ### B stub / canary data roots
@@ -390,13 +456,14 @@ Local fallback if `/data/bbot` not writable: `<repo>/output/bbot`.
 
 ## 9. Constraints & Invariants
 
-- **Contour boundary:** bot must never write `/data/live`, `/data/bars`, `/data/compacted`, `/data/spool`. Collector must never load private APIs or keys.
+- **Contour boundary:** bot must never write `/data/live`, `/data/bars`, `/data/compacted`, `/data/spool`. Collector must never load private APIs or keys. HL L1 must never write those D trees or `/data/spool-next`. It writes `/data/live-hl` and `/data/spool-hl` only. The HL unit file in git is not enablement.
 - **Do not stop or restart** `spread-collector-next` to work on B. Do not enable `spread-collector.service`. Do not `BindsTo=` the collector from bot units.
 - **Secrets:** never in git, architecture.md, AGENTS.md, runtime collector logs, or journal payloads (wire redacts sign/key fields).
 - **Live send:** `VENUE=live` **and** `LIVE_ORDERS=1` **and** `BBOT_BROKER=private_live`. Env-hack without `make_broker()` / gate patch is forbidden by agent policy. GREEN would_send ≠ live permission.
 - **Stub journal v0:** `would_send=true`, `send=false`, dual legs same `intent_id` + notional, `k_live=1`, terminal `filled`\|`aborted` only in `legs.jsonl`.
 - **K_live = 1** on live/stub managers coded here.
 - **Lean vs v1:** do not mix tick schemas in one day partition without a dual reader.
+- **HL L1 vs lean:** separate root and body. Do not read `/data/live-hl` with a lean reader. No spread columns in the HL parquet.
 - **Frozen collector bodies:** ingest, parse, spread calc — no drive-by edits.
 - **Model ≠ live:** closing a gear in `docs/strategy-gears.md` is not bot readiness.
 - **Risk cap** (policy/docs): ≈ 100 USD per exchange for live; canary units set notional 10 or 20 USDT/leg in the unit file — still a policy cap, not a profitability claim.
@@ -445,6 +512,7 @@ Local fallback if `/data/bbot` not writable: `<repo>/output/bbot`.
 | Trade_Lat | Stub fill delay from signal tick (gear1 HYPER 100 ms); live fills are venue ACKs |
 | take=yes | Universe CSV live pair screen |
 | spool | Local durable parquet staging when primary publish fails |
+| HL L1 | Hyperliquid `bbo` contour. Root `/data/live-hl`. Not the D collector. Prefix `spread-hl` is not active. |
 
 ---
 
@@ -460,6 +528,7 @@ Local fallback if `/data/bbot` not writable: `<repo>/output/bbot`.
 | Inspected | `AGENTS.md`, `app/screaner_b_o.py` (storage hooks only), `app/storage/*`, `app/schema/*`, `app/bot/**` including `private/`, `app/policy/*`, `deploy/systemd/*`, `validation/`, `docs/b-v0-block-diagram.md`, `docs/storage-contract.md`, `docs/strategy-gears.md`, `config/bbot-private-live.env.template`, `requirements.txt` |
 | HOT_ADD | In tree since PR #53 (`app/discovery/`, `docs/hot-add-new-coins.md`). Live writer unit `spread-collector-next.service` and `spread-discovery.timer` added from the VPS copy. |
 | Secrets | None included. |
+| HL L1 | `app/hl`, root `/data/live-hl`, spool `/data/spool-hl`. Unit templates in git, not enabled. Remote durability not claimed. |
 
 ### Want to change X → open files Y
 
@@ -477,5 +546,6 @@ Local fallback if `/data/bbot` not writable: `<repo>/output/bbot`.
 | Glue block diagram | `docs/b-v0-block-diagram.md` **and this file** in the same change |
 | Isolation / D deny | `app/bot/paths.py`, `app/bot/private/paths.py`, bot systemd `ReadWritePaths` / `InaccessiblePaths` |
 | Validation of journals / D | `validation/check_bbot_*.py`, `check_file_lifecycle.py`, `check_mount.py`, `check_published_parquet.py` |
+| Hyperliquid L1 | `app/hl/**`, `app/schema/hl_l1.py`, `docs/hl-l1-storage-contract.md`, `deploy/systemd/spread-hl-l1.service`. Do not edit `app/screaner_b_o.py`. |
 
 When you change topology (new process, send path, journal layout, contour boundary): update this file in the same change.
