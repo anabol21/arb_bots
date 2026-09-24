@@ -72,6 +72,7 @@ _PAYLOAD_ALLOWED_KEYS = frozenset(
         "action",
         "ack_status",
         "audit_mode",
+        "base_multiplier",
         "canary_stage",
         "client_id",
         "coin",
@@ -383,12 +384,13 @@ def _freeze_payload(payload: Mapping[str, Any]) -> Mapping[str, Any]:
             "position_quantity",
             "lot_tolerance",
             "notional_usdt",
+            "base_multiplier",
         }:
             frozen[key] = decimal_to_canonical(
                 canonical_decimal(
                     value,
                     field=f"payload.{key}",
-                    allow_zero=key != "notional_usdt" and key != "planned_quantity",
+                    allow_zero=key not in {"notional_usdt", "planned_quantity", "base_multiplier"},
                 )
             )
         elif key == "reason_code":
@@ -570,6 +572,7 @@ class LegPlan:
     reduce_only: bool
     client_id: str
     lot_tolerance: Decimal
+    base_multiplier: Decimal = Decimal("1")
 
     def __post_init__(self) -> None:
         _require_schema(self.schema_version)
@@ -600,6 +603,11 @@ class LegPlan:
             "lot_tolerance",
             canonical_decimal(self.lot_tolerance, field="lot_tolerance"),
         )
+        object.__setattr__(
+            self,
+            "base_multiplier",
+            canonical_decimal(self.base_multiplier, field="base_multiplier", allow_zero=False),
+        )
 
     @classmethod
     def build(
@@ -613,6 +621,7 @@ class LegPlan:
         quantity: Decimal,
         reduce_only: bool = False,
         lot_tolerance: Decimal = Decimal("0"),
+        base_multiplier: Decimal = Decimal("1"),
     ) -> "LegPlan":
         venue_e = venue if isinstance(venue, Venue) else _require_enum(venue, Venue, field="venue")
         return cls(
@@ -626,6 +635,7 @@ class LegPlan:
             reduce_only=reduce_only,
             client_id=derive_client_id(intent_id, venue_e, reduce_only=reduce_only),
             lot_tolerance=lot_tolerance,
+            base_multiplier=base_multiplier,
         )
 
     def to_public_dict(self) -> dict[str, Any]:
@@ -640,6 +650,7 @@ class LegPlan:
             "reduce_only": self.reduce_only,
             "client_id": self.client_id,
             "lot_tolerance": decimal_to_canonical(self.lot_tolerance),
+            "base_multiplier": decimal_to_canonical(self.base_multiplier),
         }
         _assert_no_forbidden(out)
         return out
@@ -647,6 +658,7 @@ class LegPlan:
     @classmethod
     def from_public_dict(cls, raw: Mapping[str, Any]) -> "LegPlan":
         data = _require_mapping(raw, label="LegPlan")
+        data = {"base_multiplier": "1", **data}
         _require_exact_keys(data, set(cls.__dataclass_fields__), label="LegPlan")
         return cls(
             schema_version=_require_schema(data["schema_version"]),
@@ -659,6 +671,7 @@ class LegPlan:
             reduce_only=data["reduce_only"],
             client_id=data["client_id"],
             lot_tolerance=data["lot_tolerance"],
+            base_multiplier=data.get("base_multiplier", "1"),
         )
 
 
@@ -754,6 +767,8 @@ class ExecutionEvent:
 
 def _validate_event_shape(event: ExecutionEvent) -> None:
     et = event.event_type
+    if "base_multiplier" in event.payload and et is not ExecutionEventType.REQUEST_SENT:
+        raise ContractValidationError("base_multiplier only valid for request_sent")
     audit_fields = {"audit_mode", "prewrite_passed"}
     if audit_fields.intersection(event.payload) and (
         et is not ExecutionEventType.INTENT_REJECTED
@@ -821,6 +836,7 @@ class LegState:
     open_orders_observed: bool
     stream_generation: int
     confirmed_unfilled: bool
+    base_multiplier: Decimal = Decimal("1")
 
     def __post_init__(self) -> None:
         _require_schema(self.schema_version)
@@ -877,6 +893,11 @@ class LegState:
             "confirmed_unfilled",
             _require_bool(self.confirmed_unfilled, field="confirmed_unfilled"),
         )
+        object.__setattr__(
+            self,
+            "base_multiplier",
+            canonical_decimal(self.base_multiplier, field="base_multiplier", allow_zero=False),
+        )
 
     def to_public_dict(self) -> dict[str, Any]:
         out = {
@@ -895,6 +916,7 @@ class LegState:
             "open_orders_observed": self.open_orders_observed,
             "stream_generation": self.stream_generation,
             "confirmed_unfilled": self.confirmed_unfilled,
+            "base_multiplier": decimal_to_canonical(self.base_multiplier),
         }
         _assert_no_forbidden(out)
         return out
@@ -902,6 +924,7 @@ class LegState:
     @classmethod
     def from_public_dict(cls, raw: Mapping[str, Any]) -> "LegState":
         data = _require_mapping(raw, label="LegState")
+        data = {"base_multiplier": "1", **data}
         _require_exact_keys(data, set(cls.__dataclass_fields__), label="LegState")
         return cls(
             schema_version=_require_schema(data["schema_version"]),
@@ -919,6 +942,7 @@ class LegState:
             open_orders_observed=data["open_orders_observed"],
             stream_generation=data["stream_generation"],
             confirmed_unfilled=data["confirmed_unfilled"],
+            base_multiplier=data.get("base_multiplier", "1"),
         )
 
 
@@ -1152,7 +1176,7 @@ def open_evidence_is_complete(
             return False
         if abs(qty - leg.planned_quantity) > lot_tolerance:
             return False
-        qtys.append(qty)
+        qtys.append(qty * leg.base_multiplier)
     return abs(qtys[0] - qtys[1]) <= lot_tolerance
 
 

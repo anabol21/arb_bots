@@ -387,9 +387,9 @@ def _two_leg_quantity_mismatch(state: SpreadState) -> bool:
     qtys: list[Decimal] = []
     for leg in state.legs:
         if leg.filled_quantity > 0:
-            qtys.append(leg.filled_quantity)
+            qtys.append(leg.filled_quantity * leg.base_multiplier)
         elif leg.position_observed and leg.position_quantity > 0:
-            qtys.append(leg.position_quantity)
+            qtys.append(leg.position_quantity * leg.base_multiplier)
         else:
             return False
     return abs(qtys[0] - qtys[1]) > state.lot_tolerance
@@ -763,8 +763,11 @@ def _on_request_sent(state: SpreadState, event: ExecutionEvent) -> SpreadState:
         _reject(state, event, "missing_leg")
         raise AssertionError("unreachable")
     quantity = _qty(event.payload["quantity"], "quantity")
+    base_multiplier = _qty(event.payload.get("base_multiplier", "1"), "base_multiplier")
     if quantity <= 0:
         _reject(state, event, "quantity_not_positive")
+    if base_multiplier <= 0:
+        _reject(state, event, "base_multiplier_not_positive")
     expected = derive_client_id(event.intent_id, venue, reduce_only=reduce_only)
     client_id = str(event.payload.get("client_id") or expected)
     if client_id != expected:
@@ -774,6 +777,8 @@ def _on_request_sent(state: SpreadState, event: ExecutionEvent) -> SpreadState:
         if any(leg.venue is venue for leg in state.legs):
             _reject(state, event, "duplicate_venue")
     else:
+        if existing.base_multiplier != base_multiplier:
+            _reject(state, event, "base_multiplier_changed")
         first_close_send = reduce_only and existing.status is LegStatus.NEW
         recovery_flatten = (
             reduce_only
@@ -800,6 +805,7 @@ def _on_request_sent(state: SpreadState, event: ExecutionEvent) -> SpreadState:
             open_orders_observed=False,
             stream_generation=stream_generation,
             confirmed_unfilled=False,
+            base_multiplier=base_multiplier,
         )
     else:
         new_leg = replace(
@@ -812,6 +818,7 @@ def _on_request_sent(state: SpreadState, event: ExecutionEvent) -> SpreadState:
             reduce_only=reduce_only,
             stream_generation=stream_generation,
             confirmed_unfilled=False,
+            base_multiplier=base_multiplier,
         )
         if reduce_only:
             new_leg = _invalidate_observation_freshness(new_leg)

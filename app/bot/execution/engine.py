@@ -1013,6 +1013,7 @@ class ExecutionEngine:
             leg_id=plan.leg_id,
             payload={
                 "quantity": decimal_to_canonical(plan.quantity),
+                "base_multiplier": decimal_to_canonical(plan.base_multiplier),
                 "reduce_only": plan.reduce_only,
                 "instrument": plan.instrument,
                 "side": plan.side,
@@ -1928,6 +1929,7 @@ class ExecutionEngine:
             and factory.leg_id == primary.leg_id
             and factory.instrument == primary.instrument
             and factory.side == primary.side
+            and factory.base_multiplier == primary.base_multiplier
             and factory.client_id == primary.client_id
             and not factory.reduce_only
         )
@@ -1947,6 +1949,7 @@ class ExecutionEngine:
             and factory.reduce_only
             and factory.client_id == expected_cid
             and factory.quantity == qty
+            and factory.base_multiplier == primary.base_multiplier
         )
 
     def _factory_plan(self, venue: Venue, kind: VenueActionKind) -> Optional[LegPlan]:
@@ -2264,6 +2267,7 @@ class ExecutionEngine:
             leg_id=plan.leg_id,
             payload={
                 "quantity": decimal_to_canonical(plan.quantity),
+                "base_multiplier": decimal_to_canonical(plan.base_multiplier),
                 "reduce_only": plan.reduce_only,
                 "instrument": plan.instrument,
                 "side": plan.side,
