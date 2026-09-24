@@ -272,5 +272,12 @@ class HlBufferTests(unittest.TestCase):
         self.assertEqual(len(publisher.enqueued), 1)
 
 
+class HlRuntimeImportTests(unittest.TestCase):
+    def test_signal_wait_can_build_a_threading_event(self) -> None:
+        import app.hl.runtime as runtime
+
+        self.assertIsInstance(runtime.threading.Event(), runtime.threading.Event)
+
+
 if __name__ == "__main__":
     unittest.main()
