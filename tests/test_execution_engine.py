@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import json
 import os
 import subprocess
 import sys
@@ -38,6 +39,10 @@ from app.bot.execution.engine import (
     SubmitStatus,
 )
 from app.bot.execution.exporters import InMemoryExporter
+from app.bot.execution.live_private_bridge import (
+    LivePrivateBridgeError,
+    LivePrivateEvidenceBridge,
+)
 from app.bot.execution.ownership import FileOwnershipFence, OwnershipError
 from app.bot.execution.state_machine import apply_events, initial_spread_state
 from app.bot.execution.transport import (
@@ -1377,6 +1382,88 @@ class TransportMappingTests(EngineHarness):
         types = [item.event.event_type for item in wal._queue]
         self.assertIn(ExecutionEventType.FAULT, types)
         self.assertNotIn(ExecutionEventType.INTENT_REJECTED, types)
+
+
+class LivePrivateBridgeTests(EngineHarness):
+    def _bridge(self, engine: ExecutionEngine) -> LivePrivateEvidenceBridge:
+        return LivePrivateEvidenceBridge(
+            engine=engine,
+            symbols_by_venue={
+                Venue.BYBIT: "BTCUSDT",
+                Venue.OKX: "BTC-USDT-SWAP",
+            },
+        )
+
+    async def test_buffered_private_fills_fold_only_after_request_sent(self) -> None:
+        engine = self._engine(durable_prewrite=True)
+        bridge = self._bridge(engine)
+        intent = _intent()
+        bridge.begin_submission()
+        sent = await engine.submit(intent)
+        self.assertEqual(sent.status, SubmitStatus.ACCEPTED)
+        earlier_receive = engine.state.last_monotonic_ns - 1
+        bridge.observe(
+            json.dumps({
+                "topic": "order",
+                "data": [{
+                    "symbol": "ETHUSDT", "orderLinkId": "other", "orderStatus": "Filled",
+                    "cumExecQty": "1",
+                }, {
+                    "symbol": "BTCUSDT",
+                    "orderLinkId": _plans(INTENT_A)[0].client_id,
+                    "orderStatus": "Filled", "cumExecQty": "1",
+                }],
+            }),
+            earlier_receive,
+            venue=Venue.BYBIT,
+            generation=1,
+        )
+        bridge.observe(
+            json.dumps({
+                "arg": {"channel": "orders"},
+                "data": [{
+                    "instId": "BTC-USDT-SWAP",
+                    "clOrdId": _plans(INTENT_A)[1].client_id,
+                    "state": "filled", "accFillSz": "1",
+                }],
+            }),
+            earlier_receive,
+            venue=Venue.OKX,
+            generation=1,
+        )
+        self.assertEqual(bridge.pending_count, 2)
+        bridge.bind_submitted(
+            intent, _resolver(intent), bybit_generation=1, okx_generation=1,
+        )
+        self.assertEqual(await bridge.drain(), 2)
+        self.assertEqual(engine.state.status, SpreadStatus.OPEN)
+        self.assertEqual(engine._wal.health().queue_depth, 0)
+        self.assertEqual(engine._wal.replay().state, engine.state)
+
+    async def test_unknown_cap_order_fails_closed(self) -> None:
+        engine = self._engine(durable_prewrite=True)
+        bridge = self._bridge(engine)
+        intent = _intent()
+        bridge.begin_submission()
+        self.assertEqual((await engine.submit(intent)).status, SubmitStatus.ACCEPTED)
+        bridge.bind_submitted(
+            intent, _resolver(intent), bybit_generation=1, okx_generation=1,
+        )
+        bridge.observe(
+            json.dumps({
+                "topic": "order",
+                "data": [{
+                    "symbol": "BTCUSDT", "orderLinkId": "unknown-client",
+                    "orderStatus": "Filled", "cumExecQty": "1",
+                }],
+            }),
+            engine.state.last_monotonic_ns + 1,
+            venue=Venue.BYBIT,
+            generation=1,
+        )
+        with self.assertRaises(LivePrivateBridgeError):
+            await bridge.drain()
+        self.assertTrue(engine.readiness.kill_switch)
 
 
 class AdapterIngestTests(EngineHarness):
