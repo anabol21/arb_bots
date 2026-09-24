@@ -169,22 +169,58 @@ def build_bybit_trade_place(
     """Bybit trade WS order.create — separate from private stream."""
     if plan.venue != "bybit_live":
         raise OrderPlanError("bybit trade place requires bybit_live plan")
+    return build_bybit_trade_place_fields(
+        symbol=plan.symbol,
+        side=plan.side,
+        quantity=plan.qty,
+        client_id=plan.order_attempt_id,
+        mode=plan.mode,
+        price=plan.price,
+        reduce_only=plan.reduce_only,
+        credentials=credentials,
+        req_id=req_id,
+        recv_window=recv_window,
+        timestamp_ms=timestamp_ms,
+    )
+
+
+def build_bybit_trade_place_fields(
+    *,
+    symbol: str,
+    side: str,
+    quantity: str,
+    client_id: str,
+    mode: str,
+    price: Optional[str],
+    reduce_only: bool,
+    credentials: LiveCredentials,
+    req_id: str,
+    recv_window: int = 5000,
+    timestamp_ms: Optional[int] = None,
+) -> WsOutboundMessage:
+    """Build a signed trade frame from frozen fields; never performs I/O."""
+    if side not in {"buy", "sell"} or mode not in {"market", "post_only_limit"}:
+        raise OrderPlanError("invalid bybit trade fields")
+    if not symbol or not quantity or not client_id or not req_id:
+        raise OrderPlanError("invalid bybit trade fields")
+    if mode != "market" and not price:
+        raise OrderPlanError("missing bybit limit price")
     ts = str(timestamp_ms if timestamp_ms is not None else int(time.time() * 1000))
     args_obj: dict[str, object] = {
         "category": "linear",
-        "symbol": plan.symbol,
-        "side": "Buy" if plan.side == "buy" else "Sell",
-        "qty": plan.qty,
-        "orderLinkId": plan.order_attempt_id[:36],
+        "symbol": symbol,
+        "side": "Buy" if side == "buy" else "Sell",
+        "qty": quantity,
+        "orderLinkId": client_id[:36],
     }
-    if plan.mode == "market":
+    if mode == "market":
         args_obj["orderType"] = "Market"
         args_obj["timeInForce"] = "IOC"
     else:
         args_obj["orderType"] = "Limit"
-        args_obj["price"] = plan.price
+        args_obj["price"] = price
         args_obj["timeInForce"] = "PostOnly"
-    if plan.reduce_only:
+    if reduce_only:
         args_obj["reduceOnly"] = True
     # Header-style auth fields ride with trade WS request (not logged).
     body_str = _json_compact(args_obj)
@@ -361,25 +397,61 @@ def build_okx_trade_place(
     """OKX WS place (op=order) — separate from stream subscription frames."""
     if plan.venue != "okx_live":
         raise OrderPlanError("okx trade place requires okx_live plan")
+    return build_okx_trade_place_fields(
+        symbol=plan.symbol,
+        side=plan.side,
+        quantity=plan.qty,
+        client_id=plan.order_attempt_id,
+        mode=plan.mode,
+        price=plan.price,
+        reduce_only=plan.reduce_only,
+        position_side=plan.position_side,
+        req_id=req_id,
+        inst_id_code=inst_id_code if inst_id_code is not None else plan.inst_id_code,
+    )
+
+
+def build_okx_trade_place_fields(
+    *,
+    symbol: str,
+    side: str,
+    quantity: str,
+    client_id: str,
+    mode: str,
+    price: Optional[str],
+    reduce_only: bool,
+    position_side: Optional[str],
+    req_id: str,
+    inst_id_code: Optional[int],
+) -> WsOutboundMessage:
+    """Build an OKX trade frame from frozen fields; auth is socket-scoped."""
+    if side not in {"buy", "sell"} or mode not in {"market", "post_only_limit"}:
+        raise OrderPlanError("invalid okx trade fields")
+    if not symbol or not quantity or not client_id or not req_id:
+        raise OrderPlanError("invalid okx trade fields")
+    if mode != "market" and not price:
+        raise OrderPlanError("missing okx limit price")
+    if position_side not in {None, "long", "short"}:
+        raise OrderPlanError("invalid okx position side")
     code = _require_okx_inst_id_code(
-        inst_id_code if inst_id_code is not None else plan.inst_id_code
+        inst_id_code
     )
     args_obj: dict[str, object] = {
-        "instId": plan.symbol,
+        "instId": symbol,
         "instIdCode": code,
         "tdMode": "cross",
-        "side": plan.side,
-        "sz": plan.qty,
-        "clOrdId": plan.order_attempt_id.replace("_", "")[:32],
+        "side": side,
+        "sz": quantity,
+        "clOrdId": client_id.replace("_", "")[:32],
     }
-    if plan.position_side in {"long", "short"}:
-        args_obj["posSide"] = plan.position_side
-    if plan.mode == "market":
+    if position_side in {"long", "short"}:
+        args_obj["posSide"] = position_side
+    if mode == "market":
         args_obj["ordType"] = "market"
     else:
         args_obj["ordType"] = "post_only"
-        args_obj["px"] = plan.price
-    if plan.reduce_only:
+        args_obj["px"] = price
+    if reduce_only:
         args_obj["reduceOnly"] = True
     # Frame-boundary sanitize: journal ``prefix_hex`` ids stay unchanged elsewhere.
     frame = {"id": sanitize_okx_ws_id(req_id), "op": "order", "args": [args_obj]}
