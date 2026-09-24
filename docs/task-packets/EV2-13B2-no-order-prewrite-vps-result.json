@@ -1,0 +1,64 @@
+{
+  "fresh_wal_exact_engine_fence": {
+    "fence": {
+      "max_us": 3667.743,
+      "mean_us": 2440.357,
+      "n": 100,
+      "p50_us": 2339.677,
+      "p95_us": 3202.314,
+      "p99_us": 3523.626
+    },
+    "signal_to_first_memory_asend": {
+      "max_us": 6920.306,
+      "mean_us": 4693.947,
+      "n": 100,
+      "p50_us": 4542.17,
+      "p95_us": 6013.418,
+      "p99_us": 6784.806
+    },
+    "signal_to_slowest_memory_asend_done": {
+      "max_us": 6942.878,
+      "mean_us": 4712.383,
+      "n": 100,
+      "p50_us": 4562.099,
+      "p95_us": 6030.255,
+      "p99_us": 6809.061
+    }
+  },
+  "growing_wal_no_order_audit": {
+    "all": {
+      "max_us": 2085625.479,
+      "mean_us": 738453.64,
+      "n": 300,
+      "p50_us": 582980.076,
+      "p95_us": 1888048.174,
+      "p99_us": 2041785.473
+    },
+    "final_wal_bytes": 511746,
+    "first_quartile": {
+      "max_us": 224677.596,
+      "mean_us": 82198.578,
+      "n": 75,
+      "p50_us": 73441.359,
+      "p95_us": 174147.495,
+      "p99_us": 205148.491
+    },
+    "history_attempts": 300,
+    "last_quartile": {
+      "max_us": 2085625.479,
+      "mean_us": 1609427.789,
+      "n": 75,
+      "p50_us": 1627582.539,
+      "p95_us": 2033065.369,
+      "p99_us": 2083139.923
+    }
+  },
+  "host": "a845945761.local",
+  "live_latency_gate_eligible": false,
+  "network_capable_sockets": false,
+  "orders_sent": 0,
+  "private_status_simulated": true,
+  "python": "3.10.12",
+  "schema_version": "bbot.ev2.prewrite_no_order_benchmark.v1",
+  "timestamp_utc": "2026-09-24T11:34:21Z"
+}

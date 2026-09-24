@@ -100,6 +100,34 @@ live release even if they meet the latency budget. Run it with
 `python3 -m validation.ev2_prewrite_no_order_benchmark --samples 100
 --history 300` from an isolated checkout, never from a running service.
 
+### Target-VPS first result (2026-09-24)
+
+Isolated checkout `/root/spread_ev2_13b2_bench` at `a64d897`, using
+`/root/venv/bin/python` on `a845945761.local`. The probe used temporary
+local WAL files and memory-only sockets; private readiness was simulated.
+No trade socket, venue API, market quote or live order was involved. The
+machine-readable result is
+[`EV2-13B2-no-order-prewrite-vps-result.json`](EV2-13B2-no-order-prewrite-vps-result.json).
+
+- Exact opt-in engine fence, fresh WAL, n=100: p50 **2.340 ms**, p99
+  **3.524 ms**. Signal to first memory `asend`: p50 **4.542 ms**, p99
+  **6.785 ms**. This is already above the ~1 ms signal-to-send objective
+  *before* any network write.
+- Existing no-order audit, n=300 with growing WAL to 511,746 bytes: total
+  signal-to-audit-result p50 **583 ms**, p99 **2,042 ms**. First 75 attempts
+  p50 73 ms; last 75 p50 1,628 ms. This path includes two fsynced events,
+  thread hand-offs, audit work and full replay; it is **not** the same
+  sample population as the exact single-accepted-event fence. The growth
+  is evidence of a scaling problem but does not isolate its sole cause.
+- `orders_sent=0`; collector-next and theta-k1 would-sent remained active
+  with `NRestarts=0` at the post-run check.
+
+Conclusion: the current synchronous full-replay pre-dispatch design is
+not latency-qualified. Keep both live startup blocks. Next, instrument
+fsync, replay and FSM fold separately; design a bounded durable-ack or
+checkpoint verification protocol that retains crash safety, then repeat
+this no-order target-VPS probe and only later a production-path canary.
+
 ## 5. Minimal patch / experiment plan
 
 1. Complete and review EV2-12B/C/D live integration; preserve both current
