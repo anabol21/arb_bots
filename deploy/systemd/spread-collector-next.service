@@ -1,0 +1,43 @@
+[Unit]
+Description=Spread collector HOT_ADD next (overlap cutover onto /data/live)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/root/spread_staging
+Environment=SPREAD_UNIVERSE=/root/spread_staging/bybit_okx_universe_hotadd.csv
+Environment=SPREAD_ROW_START=0
+Environment=SPREAD_ROW_END=10000
+Environment=SPREAD_PARQUET_ROOT=/data/live
+Environment=SPREAD_SPOOL_ROOT=/data/spool-next
+Environment=SPREAD_GAPS_ROOT=/data/gaps-next
+Environment=SPREAD_BARS_ROOT=/data/bars-next
+Environment=SPREAD_RUNTIME_LOG=/var/log/spread/runtime-next.log
+Environment=SPREAD_FAILED_BATCHES_LOG=/var/log/spread/failed_batches-next.log
+Environment=SPREAD_LEAN_SCHEMA=1
+Environment=SPREAD_COLLECT_BARS=0
+Environment=SPREAD_WS_RECONNECT_V2=1
+Environment=SPREAD_WS_CONNECT_PER_SEC=3
+Environment=SPREAD_TICK_SKEW_MAX_MS=2000
+Environment=SPREAD_TICK_AGE_MAX_MS=2000
+Environment=SPREAD_HOT_ADD=1
+Environment=SPREAD_HOT_ADD_POLL_SEC=10
+Environment=SPREAD_HOT_ADD_DELTA=/root/spread_staging/hot_add_delta.csv
+Environment=SPREAD_HOT_ADD_DROP=/root/spread_staging/hot_add_drop.csv
+Environment=SPREAD_HOT_ADD_MAX_EXTRA=8
+ExecStartPre=/usr/bin/mkdir -p /data/live /data/spool-next /data/gaps-next /data/bars-next /var/log/spread
+ExecStart=/root/venv/bin/python app/screaner_b_o.py
+LimitNOFILE=65535
+Restart=always
+RestartSec=5
+StartLimitIntervalSec=300
+StartLimitBurst=20
+KillSignal=SIGTERM
+TimeoutStopSec=120
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

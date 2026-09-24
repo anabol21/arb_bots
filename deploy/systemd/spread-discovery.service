@@ -1,0 +1,18 @@
+[Unit]
+Description=Spread HOT_ADD discovery sidecar (staging; not the 188 canary)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=root
+WorkingDirectory=/root/spread_staging
+Environment=SPREAD_UNIVERSE=/root/spread_staging/bybit_okx_universe_hotadd.csv
+Environment=SPREAD_HOT_ADD_DELTA=/root/spread_staging/hot_add_delta.csv
+Environment=SPREAD_DISCOVERY_MAX_NEW=8
+ExecStart=/root/venv/bin/python3 -m app.discovery --universe /root/spread_staging/bybit_okx_universe_hotadd.csv --delta /root/spread_staging/hot_add_delta.csv --max-new 8
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

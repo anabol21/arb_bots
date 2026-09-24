@@ -1,0 +1,12 @@
+[Unit]
+Description=Periodic discovery for prod HOT_ADD next collector
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=30min
+AccuracySec=1min
+Persistent=true
+Unit=spread-discovery.service
+
+[Install]
+WantedBy=timers.target

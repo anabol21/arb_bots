@@ -20,12 +20,12 @@ VPS-local public spread collector (D) writes lean parquet + optional bars; a sep
 | Persistence | parquet via `pandas` + `pyarrow` (`app/storage/writer.py`); bot journals are JSONL |
 | Backup | rclone SFTP (`BACKUP_RCLONE_*` / `BBOT_RCLONE_*`); lock files under `/run/` |
 | Observability | file logs under `/var/log/spread/`; optional Sentry when `SENTRY_DSN` is set (`app/bot/sentry_setup.py`) |
-| Universe | `bybit_okx_universe.csv` (`take=yes` is the live pair screen; `app/utils/universe_csv.py`) |
-| Crypto filter | `research/is_crypto.py` (bot coin parse) |
+| Universe | Live HOT_ADD writer reads `/root/spread_staging/bybit_okx_universe_hotadd.csv` (`spread-collector-next.service`). `app/utils/universe_csv.py` screens `take=yes`. |
+| Crypto filter | `research/is_crypto.py` (`is_hot_add_crypto` for discovery; also bot coin parse) |
 
 `requirements.txt` lists stdlib names plus `ccxt`, `ccxtpro`, `sentry-sdk`. Storage/schema tests also require pandas/pyarrow (not listed there).
 
-Not present in this tree: `app/discovery/`, `docs/hot-add-new-coins.md`, a root `architecture.md` before this file, `SPREAD_HOT_ADD`.
+HOT_ADD is in this tree: `app/discovery/`, `docs/hot-add-new-coins.md`, and `SPREAD_HOT_ADD=1` on `spread-collector-next.service`. The live writer unit and `spread-discovery.timer` are the VPS copies under `deploy/systemd/`.
 
 ---
 
@@ -47,7 +47,8 @@ Long-running (`Type=simple`):
 
 | Unit | Entry | Contour |
 |---|---|---|
-| `spread-collector.service` | `app/screaner_b_o.py` | D collector. WorkingDirectory `/root/spread_staging`. |
+| `spread-collector-next.service` | `app/screaner_b_o.py` | Live D writer (HOT_ADD). WorkingDirectory `/root/spread_staging`. Parquet `/data/live`; spool `/data/spool-next`, gaps `/data/gaps-next`, bars `/data/bars-next`. |
+| `spread-collector.service` | `app/screaner_b_o.py` | Previous D unit template. Leave disabled. Do not enable it over the next writer. |
 | `spread-bbot.service` | `python -m app.bot` | Historical stub (`BBOT_MODE=probe`, `/data/bbot`). Comments: not enabled merely by existing in git. |
 | `spread-bbot-gear2.service` | `python -m app.bot` | Gear-2 `would_send` stub (`BBOT_BROKER` unset → stub). `/data/bbot-gear2`. |
 | `spread-bbot-canary-wal-eden.service` | `python -m app.bot` | Live-send canary Contour B (`BBOT_BROKER=private_live`). `/data/bbot-canary-wal-eden`. Secrets via `EnvironmentFile=-/etc/spread/bbot-canary-wal-eden.env`. |
@@ -57,6 +58,7 @@ Oneshot + timer (D storage):
 
 | Unit | Entry | Role |
 |---|---|---|
+| `spread-discovery.service` + `.timer` | `python3 -m app.discovery` | HOT_ADD listing sidecar for the next writer. Timer cadence 30 min. Does not start the collector. |
 | `spread-compactor.service` + `.timer` | `python -m app.storage.compactor` | Tick hive `/data/live` → `/data/compacted`. Cadence in timer: 2 min. |
 | `spread-backup-transfer.service` + `.timer` | `python -m app.storage.backup_transfer` | Compacted ticks → rclone path `spread-compacted`. |
 | `spread-bars-compactor.service` + `.timer` | `python -m app.storage.bars_compactor` | `/data/bars/bar_5m` → `/data/bars_compacted_v2/bar_5m`. |
@@ -88,7 +90,7 @@ No backup units in this tree for `/data/bbot-canary-wal-eden` or `/data/bbot-gea
 | `deploy/cron/spread-maintenance.cron` | Cron **fallback** vs systemd timers; cadence in cron (compactor every 5 min) **differs** from `spread-compactor.timer` (2 min). **TODO verify** which is installed on VPS. |
 | `validation/*.py` | Read-only checks / soak helpers. |
 
-Which of the git unit files are **enabled/active** on the VPS: **TODO verify** (this snapshot is the repo tree, not a live `systemctl` dump). Several bot units explicitly say they are not enabled by creating the file in git.
+Which of the git unit files are **enabled/active** on the VPS: bot units remain **TODO verify**. Collector, read-only on 2026-09-24 21:32 UTC: `spread-collector-next.service` active, MainPID 4176949, `NRestarts=0`; `spread-collector.service` disabled and inactive; `spread-discovery.timer` enabled and active; `spread-discovery.service` inactive (oneshot). Putting these unit files in git does not start or restart them.
 
 ### Frozen bodies (do not edit without explicit unlock)
 
@@ -98,14 +100,14 @@ Collector WS ingest, exchange parse, spread calculation, and trading logic **ins
 
 ## 4. Runtime Topology
 
-Environments to name on every storage claim: **local development** ≠ **VPS runtime** (`WorkingDirectory=/root/spread_staging`) ≠ **rclone remote copy**. Default writer is VPS-local filesystem (`/data/*`), not a FUSE mount in the production unit. `app/storage/paths.py` still has mount-probe helpers (`DEFAULT_STORAGE_MOUNT=/mnt/storage`); production collector unit sets `SPREAD_PARQUET_ROOT=/data/live`.
+Environments to name on every storage claim: **local development** ≠ **VPS runtime** (`WorkingDirectory=/root/spread_staging`) ≠ **rclone remote copy**. Default writer is VPS-local filesystem (`/data/*`), not a FUSE mount in the production unit. `app/storage/paths.py` still has mount-probe helpers (`DEFAULT_STORAGE_MOUNT=/mnt/storage`). The live unit `spread-collector-next.service` sets `SPREAD_PARQUET_ROOT=/data/live`, `SPREAD_SPOOL_ROOT=/data/spool-next`, `SPREAD_GAPS_ROOT=/data/gaps-next`, and `SPREAD_BARS_ROOT=/data/bars-next`.
 
 No `paper` process mode exists. `VENUE` is `testnet` \| `live` only (`app/bot/private/venue.py`). OKX testnet sets `okx_simulated_trading=True`. Journal schema allows `environment` ∈ {testnet, demo, live} as a **field**, not a systemd contour.
 
 ```mermaid
 flowchart TB
   subgraph vps [VPS host processes]
-    D["spread-collector\napp/screaner_b_o.py"]
+    D["spread-collector-next\napp/screaner_b_o.py"]
     Dc["spread-compactor\napp.storage.compactor"]
     Db["spread-backup-transfer\napp.storage.backup_transfer"]
     Dbc["bars compact + bars backup timers"]
@@ -117,8 +119,9 @@ flowchart TB
   subgraph disk [VPS-local first materialization]
     live["/data/live ticks"]
     bars["/data/bars"]
-    spool["/data/spool"]
-    gaps["/data/gaps"]
+    barsNext["/data/bars-next"]
+    spool["/data/spool-next"]
+    gaps["/data/gaps-next"]
     compact["/data/compacted"]
     bbot["/data/bbot"]
     gear2["/data/bbot-gear2"]
@@ -140,7 +143,7 @@ flowchart TB
   okxPub --> D
   bybitPub --> D
   D --> live
-  D --> bars
+  D --> barsNext
   D --> spool
   D --> gaps
   live --> Dc --> compact --> Db --> r1
@@ -234,7 +237,7 @@ Match topology + data-flow diagrams above.
 
 ### A. Persist a public tick (D)
 
-1. Collector process `spread-collector` / `app/screaner_b_o.py`.
+1. Collector process `spread-collector-next` / `app/screaner_b_o.py`. `spread-collector.service` stays disabled.
 2. Validity gate (`SPREAD_TICK_SKEW_MAX_MS`, `SPREAD_TICK_AGE_MAX_MS`).
 3. `ParquetPublisher` enqueue → normalize to lean or v1 body → atomic publish under `SPREAD_PARQUET_ROOT`.
 4. On storage failure: durable spool (`SPREAD_SPOOL_ROOT`) + `SpoolRecoveryWorker`.
@@ -388,7 +391,7 @@ Local fallback if `/data/bbot` not writable: `<repo>/output/bbot`.
 ## 9. Constraints & Invariants
 
 - **Contour boundary:** bot must never write `/data/live`, `/data/bars`, `/data/compacted`, `/data/spool`. Collector must never load private APIs or keys.
-- **Do not stop/edit** `spread-collector` to work on B. Do not `BindsTo=` collector from bot units.
+- **Do not stop or restart** `spread-collector-next` to work on B. Do not enable `spread-collector.service`. Do not `BindsTo=` the collector from bot units.
 - **Secrets:** never in git, architecture.md, AGENTS.md, runtime collector logs, or journal payloads (wire redacts sign/key fields).
 - **Live send:** `VENUE=live` **and** `LIVE_ORDERS=1` **and** `BBOT_BROKER=private_live`. Env-hack without `make_broker()` / gate patch is forbidden by agent policy. GREEN would_send ≠ live permission.
 - **Stub journal v0:** `would_send=true`, `send=false`, dual legs same `intent_id` + notional, `k_live=1`, terminal `filled`\|`aborted` only in `legs.jsonl`.
@@ -455,7 +458,7 @@ Local fallback if `/data/bbot` not writable: `<repo>/output/bbot`.
 | Coverage | L2: processes + main flows |
 | Source of truth | Files in this tree at that rev. VPS enablement and live PIDs not observed in this change. |
 | Inspected | `AGENTS.md`, `app/screaner_b_o.py` (storage hooks only), `app/storage/*`, `app/schema/*`, `app/bot/**` including `private/`, `app/policy/*`, `deploy/systemd/*`, `validation/`, `docs/b-v0-block-diagram.md`, `docs/storage-contract.md`, `docs/strategy-gears.md`, `config/bbot-private-live.env.template`, `requirements.txt` |
-| Absent | `app/discovery/` — not in tree. `docs/hot-add-new-coins.md` — not in tree. No mix with PR #53 / `SPREAD_HOT_ADD`. |
+| HOT_ADD | In tree since PR #53 (`app/discovery/`, `docs/hot-add-new-coins.md`). Live writer unit `spread-collector-next.service` and `spread-discovery.timer` added from the VPS copy. |
 | Secrets | None included. |
 
 ### Want to change X → open files Y
