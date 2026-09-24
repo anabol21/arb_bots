@@ -1094,6 +1094,15 @@ class ExecutionEngine:
         except Exception:
             return False
 
+    def _recovery_write_is_durable(self, event: ExecutionEvent) -> bool:
+        try:
+            proven = self._wal.drain_and_prove_last(event)
+        except Exception:
+            proven = False
+        if not proven:
+            self._latch_live_ingest_failure()
+        return proven
+
     def _validate_plan_reduce_only(
         self, intent: TradeIntent, bybit: LegPlan, okx: LegPlan
     ) -> Optional[str]:
@@ -2008,6 +2017,10 @@ class ExecutionEngine:
             return self._recovery_result(
                 RecoveryStatus.BLOCKED, RecoveryActionKind.CANCEL_PEER, "wal_capacity"
             )
+        if self._durable_prewrite and not self._recovery_write_is_durable(requested):
+            return self._recovery_result(
+                RecoveryStatus.BLOCKED, RecoveryActionKind.CANCEL_PEER, "wal_unhealthy"
+            )
         try:
             self._ownership.assert_owned(self._ownership_claim)
         except OwnershipError:
@@ -2154,14 +2167,19 @@ class ExecutionEngine:
                 RecoveryActionKind.FLATTEN_FILLED,
                 "wal_capacity",
             )
-        # Enqueue is admission, not durability. A process crash before drain
-        # still depends on mandatory restart REST reseed and the deterministic
-        # reduce-only client id. Do not fsync or drain here.
+        # Legacy callers retain async WAL; opt-in live callers fsync before
+        # any recovery write to the venue.
         if not self._commit_events((sent,), folded):
             return self._recovery_result(
                 RecoveryStatus.BLOCKED,
                 RecoveryActionKind.FLATTEN_FILLED,
                 "wal_capacity",
+            )
+        if self._durable_prewrite and not self._recovery_write_is_durable(sent):
+            return self._recovery_result(
+                RecoveryStatus.BLOCKED,
+                RecoveryActionKind.FLATTEN_FILLED,
+                "wal_unhealthy",
             )
         try:
             self._ownership.assert_owned(self._ownership_claim)

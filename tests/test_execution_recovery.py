@@ -6,6 +6,7 @@ import asyncio
 import json
 import tempfile
 import unittest
+from unittest.mock import patch
 from decimal import Decimal
 from pathlib import Path
 from typing import Any, Optional
@@ -349,6 +350,7 @@ class RecoveryHarness(unittest.IsolatedAsyncioTestCase):
         reserved_tail: int = 5,
         snapshot: Optional[RestartLiveSnapshot] = None,
         recovery_factory: Optional[Any] = None,
+        durable_prewrite: bool = False,
     ) -> ExecutionEngine:
         if wal is None:
             wal = _ready_wal(
@@ -357,6 +359,9 @@ class RecoveryHarness(unittest.IsolatedAsyncioTestCase):
                 max_queue=max_queue,
                 reserved_tail=reserved_tail,
             )
+        anchor = wal.replay() if durable_prewrite else None
+        if durable_prewrite and state is None:
+            state = anchor.state
         return ExecutionEngine(
             run_id=RUN_ID,
             wal=wal,
@@ -377,6 +382,8 @@ class RecoveryHarness(unittest.IsolatedAsyncioTestCase):
             recovery_factory=recovery_factory or _factory,
             wal_drain=wal.drain_all,
             snapshot_provider=(lambda: snapshot if snapshot is not None else self.snapshot),
+            durable_prewrite=durable_prewrite,
+            prewrite_anchor=anchor,
         )
 
     def _attach_adapter(self, engine: ExecutionEngine, intent: TradeIntent) -> PrivateEventAdapter:
@@ -495,6 +502,42 @@ class PlannerContractTests(unittest.TestCase):
 
 
 class RecoveryFaultMatrixTests(RecoveryHarness):
+    async def test_live_recovery_flatten_wal_failure_never_writes(self) -> None:
+        engine = self._engine(durable_prewrite=True)
+        await self._recovering_okx_filled(engine)
+        plan = await engine.plan_recovery()
+        self.assertEqual(plan.kind, RecoveryActionKind.FLATTEN_FILLED)
+        before = self.okx.asend_calls
+        with patch.object(engine._wal, "drain_and_prove_last", side_effect=RuntimeError("fsync_failed")):
+            result = await engine.apply_recovery_step(plan)
+        self.assertEqual(result.status, RecoveryStatus.BLOCKED)
+        self.assertEqual(result.reason_code, "wal_unhealthy")
+        self.assertEqual(self.okx.asend_calls, before)
+        self.assertTrue(engine.readiness.kill_switch)
+
+    async def test_live_recovery_cancel_wal_failure_never_writes(self) -> None:
+        engine = self._engine(durable_prewrite=True)
+        await self._recovering_okx_filled(engine)
+        await self._ingest(
+            engine,
+            [self._next_event(
+                engine,
+                ExecutionEventType.OPEN_ORDERS_OBSERVED,
+                venue=Venue.BYBIT,
+                leg_id="leg_bybit",
+                payload={"open_order_count": 1},
+            )],
+        )
+        plan = await engine.plan_recovery()
+        self.assertEqual(plan.kind, RecoveryActionKind.CANCEL_PEER)
+        before = self.bybit.asend_calls
+        with patch.object(engine._wal, "drain_and_prove_last", side_effect=RuntimeError("fsync_failed")):
+            result = await engine.apply_recovery_step(plan)
+        self.assertEqual(result.status, RecoveryStatus.BLOCKED)
+        self.assertEqual(result.reason_code, "wal_unhealthy")
+        self.assertEqual(self.bybit.asend_calls, before)
+        self.assertTrue(engine.readiness.kill_switch)
+
     async def test_01_peer_reject_flattens_filled_venue_only(self) -> None:
         engine = self._engine()
         await self._recovering_okx_filled(engine)
