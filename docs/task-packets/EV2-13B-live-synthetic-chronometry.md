@@ -90,6 +90,16 @@ budget. Unknown exposure is not permission for an automatic guess.
   reviewed bounded durable-ack/checkpoint design if this mode fails the
   latency gate. Never bypass durability merely to hit the latency target.
 
+The isolated `validation.ev2_prewrite_no_order_benchmark` probe measures
+this risk on the target host without credentials or network-capable sockets.
+It reports the **exact opt-in engine fence** and signal-to-memory-`asend`
+boundary on fresh WALs, then the production no-order audit with an
+increasing WAL history. Readiness in the probe is synthetic, and its
+memory boundary is not a real WebSocket write; results cannot qualify a
+live release even if they meet the latency budget. Run it with
+`python3 -m validation.ev2_prewrite_no_order_benchmark --samples 100
+--history 300` from an isolated checkout, never from a running service.
+
 ## 5. Minimal patch / experiment plan
 
 1. Complete and review EV2-12B/C/D live integration; preserve both current
