@@ -3,7 +3,8 @@
 Stdlib plus frozen EV2 contracts, FSM, transport, adapters and WAL
 admission. Import and construction perform no sockets, disk drain, fsync,
 Sentry, logging, REST or live send. ``submit`` awaits only parallel
-transport socket writes.
+transport socket writes by default. The opt-in durable-prewrite mode fsyncs
+and replays the accepted intent before any transport dispatch.
 """
 
 from __future__ import annotations
@@ -655,6 +656,7 @@ class ExecutionEngine:
         adapter: Optional[PrivateEventAdapter] = None,
         wal_drain: Optional[WalDrainPort] = None,
         snapshot_provider: Optional[SnapshotPort] = None,
+        durable_prewrite: bool = False,
     ) -> None:
         if not isinstance(wal, ExecutionWal):
             raise EngineError("invalid_intent")
@@ -698,6 +700,8 @@ class ExecutionEngine:
             raise EngineError("invalid_intent")
         if snapshot_provider is not None and not callable(snapshot_provider):
             raise EngineError("invalid_intent")
+        if not isinstance(durable_prewrite, bool):
+            raise EngineError("invalid_intent")
         self._state = state
         self._lock = asyncio.Lock()
         self._adapter_seeds: dict[str, int] = {}
@@ -705,6 +709,7 @@ class ExecutionEngine:
         self._adapter = adapter
         self._wal_drain = wal_drain
         self._snapshot_provider = snapshot_provider
+        self._durable_prewrite = durable_prewrite
         self._recovery_attempts = 0
         self._last_intent: Optional[TradeIntent] = None
         self._primary_by_venue: dict[Venue, LegPlan] = {}
@@ -815,15 +820,15 @@ class ExecutionEngine:
         if intent.action is IntentAction.OPEN:
             rejected = self._rejected_event(intent, seq, mono)
             folded = self._fold((rejected,))
-            if folded is not None:
-                self._commit_events((rejected,), folded)
+            if folded is None or not self._commit_events((rejected,), folded):
+                return self._recovery(intent, "wal_unhealthy")
             return self._reject(intent, reason_code)
         fault = self._fault_event(
             intent, seq, mono, halt=False, reason_code="recovery_required"
         )
         folded = self._fold((fault,))
-        if folded is not None:
-            self._commit_events((fault,), folded)
+        if folded is None or not self._commit_events((fault,), folded):
+            return self._recovery(intent, "wal_unhealthy")
         return self._recovery(intent, reason_code)
 
     def _open_gate(
@@ -1061,6 +1066,34 @@ class ExecutionEngine:
         self._state = next_state
         self._note_seeds(events, next_state)
         return True
+
+    def _accepted_is_durable(self, accepted_event: ExecutionEvent) -> bool:
+        """Opt-in pre-dispatch proof; failure leaves ARMED for reconciliation.
+
+        Keep this synchronous under the engine lock: cancellation must not race
+        an outstanding WAL writer with a subsequent submit or a socket write.
+        """
+        if not self._durable_prewrite:
+            return True
+        try:
+            self._wal.drain_all()
+            replay = self._wal.replay()
+            health = self._wal.health()
+        except Exception:
+            return False
+        return (
+            not health.writer_unhealthy
+            and not health.integrity_unhealthy
+            and not health.torn_tail
+            and health.queue_depth == 0
+            and health.durable_lag == 0
+            and bool(replay.records)
+            and replay.integrity_ok
+            and not replay.torn_tail
+            and replay.durable_watermark == health.durable_wal_seq
+            and replay.records[-1].event == accepted_event
+            and replay.state == self._state
+        )
 
     def _validate_plan_reduce_only(
         self, intent: TradeIntent, bybit: LegPlan, okx: LegPlan
@@ -1446,6 +1479,11 @@ class ExecutionEngine:
         if intent.action is IntentAction.OPEN:
             self._remember_primary_plans(bybit, okx)
         self._last_intent = intent
+
+        if not self._accepted_is_durable(accepted_event):
+            return self._recovery(intent, "wal_unhealthy")
+        if self._now() >= intent.expiry_mono_ns:
+            return self._rollback_accepted_without_send(intent, "ttl_expired")
 
         try:
             self._ownership.assert_owned(self._ownership_claim)

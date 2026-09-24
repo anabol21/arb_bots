@@ -465,6 +465,7 @@ class EngineHarness(unittest.IsolatedAsyncioTestCase):
         mark: bool = True,
         max_queue: int = 16,
         reserved_tail: int = 5,
+        durable_prewrite: bool = False,
     ) -> ExecutionEngine:
         if wal is None:
             wal = _ready_wal(
@@ -473,6 +474,8 @@ class EngineHarness(unittest.IsolatedAsyncioTestCase):
                 max_queue=max_queue,
                 reserved_tail=reserved_tail,
             )
+        if durable_prewrite and state is None:
+            state = wal.replay().state
         return ExecutionEngine(
             run_id=RUN_ID,
             wal=wal,
@@ -484,6 +487,7 @@ class EngineHarness(unittest.IsolatedAsyncioTestCase):
             ownership=self.fence,
             monotonic_ns=self.clock,
             state=state,
+            durable_prewrite=durable_prewrite,
         )
 
 
@@ -723,6 +727,60 @@ class OwnershipTests(unittest.TestCase):
 
 
 class SubmitHappyPathTests(EngineHarness):
+    async def test_opt_in_prewrite_is_durable_before_socket_send(self) -> None:
+        engine = self._engine(durable_prewrite=True)
+        original_send = self.bybit.asend
+
+        async def assert_durable_then_send(text: str) -> None:
+            replay = engine._wal.replay()
+            self.assertEqual(replay.records[-1].event.event_type, ExecutionEventType.INTENT_ACCEPTED)
+            self.assertEqual(replay.state, engine.state)
+            self.assertEqual(engine._wal.health().queue_depth, 0)
+            await original_send(text)
+
+        self.bybit.asend = assert_durable_then_send
+        result = await engine.submit(_intent())
+        self.assertEqual(result.status, SubmitStatus.ACCEPTED)
+        self.assertEqual(self.bybit.asend_calls, 1)
+        self.assertEqual(self.okx.asend_calls, 1)
+
+    async def test_opt_in_prewrite_failure_never_sends_and_requires_recovery(self) -> None:
+        engine = self._engine(durable_prewrite=True)
+        with patch.object(engine._wal, "drain_all", side_effect=WalError("write_failed")):
+            result = await engine.submit(_intent())
+        self.assertEqual(result.status, SubmitStatus.RECOVERY_REQUIRED)
+        self.assertEqual(result.reason_code, "wal_unhealthy")
+        self.assertEqual(engine.state.status, SpreadStatus.ARMED)
+        self.assertEqual(self.bybit.asend_calls, 0)
+        self.assertEqual(self.okx.asend_calls, 0)
+
+    async def test_opt_in_prewrite_rejects_unreplayed_prior_wal_state(self) -> None:
+        engine = self._engine(
+            durable_prewrite=True,
+            state=initial_spread_state(run_id=RUN_ID),
+        )
+        result = await engine.submit(_intent())
+        self.assertEqual(result.status, SubmitStatus.RECOVERY_REQUIRED)
+        self.assertEqual(result.reason_code, "wal_unhealthy")
+        self.assertEqual(self.bybit.asend_calls, 0)
+        self.assertEqual(self.okx.asend_calls, 0)
+
+    async def test_opt_in_prewrite_rechecks_ttl_after_fsync(self) -> None:
+        engine = self._engine(durable_prewrite=True)
+        original_drain = engine._wal.drain_all
+
+        def expire_after_drain() -> Any:
+            acks = original_drain()
+            self.clock.n = 1_000_000
+            return acks
+
+        with patch.object(engine._wal, "drain_all", side_effect=expire_after_drain):
+            result = await engine.submit(_intent())
+        self.assertEqual(result.status, SubmitStatus.REJECTED)
+        self.assertEqual(result.reason_code, "ttl_expired")
+        self.assertEqual(self.bybit.asend_calls, 0)
+        self.assertEqual(self.okx.asend_calls, 0)
+
     async def test_open_both_completed_is_accepted_and_dispatches_once(self) -> None:
         engine = self._engine()
         result = await engine.submit(_intent())

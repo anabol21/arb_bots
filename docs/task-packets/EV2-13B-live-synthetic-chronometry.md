@@ -47,6 +47,14 @@ budget. Unknown exposure is not permission for an automatic guess.
   K=1, $10/leg, three cycles/six planned submissions). It is not wired
   into runtime and grants no order capability; both pre-existing live
   startup blocks remain active and tested.
+- `ExecutionEngine(durable_prewrite=True)` is an **opt-in, local** bridge
+  primitive: after enqueueing `INTENT_ACCEPTED`, it drains/fsyncs the WAL,
+  replays it, and requires the durable accepted record and full replayed
+  state to match before transport dispatch. Any failed proof returns
+  `recovery_required` and leaves the armed intent for reconciliation, with
+  no socket send. It also rechecks TTL after this work. The default remains
+  off for legacy/no-order hot-path compatibility; no live runtime enables
+  it yet. A live adapter must explicitly enable and test it.
 
 ## 3. Candidate designs
 
@@ -74,11 +82,20 @@ budget. Unknown exposure is not permission for an automatic guess.
   presented with sub-millisecond precision unsupported by that bound.
 - A fill event may arrive before or after a trade-request ACK. The report
   must not impose the requested milestones as a guaranteed temporal chain.
+- The current durable-prewrite proof performs synchronous fsync **and full
+  WAL replay on the event loop**. It is a correctness baseline, not a
+  latency-qualified final path: cost grows with WAL history and can exceed
+  the ~1 ms signal-to-send goal. Before live arming, benchmark p50/p99/p999
+  on the target VPS with realistic WAL history, then use a separately
+  reviewed bounded durable-ack/checkpoint design if this mode fails the
+  latency gate. Never bypass durability merely to hit the latency target.
 
 ## 5. Minimal patch / experiment plan
 
 1. Complete and review EV2-12B/C/D live integration; preserve both current
    fail-closed gates until the production adapter is proven end to end.
+   The adapter must hydrate engine state from the exact WAL replay before
+   enabling durable prewrite; a mismatch intentionally blocks sending.
 2. Add a separately armed synthetic-source-only live mode. It changes the
    signal source, not the execution, WAL, readiness or fill-state code.
 3. Enforce one eligible coin, K=1, <= $10 intended notional per leg, six
