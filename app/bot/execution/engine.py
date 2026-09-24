@@ -1293,9 +1293,11 @@ class ExecutionEngine:
             return events, "accepted"
         return events, "write_failed"
 
-    async def submit(self, intent: TradeIntent) -> SubmitResult:
+    async def submit(
+        self, intent: TradeIntent, *, prepared_plans: Optional[Sequence[LegPlan]] = None
+    ) -> SubmitResult:
         async with self._lock:
-            return await self._submit_locked(intent)
+            return await self._submit_locked(intent, prepared_plans=prepared_plans)
 
     async def audit_intent(self, intent: TradeIntent) -> NoOrderAuditResult:
         """No-order OPEN probe through risk, owner, private readiness and WAL.
@@ -1406,7 +1408,9 @@ class ExecutionEngine:
                 prewrite=prewrite, wal_accepted=True,
             )
 
-    async def _submit_locked(self, intent: TradeIntent) -> SubmitResult:
+    async def _submit_locked(
+        self, intent: TradeIntent, *, prepared_plans: Optional[Sequence[LegPlan]] = None
+    ) -> SubmitResult:
         if not isinstance(intent, TradeIntent):
             return SubmitResult(
                 schema_version=SCHEMA_VERSION,
@@ -1443,7 +1447,7 @@ class ExecutionEngine:
             return self._reject(intent, "invalid_intent")
 
         try:
-            plans = self._plan_resolver(intent)
+            plans = self._plan_resolver(intent) if prepared_plans is None else prepared_plans
             bybit, okx = _split_plans(intent, plans)
         except EngineError as exc:
             return self._reject(intent, exc.reason_code)

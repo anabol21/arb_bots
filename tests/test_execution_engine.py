@@ -742,6 +742,16 @@ class OwnershipTests(unittest.TestCase):
 
 
 class SubmitHappyPathTests(EngineHarness):
+    async def test_prepared_live_plans_are_not_resolved_again_before_send(self) -> None:
+        engine = self._engine(durable_prewrite=True)
+        intent = _intent()
+        plans = tuple(_resolver(intent))
+        with patch.object(engine, "_plan_resolver", side_effect=AssertionError("resolver_called_twice")):
+            result = await engine.submit(intent, prepared_plans=plans)
+        self.assertEqual(result.status, SubmitStatus.ACCEPTED)
+        self.assertEqual(self.bybit.asend_calls, 1)
+        self.assertEqual(self.okx.asend_calls, 1)
+
     async def test_opt_in_prewrite_is_durable_before_socket_send(self) -> None:
         engine = self._engine(durable_prewrite=True)
         original_send = self.bybit.asend

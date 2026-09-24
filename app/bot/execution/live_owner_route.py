@@ -142,7 +142,7 @@ class LiveOwnerLoopRoute:
         plans = tuple(self.plan_resolver(intent))
         self.bridge.begin_submission(plans)
         try:
-            result = await self.engine.submit(intent)
+            result = await self.engine.submit(intent, prepared_plans=plans)
         except BaseException:
             # A raised submit may have written one or both sockets. Freeze
             # instead of guessing whether the attempt was unwritten.
