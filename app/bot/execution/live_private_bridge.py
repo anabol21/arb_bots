@@ -28,6 +28,7 @@ class _QueuedFrame:
     generation: int
     receive_mono_ns: int
     payload: Mapping[str, Any]
+    expected_client_id: Optional[str] = None
 
 
 def _source(payload: Mapping[str, Any], venue: Venue) -> Optional[str]:
@@ -83,6 +84,7 @@ class LivePrivateEvidenceBridge:
         self._draining = False
         self._fatal: Optional[str] = None
         self._capturing = False
+        self._expected_clients: dict[Venue, str] = {}
 
     @property
     def fatal_reason(self) -> Optional[str]:
@@ -92,11 +94,19 @@ class LivePrivateEvidenceBridge:
     def pending_count(self) -> int:
         return len(self._pending)
 
-    def begin_submission(self) -> None:
+    def begin_submission(self, plans: Sequence[LegPlan]) -> None:
         if self._fatal is not None or self._pending or self._draining:
             raise LivePrivateBridgeError("private_evidence_unsettled")
+        expected = {plan.venue: plan for plan in plans}
+        if (
+            len(plans) != 2
+            or set(expected) != {Venue.BYBIT, Venue.OKX}
+            or any(expected[v].instrument != self._symbols[v] for v in expected)
+        ):
+            raise LivePrivateBridgeError("invalid_live_plan")
         self._adapter = None
         self._intent_id = None
+        self._expected_clients = {venue: plan.client_id for venue, plan in expected.items()}
         self._capturing = True
 
     def observe(
@@ -143,6 +153,43 @@ class LivePrivateEvidenceBridge:
             _QueuedFrame(venue, source, generation, receive_mono_ns, payload)
         )
 
+    def observe_trade(
+        self, text: str, receive_mono_ns: int, *, venue: Venue, generation: int
+    ) -> None:
+        """Capture only this EV2 place ACK; the warm queue still owns delivery."""
+        if self._fatal is not None:
+            raise LivePrivateBridgeError(self._fatal)
+        if not self._capturing:
+            return
+        try:
+            payload = json.loads(text)
+        except (TypeError, ValueError) as exc:
+            self._fatal = "trade_frame_invalid"
+            raise LivePrivateBridgeError(self._fatal) from exc
+        if not isinstance(payload, dict):
+            self._fatal = "trade_frame_invalid"
+            raise LivePrivateBridgeError(self._fatal)
+        expected = self._expected_clients.get(venue)
+        if expected is None:
+            raise LivePrivateBridgeError("intent_not_prepared")
+        if venue is Venue.BYBIT:
+            matching = payload.get("reqId") == expected
+        else:
+            matching = payload.get("id") == expected or (
+                payload.get("event") == "error" and not payload.get("id")
+            )
+        if not matching:
+            return
+        if len(self._pending) >= self._max:
+            self._fatal = "private_frame_overflow"
+            raise LivePrivateBridgeError(self._fatal)
+        self._pending.append(
+            _QueuedFrame(
+                venue, "trade_ack", generation, receive_mono_ns, payload,
+                expected_client_id=expected,
+            )
+        )
+
     def bind_submitted(
         self,
         intent: TradeIntent,
@@ -161,6 +208,7 @@ class LivePrivateEvidenceBridge:
             state.intent_id != intent.intent_id
             or set(expected) != {Venue.BYBIT, Venue.OKX}
             or observed != expected
+            or expected != self._expected_clients
         ):
             raise LivePrivateBridgeError("request_not_committed")
         adapter = PrivateEventAdapter(
@@ -193,6 +241,7 @@ class LivePrivateEvidenceBridge:
                     source=frame.source,
                     generation=frame.generation,
                     receive_mono_ns=frame.receive_mono_ns,
+                    expected_client_id=frame.expected_client_id,
                 )
                 result = await self._engine.ingest_adapter_batch_durable(batch)
                 if not result.accepted:

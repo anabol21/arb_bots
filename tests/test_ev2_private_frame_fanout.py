@@ -31,6 +31,9 @@ class _Runtime:
     def note_private_activity(self) -> None:
         pass
 
+    def note_trade_activity(self) -> None:
+        pass
+
     def handle_inbound_text(self, text: str) -> None:
         self.parsed.append(text)
 
@@ -77,3 +80,40 @@ class PrivateFrameFanoutTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(runtime.parsed), 1)
         with self.assertRaises(ValueError):
             loop.set_private_frame_observer("okx", lambda _t, _m: None)
+
+    async def test_trade_ack_tap_preserves_queue_and_receive_clock(self) -> None:
+        loop = PrivateWarmLoop()
+        socket = LoopOwnedSocket(
+            url="wss://invalid.example", exchange="bybit", channel="trade", owner=loop
+        )
+        socket.runtime = _Runtime()
+        socket.handshake_done = True
+        slot = SocketSlot(socket=socket)
+        loop._slots["bybit:trade"] = slot
+        seen: list[tuple[str, int]] = []
+        loop.set_trade_frame_observer("bybit", lambda text, mono: seen.append((text, mono)))
+        ack = '{"op":"order.create","reqId":"test","retCode":0}'
+        await loop._pump(slot, _Frames(ack))
+        self.assertEqual(socket.recv_text(timeout_sec=0), ack)
+        self.assertEqual(len(seen), 1)
+        self.assertEqual(seen[0][0], ack)
+        self.assertGreater(seen[0][1], 0)
+
+    async def test_trade_tap_failure_propagates_before_ack_queue(self) -> None:
+        loop = PrivateWarmLoop()
+        socket = LoopOwnedSocket(
+            url="wss://invalid.example", exchange="bybit", channel="trade", owner=loop
+        )
+        socket.runtime = _Runtime()
+        socket.handshake_done = True
+        slot = SocketSlot(socket=socket)
+        loop._slots["bybit:trade"] = slot
+
+        def broken(_text: str, _mono: int) -> None:
+            raise RuntimeError("ev2_ack_tap_failed")
+
+        loop.set_trade_frame_observer("bybit", broken)
+        with self.assertRaisesRegex(RuntimeError, "ev2_ack_tap_failed"):
+            await loop._pump(slot, _Frames('{"op":"order.create","reqId":"test"}'))
+        with self.assertRaises(TimeoutError):
+            socket.recv_text(timeout_sec=0)

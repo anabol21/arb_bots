@@ -1398,10 +1398,28 @@ class LivePrivateBridgeTests(EngineHarness):
         engine = self._engine(durable_prewrite=True)
         bridge = self._bridge(engine)
         intent = _intent()
-        bridge.begin_submission()
+        bridge.begin_submission(_resolver(intent))
         sent = await engine.submit(intent)
         self.assertEqual(sent.status, SubmitStatus.ACCEPTED)
         earlier_receive = engine.state.last_monotonic_ns - 1
+        bridge.observe_trade(
+            json.dumps({
+                "op": "order.create", "reqId": _plans(INTENT_A)[0].client_id,
+                "retCode": 0,
+            }),
+            earlier_receive,
+            venue=Venue.BYBIT,
+            generation=1,
+        )
+        bridge.observe_trade(
+            json.dumps({
+                "op": "order", "id": _plans(INTENT_A)[1].client_id,
+                "code": "0", "data": [{"sCode": "0"}],
+            }),
+            earlier_receive,
+            venue=Venue.OKX,
+            generation=1,
+        )
         bridge.observe(
             json.dumps({
                 "topic": "order",
@@ -1431,11 +1449,11 @@ class LivePrivateBridgeTests(EngineHarness):
             venue=Venue.OKX,
             generation=1,
         )
-        self.assertEqual(bridge.pending_count, 2)
+        self.assertEqual(bridge.pending_count, 4)
         bridge.bind_submitted(
             intent, _resolver(intent), bybit_generation=1, okx_generation=1,
         )
-        self.assertEqual(await bridge.drain(), 2)
+        self.assertEqual(await bridge.drain(), 4)
         self.assertEqual(engine.state.status, SpreadStatus.OPEN)
         self.assertEqual(engine._wal.health().queue_depth, 0)
         self.assertEqual(engine._wal.replay().state, engine.state)
@@ -1444,7 +1462,7 @@ class LivePrivateBridgeTests(EngineHarness):
         engine = self._engine(durable_prewrite=True)
         bridge = self._bridge(engine)
         intent = _intent()
-        bridge.begin_submission()
+        bridge.begin_submission(_resolver(intent))
         self.assertEqual((await engine.submit(intent)).status, SubmitStatus.ACCEPTED)
         bridge.bind_submitted(
             intent, _resolver(intent), bybit_generation=1, okx_generation=1,

@@ -238,6 +238,7 @@ class SocketSlot:
     on_down: Optional[Callable[[LoopOwnedSocket], None]] = None
     place_inflight_fn: Optional[Callable[[], bool]] = None
     private_frame_observer: Optional[Callable[[str, int], Any]] = None
+    trade_frame_observer: Optional[Callable[[str, int], Any]] = None
     heartbeat_every_sec: float = 10.0
     silence_timeout_sec: float = 45.0
     stop_event: Any = None
@@ -370,6 +371,19 @@ class PrivateWarmLoop:
         if slot is None or (observer is not None and not callable(observer)):
             raise ValueError("invalid_private_observer")
         slot.private_frame_observer = observer
+
+    def set_trade_frame_observer(
+        self, exchange: str, observer: Optional[Callable[[str, int], Any]]
+    ) -> None:
+        """Opt-in receive-time tap before a trade ACK enters the legacy queue.
+
+        The tap cannot consume or rewrite the ACK.  Failure propagates to the
+        normal reconnect path, which invalidates live readiness.
+        """
+        slot = self.slot(exchange, "trade")
+        if slot is None or (observer is not None and not callable(observer)):
+            raise ValueError("invalid_trade_observer")
+        slot.trade_frame_observer = observer
 
     def _run_loop(self) -> None:
         loop = asyncio.new_event_loop()
@@ -548,6 +562,11 @@ class PrivateWarmLoop:
                         if inspect.isawaitable(observed):
                             await observed
                     continue
+                observer = slot.trade_frame_observer
+                if observer is not None:
+                    observed = observer(text, sock.last_recv_mono_ns or 0)
+                    if inspect.isawaitable(observed):
+                        await observed
             sock.push_inbound(text)
 
     async def _heartbeat(self, slot: SocketSlot) -> None:
