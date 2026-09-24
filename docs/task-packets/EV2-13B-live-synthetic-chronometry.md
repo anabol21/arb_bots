@@ -23,6 +23,8 @@ CLOSE, sequentially, with no new OPEN before the preceding cycle is
 independently flat. Each leg has a **maximum $10 intended notional**, not a
 target to round upward to an exchange minimum. An ineligible instrument is
 skipped; it is not silently resized or replaced by another account/venue.
+The operator selected **CAP** and explicitly allows a matched size below
+$10/leg. A fresh two-venue preflight is still required for every attempt.
 The operator explicitly permits additional **reduce-only** orders beyond
 the six planned submissions solely to clear independently confirmed
 residual exposure. They must use the verified remaining quantity, never
@@ -55,6 +57,12 @@ budget. Unknown exposure is not permission for an automatic guess.
   no socket send. It also rechecks TTL after this work. The default remains
   off for legacy/no-order hot-path compatibility; no live runtime enables
   it yet. A live adapter must explicitly enable and test it.
+- `app/bot/execution/live_cap_sizing.py` is a pure prospective sizing gate
+  for CAP. Given *fresh* public metadata and executable L1 sides, it floors
+  OKX contracts so both intended notionals remain <=$10 and the Bybit base
+  quantity exactly matches OKX `contracts × ctVal`; it never rounds a leg up
+  to satisfy a minimum. It is not wired to the sender and does not bound
+  actual market-order fill price.
 
 ## 3. Candidate designs
 
@@ -70,6 +78,14 @@ budget. Unknown exposure is not permission for an automatic guess.
 
 - Market orders have no application-defined maximum slippage. L1 volume
   checks and a $10 cap do not bound execution price or ensure a full fill.
+- CAP is particularly sensitive to size steps. On the target VPS public
+  instrument snapshot of 2026-09-24, OKX `CAP-USDT-SWAP` had `ctVal=100 CAP`,
+  `lotSz=minSz=1 contract`; Bybit `CAPUSDT` had `qtyStep=minOrderQty=10 CAP`
+  and `minNotionalValue=5 USDT`. Near 0.05015 USDT/CAP, one matched contract
+  is roughly $5/leg while two are just above the $10 intended cap. These
+  fields and both books must be fetched again just before any real order;
+  the snapshot is not a live trade approval. A $5 minimum on Bybit can also
+  make one contract ineligible if the executable price falls below $0.05.
 - A partial/unilateral fill, lost ACK, private gap or process death must
   preserve the actual exposure and block new OPEN; no blind retry or
   fabricated FLAT. Emergency reduce-only is limited to independently
@@ -149,6 +165,15 @@ this no-order target-VPS probe and only later a production-path canary.
    `signal -> first/terminal fill` independently for each venue. Show
    exchange-time fill and local receive-time fill separately, with the
    clock-quality bound; do not substitute ACK time for fill time.
+6. For each OPEN and CLOSE, freeze the accepted public L1 tick ring around
+   the signal. Plot executable spread on a relative **millisecond** axis
+   from local monotonic time, without interpolating missing ticks or pairing
+   quotes older than the declared staleness limit. Mark the signal, each
+   venue's local send and ACK, each private fill *receive*, and the
+   exchange-reported fill time as a separate clock-domain marker with an
+   explicit uncertainty/offset note. Partial fills get multiple markers;
+   missing events stay missing. Do not reconstruct the curve from 1 Hz
+   `would_sent` rows or infer fill from an ACK.
 
 ## 6. VPS/storage validation plan
 
