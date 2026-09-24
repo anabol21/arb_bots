@@ -42,6 +42,11 @@ budget. Unknown exposure is not permission for an automatic guess.
 - `app/bot/private/position_reconcile.py` and the EV2-12C task packets cover
   read-only exposure checks; quantity, pagination, ownership and freshness
   must be proven in the integrated live path.
+- `app/bot/execution/live_synthetic_source.py` now parses a pure, exact
+  source request (frozen 30-coin feed, one execution coin, roll seed 7,
+  K=1, $10/leg, three cycles/six planned submissions). It is not wired
+  into runtime and grants no order capability; both pre-existing live
+  startup blocks remain active and tested.
 
 ## 3. Candidate designs
 
