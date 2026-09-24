@@ -763,6 +763,25 @@ class ExecutionEngine:
     def adapter_last_monotonic_ns(self) -> int:
         return self._state.last_monotonic_ns
 
+    def attach_live_private_adapter(
+        self, adapter: PrivateEventAdapter, *, intent_id: str
+    ) -> None:
+        """Share the active durable-evidence adapter with recovery flatten.
+
+        Call only after REQUEST_SENT has been committed and the adapter has
+        been registered for that same intent at the current WAL sequence.
+        This never authorizes a send; recovery still performs its own gates.
+        """
+        if (
+            not self._durable_prewrite
+            or not isinstance(adapter, PrivateEventAdapter)
+            or self._state.intent_id != intent_id
+            or not self._state.legs
+            or adapter.last_sequence(intent_id) != self._state.last_sequence
+        ):
+            raise EngineError("adapter_invalid")
+        self._adapter = adapter
+
     def _now(self) -> int:
         value = self._monotonic_ns()
         if isinstance(value, bool) or not isinstance(value, int) or value < 0:

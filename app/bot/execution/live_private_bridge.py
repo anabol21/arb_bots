@@ -224,10 +224,33 @@ class LivePrivateEvidenceBridge:
             last_monotonic_ns=state.last_monotonic_ns,
         )
         adapter.register(intent, tuple(plans))
+        self._engine.attach_live_private_adapter(adapter, intent_id=intent.intent_id)
         if dispatch is not None:
             self.chronometry.bind_dispatch(intent, plans, dispatch)
         self._adapter = adapter
         self._intent_id = intent.intent_id
+
+    def arm_recovery_client(self, plan: LegPlan) -> None:
+        """Correlate only the confirmed residual's reduce-only trade ACK.
+
+        The engine separately validates the recovery plan, persists its
+        REQUEST_SENT event, and owns the write. This only widens evidence
+        capture for that exact derived client ID.
+        """
+        if (
+            self._fatal is not None
+            or self._adapter is None
+            or self._intent_id != plan.intent_id
+            or not plan.reduce_only
+            or self._symbols.get(plan.venue) != plan.instrument
+        ):
+            raise LivePrivateBridgeError("invalid_recovery_binding")
+        try:
+            self._adapter.bind_recovery_plan(plan)
+        except Exception as exc:
+            self._fatal = "invalid_recovery_binding"
+            raise LivePrivateBridgeError(self._fatal) from exc
+        self._expected_clients[plan.venue] = plan.client_id
 
     async def drain(self) -> int:
         """Fold private evidence in receive order and fsync each nonempty batch."""

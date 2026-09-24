@@ -1457,6 +1457,7 @@ class LivePrivateBridgeTests(EngineHarness):
             intent, _resolver(intent), bybit_generation=1, okx_generation=1,
             dispatch=sent.dispatch,
         )
+        self.assertIs(engine._adapter, bridge._adapter)
         self.assertEqual(await bridge.drain(), 4)
         self.assertEqual(engine.state.status, SpreadStatus.OPEN)
         milestones = {item.venue: item for item in bridge.chronometry.snapshot()}
@@ -1545,6 +1546,34 @@ class LivePrivateBridgeTests(EngineHarness):
         with self.assertRaises(LivePrivateBridgeError):
             await bridge.drain()
         self.assertTrue(engine.readiness.kill_switch)
+
+    async def test_recovery_ack_tap_requires_bound_reduce_only_client(self) -> None:
+        engine = self._engine(durable_prewrite=True)
+        bridge = self._bridge(engine)
+        intent = _intent()
+        plans = _resolver(intent)
+        bridge.begin_submission(plans)
+        self.assertEqual((await engine.submit(intent)).status, SubmitStatus.ACCEPTED)
+        bridge.bind_submitted(intent, plans, bybit_generation=1, okx_generation=1)
+        with self.assertRaises(LivePrivateBridgeError):
+            bridge.arm_recovery_client(plans[0])
+        recovery = LegPlan.build(
+            intent_id=intent.intent_id,
+            leg_id=plans[0].leg_id,
+            venue=Venue.BYBIT,
+            instrument=plans[0].instrument,
+            side="buy",
+            quantity=plans[0].quantity,
+            reduce_only=True,
+        )
+        bridge.arm_recovery_client(recovery)
+        bridge.observe_trade(
+            json.dumps({"op": "order.create", "reqId": recovery.client_id, "retCode": 0}),
+            engine.state.last_monotonic_ns + 1,
+            venue=Venue.BYBIT,
+            generation=1,
+        )
+        self.assertEqual(bridge.pending_count, 1)
 
 
 class AdapterIngestTests(EngineHarness):
