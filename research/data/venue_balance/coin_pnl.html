@@ -1,0 +1,171 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>Gear 2.2 — net по монетам</title>
+<style>
+  body { font-family: ui-sans-serif, system-ui, sans-serif; margin: 24px; color: #111; max-width: 1040px; }
+  h1 { font-size: 1.35rem; }
+  h2 { font-size: 1.05rem; margin-top: 1.6rem; }
+  .warn { background: #fff8e6; border: 1px solid #e6d08a; padding: 10px 12px; line-height: 1.45; }
+  .note { color: #333; font-size: 0.92rem; line-height: 1.45; }
+  svg { max-width: 100%; height: auto; display: block; border: 1px solid #eee; background: #fff; }
+  table { border-collapse: collapse; width: 100%; font-size: 0.92rem; }
+  th, td { border-bottom: 1px solid #eee; text-align: right; padding: 4px 8px; }
+  th:first-child, td:first-child { text-align: left; }
+  tr.icx td { background: #fff5f5; font-weight: 600; }
+</style>
+</head>
+<body>
+<h1>Прибыль по монетам — balance_equalize, пул с ICX</h1>
+<div class="warn note">
+Это <strong>observation accounting</strong> по закрытым сделкам frozen gear&nbsp;2.2,
+метод 3: после закрытия кэш делится поровну, следующая нога = (Bybit + OKX) / 2.
+Net сделки = ценовой PnL обеих ног минус комиссии входа и выхода.
+Окно <code>all</code>, режим <code>balance_equalize</code>.
+Открытая в конце нога ICX в эту сумму не входит: монету делистинговали.
+Не оценка прибыльности и не live.
+</div>
+<p class="note">Закрытий: <strong>124</strong> · монет: <strong>17</strong> ·
+сумма net: <strong>61.22 $</strong>. Красный — ICX.</p>
+<section id='coin-pnl'>
+<h2>Прибыль по монетам, balance_equalize, пул с ICX</h2>
+<p class='note'>Закрытые сделки третьего метода на полном пуле. Net = ценовой PnL обеих ног минус комиссии входа и выхода. Закрытий 124, монет 17, сумма net 61.22 $. Красный — ICX. Открытая в конце нога ICX сюда не входит.</p>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 980 498" width="980" height="498" role="img" aria-label="net по монетам">
+<text x="88" y="18" font-size="14" font-family="ui-sans-serif, system-ui, sans-serif" fill="#111">Реализованный net по монете, $</text>
+<text x="80" y="44" text-anchor="end" font-size="12" font-family="ui-sans-serif, system-ui, sans-serif" fill="#111">ICX</text>
+<rect x="88" y="32" width="772.00" height="16" fill="#c92a2a"/>
+<text x="868.00" y="44" font-size="12" font-family="ui-sans-serif, system-ui, sans-serif" fill="#333">27.76 $ · 70 сд.</text>
+<text x="80" y="70" text-anchor="end" font-size="12" font-family="ui-sans-serif, system-ui, sans-serif" fill="#111">CAP</text>
+<rect x="88" y="58" width="315.63" height="16" fill="#1c7ed6"/>
+<text x="411.63" y="70" font-size="12" font-family="ui-sans-serif, system-ui, sans-serif" fill="#333">11.35 $ · 10 сд.</text>
+<text x="80" y="96" text-anchor="end" font-size="12" font-family="ui-sans-serif, system-ui, sans-serif" fill="#111">HMSTR</text>
+<rect x="88" y="84" width="198.99" height="16" fill="#1c7ed6"/>
+<text x="294.99" y="96" font-size="12" font-family="ui-sans-serif, system-ui, sans-serif" fill="#333">7.16 $ · 1 сд.</text>
+<text x="80" y="122" text-anchor="end" font-size="12" font-family="ui-sans-serif, system-ui, sans-serif" fill="#111">LA</text>
+<rect x="88" y="110" width="88.34" height="16" fill="#1c7ed6"/>
+<text x="184.34" y="122" font-size="12" font-family="ui-sans-serif, system-ui, sans-serif" fill="#333">3.18 $ · 10 сд.</text>
+<text x="80" y="148" text-anchor="end" font-size="12" font-family="ui-sans-serif, system-ui, sans-serif" fill="#111">ONT</text>
+<rect x="88" y="136" width="72.64" height="16" fill="#1c7ed6"/>
+<text x="168.64" y="148" font-size="12" font-family="ui-sans-serif, system-ui, sans-serif" fill="#333">2.61 $ · 8 сд.</text>
+<text x="80" y="174" text-anchor="end" font-size="12" font-family="ui-sans-serif, system-ui, sans-serif" fill="#111">BICO</text>
+<rect x="88" y="162" width="46.59" height="16" fill="#1c7ed6"/>
+<text x="142.59" y="174" font-size="12" font-family="ui-sans-serif, system-ui, sans-serif" fill="#333">1.68 $ · 5 сд.</text>
+<text x="80" y="200" text-anchor="end" font-size="12" font-family="ui-sans-serif, system-ui, sans-serif" fill="#111">KAITO</text>
+<rect x="88" y="188" width="38.80" height="16" fill="#1c7ed6"/>
+<text x="134.80" y="200" font-size="12" font-family="ui-sans-serif, system-ui, sans-serif" fill="#333">1.40 $ · 4 сд.</text>
+<text x="80" y="226" text-anchor="end" font-size="12" font-family="ui-sans-serif, system-ui, sans-serif" fill="#111">COAI</text>
+<rect x="88" y="214" width="37.09" height="16" fill="#1c7ed6"/>
+<text x="133.09" y="226" font-size="12" font-family="ui-sans-serif, system-ui, sans-serif" fill="#333">1.33 $ · 1 сд.</text>
+<text x="80" y="252" text-anchor="end" font-size="12" font-family="ui-sans-serif, system-ui, sans-serif" fill="#111">RVN</text>
+<rect x="88" y="240" width="36.30" height="16" fill="#1c7ed6"/>
+<text x="132.30" y="252" font-size="12" font-family="ui-sans-serif, system-ui, sans-serif" fill="#333">1.31 $ · 2 сд.</text>
+<text x="80" y="278" text-anchor="end" font-size="12" font-family="ui-sans-serif, system-ui, sans-serif" fill="#111">HOME</text>
+<rect x="88" y="266" width="21.29" height="16" fill="#1c7ed6"/>
+<text x="117.29" y="278" font-size="12" font-family="ui-sans-serif, system-ui, sans-serif" fill="#333">0.77 $ · 3 сд.</text>
+<text x="80" y="304" text-anchor="end" font-size="12" font-family="ui-sans-serif, system-ui, sans-serif" fill="#111">ACU</text>
+<rect x="88" y="292" width="19.89" height="16" fill="#1c7ed6"/>
+<text x="115.89" y="304" font-size="12" font-family="ui-sans-serif, system-ui, sans-serif" fill="#333">0.72 $ · 1 сд.</text>
+<text x="80" y="330" text-anchor="end" font-size="12" font-family="ui-sans-serif, system-ui, sans-serif" fill="#111">EDEN</text>
+<rect x="88" y="318" width="13.32" height="16" fill="#1c7ed6"/>
+<text x="109.32" y="330" font-size="12" font-family="ui-sans-serif, system-ui, sans-serif" fill="#333">0.48 $ · 2 сд.</text>
+<text x="80" y="356" text-anchor="end" font-size="12" font-family="ui-sans-serif, system-ui, sans-serif" fill="#111">2Z</text>
+<rect x="88" y="344" width="12.50" height="16" fill="#1c7ed6"/>
+<text x="108.50" y="356" font-size="12" font-family="ui-sans-serif, system-ui, sans-serif" fill="#333">0.45 $ · 2 сд.</text>
+<text x="80" y="382" text-anchor="end" font-size="12" font-family="ui-sans-serif, system-ui, sans-serif" fill="#111">MOVE</text>
+<rect x="88" y="370" width="11.17" height="16" fill="#1c7ed6"/>
+<text x="107.17" y="382" font-size="12" font-family="ui-sans-serif, system-ui, sans-serif" fill="#333">0.40 $ · 2 сд.</text>
+<text x="80" y="408" text-anchor="end" font-size="12" font-family="ui-sans-serif, system-ui, sans-serif" fill="#111">GIGGLE</text>
+<rect x="88" y="396" width="7.06" height="16" fill="#1c7ed6"/>
+<text x="103.06" y="408" font-size="12" font-family="ui-sans-serif, system-ui, sans-serif" fill="#333">0.25 $ · 1 сд.</text>
+<text x="80" y="434" text-anchor="end" font-size="12" font-family="ui-sans-serif, system-ui, sans-serif" fill="#111">BEAT</text>
+<rect x="88" y="422" width="6.98" height="16" fill="#1c7ed6"/>
+<text x="102.98" y="434" font-size="12" font-family="ui-sans-serif, system-ui, sans-serif" fill="#333">0.25 $ · 1 сд.</text>
+<text x="80" y="460" text-anchor="end" font-size="12" font-family="ui-sans-serif, system-ui, sans-serif" fill="#111">WAL</text>
+<rect x="88" y="448" width="3.95" height="16" fill="#1c7ed6"/>
+<text x="99.95" y="460" font-size="12" font-family="ui-sans-serif, system-ui, sans-serif" fill="#333">0.14 $ · 1 сд.</text>
+</svg>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 980 360" width="980" height="360" role="img" aria-label="накопление net">
+<text x="64" y="20" font-size="14" font-family="ui-sans-serif, system-ui, sans-serif" fill="#111">Накопление net по закрытиям, $</text>
+<line x1="64" y1="36" x2="64" y2="320" stroke="#bbb"/>
+<line x1="64" y1="320.00" x2="956" y2="320.00" stroke="#ddd"/>
+<polyline fill="none" stroke="#1c7ed6" stroke-width="2" points="64.00,319.01 71.25,317.98 78.50,316.56 85.76,313.53 93.01,312.36 100.26,309.05 107.51,307.96 114.76,306.59 122.02,305.54 129.27,304.51 136.52,299.76 143.77,298.67 151.02,270.64 158.28,256.38 165.53,255.09 172.78,253.88 180.03,253.22 187.28,251.87 194.54,250.91 201.79,250.01 209.04,216.82 216.29,210.63 223.54,209.45 230.80,208.40 238.05,207.59 245.30,205.33 252.55,204.19 259.80,203.08 267.06,201.05 274.31,199.78 281.56,198.70 288.81,197.17 296.07,195.86 303.32,194.08 310.57,191.49 317.82,190.46 325.07,188.68 332.33,187.59 339.58,183.42 346.83,182.08 354.08,180.69 361.33,179.28 368.59,177.93 375.84,176.55 383.09,174.75 390.34,173.35 397.59,171.87 404.85,170.36 412.10,168.85 419.35,167.79 426.60,166.56 433.85,165.27 441.11,162.55 448.36,161.38 455.61,160.25 462.86,158.04 470.11,156.57 477.37,155.35 484.62,153.99 491.87,152.77 499.12,151.53 506.37,149.96 513.63,147.85 520.88,146.33 528.13,144.93 535.38,143.34 542.63,142.14 549.89,140.26 557.14,137.84 564.39,134.34 571.64,132.78 578.89,131.51 586.15,130.07 593.40,128.91 600.65,127.69 607.90,126.14 615.15,124.39 622.41,123.25 629.66,121.96 636.91,120.69 644.16,118.88 651.41,117.46 658.67,116.08 665.92,113.63 673.17,112.04 680.42,109.91 687.67,108.55 694.93,106.51 702.18,104.98 709.43,102.67 716.68,101.41 723.93,99.50 731.19,97.67 738.44,96.11 745.69,94.51 752.94,93.20 760.20,91.68 767.45,89.62 774.70,87.54 781.95,84.88 789.20,83.30 796.46,81.28 803.71,79.76 810.96,78.22 818.21,76.64 825.46,75.07 832.72,70.51 839.97,69.30 847.22,67.79 854.47,66.49 861.72,65.24 868.98,63.77 876.23,62.41 883.48,61.17 890.73,59.73 897.98,58.45 905.24,56.21 912.49,51.07 919.74,48.93 926.99,47.15 934.24,44.30 941.50,42.69 948.75,40.49 956.00,36.00"/>
+<circle cx="339.58" cy="183.42" r="3.5" fill="#c92a2a"/>
+<circle cx="346.83" cy="182.08" r="3.5" fill="#c92a2a"/>
+<circle cx="354.08" cy="180.69" r="3.5" fill="#c92a2a"/>
+<circle cx="361.33" cy="179.28" r="3.5" fill="#c92a2a"/>
+<circle cx="368.59" cy="177.93" r="3.5" fill="#c92a2a"/>
+<circle cx="375.84" cy="176.55" r="3.5" fill="#c92a2a"/>
+<circle cx="383.09" cy="174.75" r="3.5" fill="#c92a2a"/>
+<circle cx="390.34" cy="173.35" r="3.5" fill="#c92a2a"/>
+<circle cx="397.59" cy="171.87" r="3.5" fill="#c92a2a"/>
+<circle cx="404.85" cy="170.36" r="3.5" fill="#c92a2a"/>
+<circle cx="412.10" cy="168.85" r="3.5" fill="#c92a2a"/>
+<circle cx="426.60" cy="166.56" r="3.5" fill="#c92a2a"/>
+<circle cx="433.85" cy="165.27" r="3.5" fill="#c92a2a"/>
+<circle cx="448.36" cy="161.38" r="3.5" fill="#c92a2a"/>
+<circle cx="462.86" cy="158.04" r="3.5" fill="#c92a2a"/>
+<circle cx="470.11" cy="156.57" r="3.5" fill="#c92a2a"/>
+<circle cx="484.62" cy="153.99" r="3.5" fill="#c92a2a"/>
+<circle cx="491.87" cy="152.77" r="3.5" fill="#c92a2a"/>
+<circle cx="506.37" cy="149.96" r="3.5" fill="#c92a2a"/>
+<circle cx="513.63" cy="147.85" r="3.5" fill="#c92a2a"/>
+<circle cx="520.88" cy="146.33" r="3.5" fill="#c92a2a"/>
+<circle cx="528.13" cy="144.93" r="3.5" fill="#c92a2a"/>
+<circle cx="535.38" cy="143.34" r="3.5" fill="#c92a2a"/>
+<circle cx="542.63" cy="142.14" r="3.5" fill="#c92a2a"/>
+<circle cx="549.89" cy="140.26" r="3.5" fill="#c92a2a"/>
+<circle cx="564.39" cy="134.34" r="3.5" fill="#c92a2a"/>
+<circle cx="571.64" cy="132.78" r="3.5" fill="#c92a2a"/>
+<circle cx="578.89" cy="131.51" r="3.5" fill="#c92a2a"/>
+<circle cx="586.15" cy="130.07" r="3.5" fill="#c92a2a"/>
+<circle cx="593.40" cy="128.91" r="3.5" fill="#c92a2a"/>
+<circle cx="607.90" cy="126.14" r="3.5" fill="#c92a2a"/>
+<circle cx="615.15" cy="124.39" r="3.5" fill="#c92a2a"/>
+<circle cx="629.66" cy="121.96" r="3.5" fill="#c92a2a"/>
+<circle cx="636.91" cy="120.69" r="3.5" fill="#c92a2a"/>
+<circle cx="644.16" cy="118.88" r="3.5" fill="#c92a2a"/>
+<circle cx="651.41" cy="117.46" r="3.5" fill="#c92a2a"/>
+<circle cx="658.67" cy="116.08" r="3.5" fill="#c92a2a"/>
+<circle cx="665.92" cy="113.63" r="3.5" fill="#c92a2a"/>
+<circle cx="673.17" cy="112.04" r="3.5" fill="#c92a2a"/>
+<circle cx="680.42" cy="109.91" r="3.5" fill="#c92a2a"/>
+<circle cx="687.67" cy="108.55" r="3.5" fill="#c92a2a"/>
+<circle cx="694.93" cy="106.51" r="3.5" fill="#c92a2a"/>
+<circle cx="702.18" cy="104.98" r="3.5" fill="#c92a2a"/>
+<circle cx="709.43" cy="102.67" r="3.5" fill="#c92a2a"/>
+<circle cx="716.68" cy="101.41" r="3.5" fill="#c92a2a"/>
+<circle cx="723.93" cy="99.50" r="3.5" fill="#c92a2a"/>
+<circle cx="731.19" cy="97.67" r="3.5" fill="#c92a2a"/>
+<circle cx="738.44" cy="96.11" r="3.5" fill="#c92a2a"/>
+<circle cx="745.69" cy="94.51" r="3.5" fill="#c92a2a"/>
+<circle cx="760.20" cy="91.68" r="3.5" fill="#c92a2a"/>
+<circle cx="767.45" cy="89.62" r="3.5" fill="#c92a2a"/>
+<circle cx="774.70" cy="87.54" r="3.5" fill="#c92a2a"/>
+<circle cx="781.95" cy="84.88" r="3.5" fill="#c92a2a"/>
+<circle cx="789.20" cy="83.30" r="3.5" fill="#c92a2a"/>
+<circle cx="796.46" cy="81.28" r="3.5" fill="#c92a2a"/>
+<circle cx="803.71" cy="79.76" r="3.5" fill="#c92a2a"/>
+<circle cx="810.96" cy="78.22" r="3.5" fill="#c92a2a"/>
+<circle cx="818.21" cy="76.64" r="3.5" fill="#c92a2a"/>
+<circle cx="825.46" cy="75.07" r="3.5" fill="#c92a2a"/>
+<circle cx="832.72" cy="70.51" r="3.5" fill="#c92a2a"/>
+<circle cx="839.97" cy="69.30" r="3.5" fill="#c92a2a"/>
+<circle cx="847.22" cy="67.79" r="3.5" fill="#c92a2a"/>
+<circle cx="905.24" cy="56.21" r="3.5" fill="#c92a2a"/>
+<circle cx="912.49" cy="51.07" r="3.5" fill="#c92a2a"/>
+<circle cx="919.74" cy="48.93" r="3.5" fill="#c92a2a"/>
+<circle cx="926.99" cy="47.15" r="3.5" fill="#c92a2a"/>
+<circle cx="934.24" cy="44.30" r="3.5" fill="#c92a2a"/>
+<circle cx="941.50" cy="42.69" r="3.5" fill="#c92a2a"/>
+<circle cx="948.75" cy="40.49" r="3.5" fill="#c92a2a"/>
+<circle cx="956.00" cy="36.00" r="3.5" fill="#c92a2a"/>
+<text x="64" y="352" font-size="11" fill="#333" font-family="ui-sans-serif, system-ui, sans-serif">2026-08-11 UTC</text>
+<text x="956" y="352" text-anchor="end" font-size="11" fill="#333" font-family="ui-sans-serif, system-ui, sans-serif">2026-09-17 UTC</text>
+<text x="72" y="52" font-size="12" fill="#c92a2a" font-family="ui-sans-serif, system-ui, sans-serif">красные точки — закрытия ICX</text>
+</svg>
+<table><thead><tr><th>монета</th><th>сделок</th><th>net &gt; 0</th><th>net, $</th><th>среднее, $</th><th>комиссии, $</th><th>доля</th></tr></thead><tbody><tr class="icx"><td>ICX</td><td>70</td><td>70</td><td>27.76</td><td>0.40</td><td>25.54</td><td>45%</td></tr><tr><td>CAP</td><td>10</td><td>10</td><td>11.35</td><td>1.13</td><td>3.43</td><td>19%</td></tr><tr><td>HMSTR</td><td>1</td><td>1</td><td>7.16</td><td>7.16</td><td>0.35</td><td>12%</td></tr><tr><td>LA</td><td>10</td><td>10</td><td>3.18</td><td>0.32</td><td>3.59</td><td>5%</td></tr><tr><td>ONT</td><td>8</td><td>8</td><td>2.61</td><td>0.33</td><td>2.61</td><td>4%</td></tr><tr><td>BICO</td><td>5</td><td>5</td><td>1.68</td><td>0.34</td><td>1.69</td><td>3%</td></tr><tr><td>KAITO</td><td>4</td><td>4</td><td>1.40</td><td>0.35</td><td>1.20</td><td>2%</td></tr><tr><td>COAI</td><td>1</td><td>1</td><td>1.33</td><td>1.33</td><td>0.35</td><td>2%</td></tr><tr><td>RVN</td><td>2</td><td>2</td><td>1.31</td><td>0.65</td><td>0.66</td><td>2%</td></tr><tr><td>HOME</td><td>3</td><td>3</td><td>0.77</td><td>0.26</td><td>0.96</td><td>1%</td></tr><tr><td>ACU</td><td>1</td><td>1</td><td>0.72</td><td>0.72</td><td>0.31</td><td>1%</td></tr><tr><td>EDEN</td><td>2</td><td>2</td><td>0.48</td><td>0.24</td><td>0.67</td><td>1%</td></tr><tr><td>2Z</td><td>2</td><td>2</td><td>0.45</td><td>0.22</td><td>0.61</td><td>1%</td></tr><tr><td>MOVE</td><td>2</td><td>2</td><td>0.40</td><td>0.20</td><td>0.64</td><td>1%</td></tr><tr><td>GIGGLE</td><td>1</td><td>1</td><td>0.25</td><td>0.25</td><td>0.33</td><td>0%</td></tr><tr><td>BEAT</td><td>1</td><td>1</td><td>0.25</td><td>0.25</td><td>0.31</td><td>0%</td></tr><tr><td>WAL</td><td>1</td><td>1</td><td>0.14</td><td>0.14</td><td>0.29</td><td>0%</td></tr></tbody></table>
+</section>
+</body>
+</html>

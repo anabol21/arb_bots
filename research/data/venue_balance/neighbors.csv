@@ -1,0 +1,5 @@
+window,label,theta_open,p50_open,min_profit_pp,min_theta_close,mode,status,n_policy_closed,n_applied,n_skipped_nonpositive,n_skipped_hole,n_price_mismatch,n_not_applied,n_negative_rounds,n_open_end,final_bybit,final_okx,min_bybit,min_okx,policy_sum_potential_pp,complete
+all,frozen,0.5,0.6,0.2,0.05,fixed100,ok,124,124,0,0,0,0,0,0,227.0790029746922,26.58237188226216,85.14860706818146,6.453875385332862,53.32206267789023,True
+all,frozen,0.5,0.6,0.2,0.05,fixed100_equalize,ok,124,124,0,0,0,0,0,0,126.83068742847748,126.83068742847748,93.01659918492778,87.00522606451233,53.32206267789023,True
+all,frozen,0.5,0.6,0.2,0.05,balance_equalize,ok,124,124,0,0,0,0,0,0,130.60938253440457,130.60938253440457,92.91599336585553,85.77037932446666,53.32206267789023,True
+no_icx,frozen,0.5,0.6,0.2,0.05,balance_equalize,ok_with_skips,59,58,0,0,1,0,0,0,117.12004056606759,117.12004056606759,92.91599336585553,83.06797248169262,32.12592150568959,True
