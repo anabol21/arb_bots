@@ -30,7 +30,7 @@ Environment=BBOT_PROFILE=gear22_live_canary
 Environment=BBOT_BROKER=private_live
 Environment=BBOT_THETA_TRADE=1
 Environment=BBOT_THETA_LIVE_SEND=1
-Environment=BBOT_NOTIONAL_USDT=20
+Environment=BBOT_NOTIONAL_USDT=10
 Environment=BBOT_THETA_OPEN=0.50
 Environment=BBOT_P50_OPEN=0.60
 Environment=BBOT_MIN_PROFIT_PP=0.20

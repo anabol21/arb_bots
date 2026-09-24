@@ -10,7 +10,7 @@ implication here.
 **Not** a profitability claim and **not** a replacement for the stub would_send unit.
 
 Parallel live canary: **same HTML top30** and **frozen policy knobs** as VPS unit
-`spread-bbot-theta-k1-canary`. Notional is **$20 USDT per leg**. Send is Contour B
+`spread-bbot-theta-k1-canary`. Revised future-live ceiling is **$10 USDT per leg**. Send is Contour B
 trivial dual-leg (default private send path). Chronometry on. Sentry project
 Contour B (DSN only in the secret env file).
 
@@ -26,7 +26,7 @@ flags, and data root). Compare later via shared `trade_id`.
 | Broker | `private_live` → Contour B | `stub` | — |
 | Data | `/data/bbot-gear22-live-canary` | `/data/bbot-theta-k1-canary` | `/data/live`, `/data/bars`, … |
 | Log | `/var/log/spread/bbot-gear22-live-canary.log` | stub canary log | `runtime.log` |
-| Notional | **20** USDT / leg | 10 today (leave it) | — |
+| Notional | **10** USDT / leg | 10 today (leave it) | — |
 
 Never write D trees. Never start/stop collector. Do not `systemctl enable`
 this unit from the repo file alone. Do not touch the would_send unit.
@@ -52,7 +52,7 @@ W6 is **not** on the hot path. Do not set `BBOT_PRIVATE_SEND_PATH=w6`.
 ## Decide → send
 
 Same `policy.decide` + feature snapshot path as would_send. On open/close that
-pass size_check at **$20/leg**:
+pass size_check at **$10/leg**:
 
 1. Place Contour B dual-leg **immediately at signal** (no 70 ms sleep; 70 ms
    remains would_send-only fill model).
@@ -98,7 +98,7 @@ BBOT_THETA_LIVE_SEND=1
 BBOT_BROKER=private_live
 VENUE=live
 LIVE_ORDERS=1
-BBOT_NOTIONAL_USDT=20
+BBOT_NOTIONAL_USDT=10
 BBOT_COINS=KAITO,HOME,WAL,RVN,ONT,2Z,BICO,HMSTR,CAP,BLEND,EDEN,KMNO,GPS,ME,ZBT,MOVE,COAI,AZTEC,APR,YB,ICX,AT,H,MUBARAK,ACU,LA,BEAT,PARTI,SIGN,GIGGLE
 BBOT_THETA_OPEN=0.50
 BBOT_P50_OPEN=0.60

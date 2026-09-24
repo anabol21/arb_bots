@@ -447,8 +447,8 @@ class LockedConstantsTests(unittest.TestCase):
         self.assertEqual(DEFAULT_OBSERVE_PARAMS.min_theta_close, 0.05)
         self.assertEqual(POLICY_ID, "gear22_frozen_v1")
         self.assertEqual(INTENT_TTL_NS, 1_000_000_000)
-        self.assertEqual(DEFAULT_NOTIONAL_USDT, Decimal("20"))
-        self.assertEqual(DEFAULT_LIVE_CANARY_NOTIONAL_USDT, 20.0)
+        self.assertEqual(DEFAULT_NOTIONAL_USDT, Decimal("10"))
+        self.assertEqual(DEFAULT_LIVE_CANARY_NOTIONAL_USDT, 10.0)
         self.assertEqual(CANARY_STAGE, "gear22_live_canary")
         self.assertEqual(RISK_POLICY_REVISION, "risk.v1")
 
@@ -529,7 +529,7 @@ class EquivalentSlotParityTests(unittest.TestCase):
             slot=SlotState(position=_position(context), pending=False),
             thr=0.2,
             quotes=close_quotes,
-            notional_usdt=20.0,
+            notional_usdt=10.0,
             coin_order=GEAR22_HTML_TOP30,
             policy_params=DEFAULT_OBSERVE_PARAMS,
         )
@@ -549,7 +549,7 @@ class EquivalentSlotParityTests(unittest.TestCase):
             slot=SlotState(),
             thr=0.2,
             quotes=quotes,
-            notional_usdt=20.0,
+            notional_usdt=10.0,
             coin_order=GEAR22_HTML_TOP30,
             policy_params=DEFAULT_OBSERVE_PARAMS,
         )
@@ -582,7 +582,7 @@ class IntentIdentityTests(unittest.TestCase):
         self.assertEqual(tick.trade_id, tick.intent.intent_id)
         self.assertEqual(tick.intent.coin, "KAITO")
         self.assertEqual(tick.intent.spread_direction, SpreadDirection.LONG)
-        self.assertEqual(tick.intent.notional_usdt, Decimal("20"))
+        self.assertEqual(tick.intent.notional_usdt, Decimal("10"))
         self.assertEqual(tick.intent.policy_version, POLICY_ID)
         self.assertEqual(tick.intent.expiry_mono_ns - tick.intent.signal_mono_ns, INTENT_TTL_NS)
         self.assertEqual(tick.intent.signal_snapshot_ref, tick.snapshot_ref)

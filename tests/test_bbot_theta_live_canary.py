@@ -182,6 +182,19 @@ class LiveGateTests(unittest.TestCase):
         }
         assert_theta_live_send_gates("gear22_live_canary", env)
 
+    def test_live_notional_is_capped_at_ten_per_leg(self) -> None:
+        env = {
+            "BBOT_PROFILE": "gear22_live_canary",
+            "BBOT_BROKER": "private_live",
+            "VENUE": "live",
+            "LIVE_ORDERS": "1",
+            "BBOT_NOTIONAL_USDT": "20",
+        }
+        with self.assertRaises(ThetaLiveSendError):
+            assert_theta_live_send_gates("gear22_live_canary", env)
+        env["BBOT_NOTIONAL_USDT"] = "10"
+        assert_theta_live_send_gates("gear22_live_canary", env)
+
     def test_live_send_without_place_fn_raises(self) -> None:
         tmp = Path(tempfile.mkdtemp())
         with self.assertRaises(ThetaLiveSendError):
@@ -196,7 +209,7 @@ class LiveGateTests(unittest.TestCase):
         self.assertEqual(GEAR22_HTML_TOP30[0], "KAITO")
         self.assertIn("WAL", GEAR22_HTML_TOP30)
         self.assertIn("GIGGLE", GEAR22_HTML_TOP30)
-        self.assertEqual(DEFAULT_LIVE_CANARY_NOTIONAL_USDT, 20.0)
+        self.assertEqual(DEFAULT_LIVE_CANARY_NOTIONAL_USDT, 10.0)
 
     def test_policy_profile_accepts_live_canary(self) -> None:
         from app.policy.trade_manager import (

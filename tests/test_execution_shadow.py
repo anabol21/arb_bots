@@ -171,7 +171,7 @@ def _intent(
         action=IntentAction.OPEN,
         spread_direction=SpreadDirection.LONG,
         coin="KAITO",
-        notional_usdt=Decimal("20"),
+        notional_usdt=Decimal("10"),
         signal_mono_ns=signal_mono_ns,
         signal_wall_ns=1_700_000_000_000_000_000,
         expiry_mono_ns=expiry_mono_ns,
@@ -262,7 +262,7 @@ class CanonicalParityTests(unittest.TestCase):
         self.assertTrue(config_is_canonical(config))
         self.assertEqual(config.coin_order, GEAR22_HTML_TOP30)
         self.assertEqual(config.policy_params, DEFAULT_OBSERVE_PARAMS)
-        self.assertEqual(config.notional_usdt, Decimal("20"))
+        self.assertEqual(config.notional_usdt, Decimal("10"))
         self.assertEqual(config.policy_version, POLICY_ID)
         self.assertEqual(DEFAULT_WARMUP_N, 100)
         self.assertEqual(DEFAULT_COUNTED_N, 10_000)

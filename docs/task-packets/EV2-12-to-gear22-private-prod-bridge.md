@@ -88,12 +88,14 @@ without a separately reviewed manifest diff.
    socket policy, WAL/data durability, lease, and pause. Run a no-order shadow
    through the *same* decision/pre-send adapter. Report signal-to-prepared-
    write separately from any actual order-write/ACK/fill latency.
-2. **EV2-13B — isolated real round trip:** after a fresh go/no-go, one coin,
-   one K=1 round trip at the previously proposed `$20/leg` ceiling, outside
+2. **EV2-13B — isolated real round trips:** after a fresh go/no-go, one coin,
+   at most three sequential K=1 round trips (six dual-leg submissions total)
+   at the revised `$10/leg` ceiling, outside
    the 30-coin continuing contour. Prove both exchange positions and open
    orders flat independently, including actual fills/fees, per-leg quantities,
    WAL-to-private-event parity, Sentry/Grok status, and recovery from a
-   controlled restart. Stop new opens on any ambiguity; do not auto-declare
+   controlled restart. Require an independent flatness proof before each
+   subsequent open. Stop new opens on any ambiguity; do not auto-declare
    success merely because close ACKs arrived.
 3. **EV2-13C — bounded live synthetic policy:** a separate cap on round trips,
    notional, runtime, and loss; global K=1; same production execution path,
@@ -101,7 +103,7 @@ without a separately reviewed manifest diff.
    close cycles and deliberately exercised reconnect/restart recovery. Do not
    run controlled faults while an uncontrolled position is open.
 4. **EV2-13D — frozen real Gear 2.2 policy, 30 coins:** use the manifest matched
-   to `would_sent`; start with the same K=1 and `$20/leg` ceiling. Keep
+   to `would_sent`; start with the same K=1 and `$10/leg` ceiling. Keep
    collector and would_sent parallel. Let the observation window be driven
    by sufficient real signals and complete round trips, not by two quiet
    hours. Compare eligible signals and decisions, but distinguish synthetic

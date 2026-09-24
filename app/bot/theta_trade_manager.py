@@ -57,7 +57,7 @@ DEFAULT_THETA_THR = 0.2
 DEFAULT_FILL_DELAY_MS = 70
 DEFAULT_SLOT_K = 1
 DEFAULT_NOTIONAL_USDT = 100.0
-DEFAULT_LIVE_CANARY_NOTIONAL_USDT = 20.0
+DEFAULT_LIVE_CANARY_NOTIONAL_USDT = 10.0
 DEFAULT_BOOK_DEPTH = 1
 POLICY_ID = "gear22_frozen_v1"
 SYNTHETIC_POLICY_MODE = "synthetic_roll_v1"
@@ -171,6 +171,15 @@ def assert_theta_live_send_gates(
     if live_orders not in {"1", "true", "on", "yes"}:
         raise ThetaLiveSendError(
             "theta live send requires LIVE_ORDERS=1 (fail closed)"
+        )
+    raw_notional = str(e.get("BBOT_NOTIONAL_USDT") or DEFAULT_LIVE_CANARY_NOTIONAL_USDT)
+    try:
+        notional = float(raw_notional)
+    except ValueError as exc:
+        raise ThetaLiveSendError("invalid theta live notional") from exc
+    if not math.isfinite(notional) or not 0 < notional <= DEFAULT_LIVE_CANARY_NOTIONAL_USDT:
+        raise ThetaLiveSendError(
+            f"theta live notional must be >0 and <= {DEFAULT_LIVE_CANARY_NOTIONAL_USDT:g} USDT per leg"
         )
 
 
