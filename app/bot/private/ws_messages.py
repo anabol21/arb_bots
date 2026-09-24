@@ -259,11 +259,32 @@ def build_bybit_trade_cancel(
 ) -> WsOutboundMessage:
     if plan.venue != "bybit_live":
         raise OrderPlanError("bybit trade cancel requires bybit_live plan")
+    return build_bybit_trade_cancel_fields(
+        symbol=plan.symbol,
+        client_id=plan.order_attempt_id,
+        credentials=credentials,
+        req_id=req_id,
+        recv_window=recv_window,
+        timestamp_ms=timestamp_ms,
+    )
+
+
+def build_bybit_trade_cancel_fields(
+    *,
+    symbol: str,
+    client_id: str,
+    credentials: LiveCredentials,
+    req_id: str,
+    recv_window: int = 5000,
+    timestamp_ms: Optional[int] = None,
+) -> WsOutboundMessage:
+    if not symbol or not client_id or not req_id:
+        raise OrderPlanError("invalid bybit cancel fields")
     ts = str(timestamp_ms if timestamp_ms is not None else int(time.time() * 1000))
     args_obj: dict[str, object] = {
         "category": "linear",
-        "symbol": plan.symbol,
-        "orderLinkId": plan.order_attempt_id[:36],
+        "symbol": symbol,
+        "orderLinkId": client_id[:36],
     }
     body_str = _json_compact(args_obj)
     sign_payload = f"{ts}{credentials.api_key}{recv_window}{body_str}"
@@ -471,13 +492,26 @@ def build_okx_trade_cancel(
 ) -> WsOutboundMessage:
     if plan.venue != "okx_live":
         raise OrderPlanError("okx trade cancel requires okx_live plan")
+    return build_okx_trade_cancel_fields(
+        symbol=plan.symbol,
+        client_id=plan.order_attempt_id,
+        req_id=req_id,
+        inst_id_code=inst_id_code if inst_id_code is not None else plan.inst_id_code,
+    )
+
+
+def build_okx_trade_cancel_fields(
+    *, symbol: str, client_id: str, req_id: str, inst_id_code: Optional[int]
+) -> WsOutboundMessage:
+    if not symbol or not client_id or not req_id:
+        raise OrderPlanError("invalid okx cancel fields")
     code = _require_okx_inst_id_code(
-        inst_id_code if inst_id_code is not None else plan.inst_id_code
+        inst_id_code
     )
     args_obj: dict[str, object] = {
-        "instId": plan.symbol,
+        "instId": symbol,
         "instIdCode": code,
-        "clOrdId": plan.order_attempt_id.replace("_", "")[:32],
+        "clOrdId": client_id.replace("_", "")[:32],
     }
     frame = {
         "id": sanitize_okx_ws_id(req_id),

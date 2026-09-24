@@ -14,7 +14,9 @@ from app.bot.execution.contracts import Venue, validate_client_id
 from app.bot.execution.transport import FrozenStaticFrame, TransportError
 from app.bot.private.order_sign import LiveCredentials
 from app.bot.private.ws_messages import (
+    build_bybit_trade_cancel_fields,
     build_bybit_trade_place_fields,
+    build_okx_trade_cancel_fields,
     build_okx_trade_place_fields,
 )
 
@@ -83,6 +85,46 @@ class Ev2LiveWsFinalizer:
                     price=None,
                     reduce_only=static.reduce_only,
                     position_side=None,
+                    req_id=request_id,
+                    inst_id_code=static.inst_id_code,
+                ).text
+        except ValueError:
+            raise TransportError("rejected_before_write") from None
+        raise TransportError("invalid_leg_set")
+
+    def cancel(
+        self,
+        static: FrozenStaticFrame,
+        *,
+        timestamp_ms: int,
+        request_id: str,
+        client_id: str,
+    ) -> str:
+        """Signed client-id cancel for an already persisted primary leg."""
+        if not isinstance(static, FrozenStaticFrame) or static.reduce_only:
+            raise TransportError("rejected_before_write")
+        if (
+            not isinstance(timestamp_ms, int)
+            or isinstance(timestamp_ms, bool)
+            or timestamp_ms <= 0
+        ):
+            raise TransportError("clock_regression")
+        if request_id != client_id or client_id != static.client_id:
+            raise TransportError("client_id_mismatch")
+        try:
+            validate_client_id(client_id, static.venue)
+            if static.venue is Venue.BYBIT:
+                return build_bybit_trade_cancel_fields(
+                    symbol=static.instrument,
+                    client_id=client_id,
+                    credentials=self._bybit_credentials,
+                    req_id=request_id,
+                    timestamp_ms=timestamp_ms,
+                ).text
+            if static.venue is Venue.OKX:
+                return build_okx_trade_cancel_fields(
+                    symbol=static.instrument,
+                    client_id=client_id,
                     req_id=request_id,
                     inst_id_code=static.inst_id_code,
                 ).text

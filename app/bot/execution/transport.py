@@ -817,6 +817,7 @@ class ExecutionTransport:
         bybit_socket: LoopOwnedTradeSocket,
         okx_socket: LoopOwnedTradeSocket,
         finalize_frame: FrameFinalizer,
+        finalize_cancel: Optional[FrameFinalizer] = None,
         monotonic_ns: Callable[[], int] = time.monotonic_ns,
         wall_ms: Optional[Callable[[], int]] = None,
     ) -> None:
@@ -830,6 +831,8 @@ class ExecutionTransport:
             raise TransportError("invalid_socket")
         if not callable(finalize_frame):
             raise TransportError("rejected_before_write")
+        if finalize_cancel is not None and not callable(finalize_cancel):
+            raise TransportError("rejected_before_write")
         bybit_loop = declared_owner_loop(bybit_socket)
         okx_loop = declared_owner_loop(okx_socket)
         if bybit_loop is None or okx_loop is None:
@@ -842,7 +845,9 @@ class ExecutionTransport:
         self._bybit_socket = bybit_socket
         self._okx_socket = okx_socket
         self._finalize_frame = finalize_frame
-        self._finalize_cancel = unsigned_cancel_finalizer
+        self._finalize_cancel = (
+            finalize_cancel if finalize_cancel is not None else unsigned_cancel_finalizer
+        )
         self._monotonic_ns = monotonic_ns
         self._wall_ms = wall_ms if wall_ms is not None else _default_wall_ms
 

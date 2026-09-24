@@ -75,3 +75,25 @@ class LiveWsFrameTests(unittest.TestCase):
         bad_code = FrozenStaticFrame(**{**frame.__dict__, "inst_id_code": None})
         with self.assertRaises(TransportError):
             self._text(bad_code)
+
+    def test_signed_cancel_is_client_id_bound(self) -> None:
+        for venue, op in ((Venue.BYBIT, "order.cancel"), (Venue.OKX, "cancel-order")):
+            frame = _frame(venue)
+            raw = json.loads(self.finalize.cancel(
+                frame,
+                timestamp_ms=1_790_000_000_000,
+                request_id=frame.client_id,
+                client_id=frame.client_id,
+            ))
+            self.assertEqual(raw["op"], op)
+            self.assertEqual(raw["args"][0]["orderLinkId" if venue is Venue.BYBIT else "clOrdId"], frame.client_id)
+            if venue is Venue.BYBIT:
+                self.assertIn("X-BAPI-SIGN", raw["header"])
+            else:
+                self.assertEqual(raw["args"][0]["instIdCode"], 333127)
+        with self.assertRaises(TransportError):
+            frame = _frame(Venue.BYBIT, reduce_only=True)
+            self.finalize.cancel(
+                frame, timestamp_ms=1, request_id=frame.client_id,
+                client_id=frame.client_id,
+            )
