@@ -1141,6 +1141,12 @@ class RecoveryFaultMatrixTests(RecoveryHarness):
         blocked = await other.apply_recovery_step(plan)
         self.assertEqual(blocked.reason_code, "flatten_failed")
         self.assertEqual(self.okx.asend_calls, before)
+        # Venue reconciliation alone cannot stand in for a rebound private
+        # adapter after process restart.
+        other._restart_unproven = False
+        still_blocked = await other.apply_recovery_step(plan)
+        self.assertEqual(still_blocked.reason_code, "flatten_failed")
+        self.assertEqual(self.okx.asend_calls, before)
         self._attach_adapter(other, _intent())
         rebound = await other.plan_recovery()
         self.assertEqual(rebound.kind, RecoveryActionKind.FLATTEN_FILLED)

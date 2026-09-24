@@ -2209,6 +2209,15 @@ class ExecutionEngine:
                 RecoveryActionKind.FLATTEN_FILLED,
                 "flatten_failed",
             )
+        # A WAL-restored primary plan alone is not enough to place a new
+        # recovery order after restart: restore private correlation first.
+        # The existing in-process recovery path keeps its original behavior.
+        if self._adapter is None and self._last_intent is None:
+            return self._recovery_result(
+                RecoveryStatus.BLOCKED,
+                RecoveryActionKind.FLATTEN_FILLED,
+                "flatten_failed",
+            )
         if self._adapter is not None:
             try:
                 self._adapter.bind_recovery_plan(factory_plan)
