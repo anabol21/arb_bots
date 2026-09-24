@@ -87,9 +87,12 @@ def _readiness(*, simulated_trade: bool) -> ReadinessSnapshot:
 
 def _cache() -> InstrumentCache:
     now = time.monotonic_ns()
+    # Long-running replay-growth probes must not accidentally benchmark
+    # metadata TTL expiry rather than WAL latency.
+    expiry = now + 3 * 60 * 60 * 1_000_000_000
     return InstrumentCache.from_snapshots((
-        CachedInstrument(Venue.BYBIT, "BTCUSDT", now, now + 60_000_000_000),
-        CachedInstrument(Venue.OKX, "BTC-USDT-SWAP", now, now + 60_000_000_000,
+        CachedInstrument(Venue.BYBIT, "BTCUSDT", now, expiry),
+        CachedInstrument(Venue.OKX, "BTC-USDT-SWAP", now, expiry,
                          inst_id_code=193761),
     ))
 
