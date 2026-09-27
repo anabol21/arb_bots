@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass
-from typing import Any, Callable, Mapping, Protocol
+from typing import Any, Callable, Mapping, Optional, Protocol
 
 from app.bot.private.order_metadata import (
     InstrumentMetadata,
@@ -137,7 +137,12 @@ class LiveHttpMetadataProvider:
             mark_max_age_ns=self.mark_max_age_ns,
         )
 
-    def _okx_swap_usdt(self, symbol: str) -> InstrumentMetadata:
+    def okx_inst_id_code(self, symbol: str) -> Optional[int]:
+        """Public instruments ``instIdCode`` only. No ticker and no order."""
+        row = self._okx_swap_instrument_row(symbol)
+        return parse_inst_id_code(row.get("instIdCode"))
+
+    def _okx_swap_instrument_row(self, symbol: str) -> Mapping[str, Any]:
         from app.bot.private.rest_readonly import okx_public_rest_headers
 
         pub = okx_public_rest_headers()
@@ -149,6 +154,8 @@ class LiveHttpMetadataProvider:
         if not rows:
             raise MetadataError("okx instruments empty")
         row = rows[0]
+        if not isinstance(row, Mapping):
+            raise MetadataError("okx instruments row is not an object")
         if str(row.get("instId")) != symbol:
             raise MetadataError("okx instId mismatch")
         if str(row.get("instType")) != "SWAP":
@@ -156,6 +163,13 @@ class LiveHttpMetadataProvider:
         settle = str(row.get("settleCcy") or "").upper()
         if settle != "USDT":
             raise MetadataError("okx SWAP must settle USDT")
+        return row
+
+    def _okx_swap_usdt(self, symbol: str) -> InstrumentMetadata:
+        from app.bot.private.rest_readonly import okx_public_rest_headers
+
+        pub = okx_public_rest_headers()
+        row = self._okx_swap_instrument_row(symbol)
         # USDT-settled linear SWAP: ctVal is base-coin size per contract (often BTC);
         # notional USDT = qty * ctVal * mark. Store settle ccy as contract_value_ccy.
         if "ctVal" not in row or row.get("ctVal") in (None, ""):

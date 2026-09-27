@@ -403,6 +403,64 @@ class RollHaltTests(unittest.TestCase):
         self.assertIn("synthetic_roll_stopped | reason=partial_fill", log.warnings)
         self.assertTrue(mgr.slot.pending)
 
+    def test_missing_inst_id_stops_the_roll_once(self) -> None:
+        import asyncio
+        from unittest.mock import patch
+
+        calls = {"place": 0, "decide": 0}
+        box: dict = {}
+
+        def decide(*, slot: object, **_kwargs: object) -> SyntheticDecision:
+            del slot
+            calls["decide"] += 1
+            return SyntheticDecision(action="open", coin="SOL", side="long", roll=17)
+
+        def place(**_kwargs: object) -> PlaceSendResult:
+            calls["place"] += 1
+            box["host"]._synthetic_roll_halt_reason = "okx_inst_id_code_missing"
+            return PlaceSendResult(
+                abort="okx_inst_id_code_missing",
+                completed=False,
+                keep_pending=False,
+            )
+
+        root = Path(tempfile.mkdtemp()) / "bbot"
+        root.mkdir()
+        mgr = ThetaTradeManager(
+            data_root=root,
+            config=ThetaTradeConfig(notional_usdt=10.0, fill_delay_ms=0),
+            decide_fn=decide,
+            place_fn=place,
+            meta_fn=_meta,
+        )
+        log = _ListLog()
+
+        class Host:
+            def __init__(self) -> None:
+                self.stop_event = asyncio.Event()
+                self.theta_trade = mgr
+                self.quotes = _quotes()
+                self.coins = ["SOL", "XRP"]
+                self.log = log
+                self._theta_trade_warned = False
+                self._synthetic_roll_halted = False
+                self._synthetic_roll_halt_reason = None
+
+        host = Host()
+        box["host"] = host
+        with patch("app.bot.runtime.EMIT_INTERVAL_SEC", 0):
+            from app.bot.runtime import BotRuntime
+
+            asyncio.run(BotRuntime._synthetic_roll_loop(host))
+        self.assertEqual(calls["place"], 1)
+        self.assertEqual(calls["decide"], 1)
+        self.assertTrue(host._synthetic_roll_halted)
+        self.assertFalse(mgr.slot.pending)
+        self.assertIn(
+            "synthetic_roll_stopped | reason=okx_inst_id_code_missing",
+            log.warnings,
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

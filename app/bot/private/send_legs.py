@@ -10,6 +10,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Callable, Optional
 
+from app.bot.private.order_metadata import parse_inst_id_code
 from app.bot.private.order_sign import LiveCredentials
 from app.bot.private.private_leg_up import leg_up
 from app.bot.private.ws_trivial_dual_leg import (
@@ -53,6 +54,10 @@ def _send_pair(
         return SendLegsResult(abort="private_channel_down", sent=0)
     if sender is None:
         return SendLegsResult(abort="private_channel_down", sent=0)
+    code = parse_inst_id_code(inst_id_code)
+    if code is None:
+        return SendLegsResult(abort="okx_inst_id_code_missing", sent=0)
+    inst_id_code = code
     try:
         bybit_text, bybit_req, _ = build_signed_place_text(
             venue="bybit",

@@ -374,6 +374,8 @@ class BotRuntime:
         self.theta_trade: ThetaTradeManager | None = None
         self._theta_trade_warned = False
         self._synthetic_roll_halted = False
+        self._synthetic_roll_halt_reason: Optional[str] = None
+        self._okx_inst_id_codes: dict[str, int] = {}
         if self.theta_trade_enabled:
             live_send = theta_live_send_requested(self.profile)
             theta_cfg = ThetaTradeConfig.from_env()
@@ -505,11 +507,18 @@ class BotRuntime:
         session = self._private_warm
         if session is None:
             return PlaceSendResult(abort="private_channel_down")
+        from app.bot.private.okx_inst_id import lookup_okx_inst_id_code
+
+        meta = kwargs.get("meta")
+        symbol = str(getattr(meta, "okx_symbol", "") or "")
+        inst = lookup_okx_inst_id_code(self._okx_inst_id_codes, symbol)
+        if inst is None:
+            self._synthetic_roll_halt_reason = "okx_inst_id_code_missing"
+            return PlaceSendResult(abort="okx_inst_id_code_missing")
         sender = getattr(self, "_synthetic_sender", None)
         if sender is None:
             sender = TrivialDualSender(send_fn=warm_trade_send_fn(session))
             self._synthetic_sender = sender
-        inst = getattr(session.okx_runtime, "okx_inst_id_code", None)
         deadline = time.monotonic() + SYNTHETIC_FILL_WAIT_SEC
 
         def _runtime_for(venue: str) -> Any:
@@ -542,6 +551,31 @@ class BotRuntime:
                 recv_fn=_recv,
                 **kwargs,
             )
+
+    def _prefetch_okx_inst_id_codes(self) -> None:
+        """Public instruments lookup once, before the roll loop. Not on place."""
+        from app.bot.private.okx_inst_id import (
+            fetch_okx_inst_id_code,
+            prefetch_okx_inst_id_codes,
+        )
+
+        symbols: list[str] = []
+        for coin in self.coins:
+            try:
+                symbols.append(self._meta(coin).okx_symbol)
+            except KeyError:
+                self.log.warning("okx_inst_id_skip | coin=%s | err=KeyError", coin)
+        self._okx_inst_id_codes = prefetch_okx_inst_id_codes(
+            symbols,
+            env=os.environ,
+            fetch_fn=fetch_okx_inst_id_code,
+        )
+        missing = [s for s in symbols if s not in self._okx_inst_id_codes]
+        self.log.info(
+            "okx_inst_id_prefetched | n=%s | missing=%s",
+            len(self._okx_inst_id_codes),
+            ",".join(missing) if missing else "-",
+        )
 
     def _meta(self, coin: str) -> InstrumentMeta:
         if coin not in self.universe:
@@ -959,11 +993,13 @@ class BotRuntime:
                         type(exc).__name__,
                     )
                 continue
-            if self.theta_trade.slot.pending:
+            halt = getattr(self, "_synthetic_roll_halt_reason", None)
+            if self.theta_trade.slot.pending or halt:
                 if not self._synthetic_roll_halted:
                     self._synthetic_roll_halted = True
                     self.log.warning(
-                        "synthetic_roll_stopped | reason=partial_fill"
+                        "synthetic_roll_stopped | reason=%s",
+                        halt or "partial_fill",
                     )
                 break
 
@@ -1441,6 +1477,8 @@ class BotRuntime:
                 self._private_warm._handshake_count,  # noqa: SLF001
                 self._private_warm.keepalive_running,
             )
+            if self.profile == "synthetic_roll":
+                self._prefetch_okx_inst_id_codes()
         else:
             self.log.info("private_warm_skipped | live_private_send=false")
 

@@ -13,6 +13,8 @@ from app.bot.private.coin_qty import CoinQtyError, shared_coin_qty, shared_from_
 from app.bot.private.journal_v1 import PrivateJournalWriter
 from app.bot.paths import theta_step_chrono_jsonl_path, theta_trades_jsonl_path
 from app.bot.private.order_sign import LiveCredentials
+from app.bot.private.okx_inst_id import lookup_okx_inst_id_code, prefetch_okx_inst_id_codes
+from app.bot.private.order_preflight import LiveHttpMetadataProvider
 from app.bot.private.place_send import (
     drain_trade_fill,
     place_live,
@@ -548,6 +550,124 @@ class FillWaitTests(unittest.TestCase):
         mgr.on_theta_snapshots([], quotes=quotes, coin_order=["BTC"], now_ms=1_700_000_001_000)
         self.assertEqual(calls["n"], 1)
         self.assertEqual(len(self.ws.sent), 2)
+
+
+class InstIdCodeTests(unittest.TestCase):
+    def setUp(self) -> None:
+        clear_all()
+        self.tmp = Path(tempfile.mkdtemp())
+        self.root = self.tmp / "bbot"
+        self.root.mkdir()
+        self.ws = _Ws()
+        self.sender = _Sender(self.ws)
+        set_exchange_coins("okx", ["SOL", "XRP"], True)
+        set_exchange_coins("bybit", ["SOL", "XRP"], True)
+
+    def tearDown(self) -> None:
+        clear_all()
+
+    def _recv(self, venue: str) -> str:
+        if venue == "okx":
+            return json.dumps({"fillPx": "2"})
+        return json.dumps({"avgPx": "2"})
+
+    def test_instruments_lookup_reads_inst_id_code(self) -> None:
+        seen: list[str] = []
+
+        def http_get_json(url: str, _headers: object) -> dict:
+            seen.append(url)
+            if "SOL-USDT-SWAP" in url:
+                inst = "SOL-USDT-SWAP"
+                code = 193761
+            else:
+                inst = "XRP-USDT-SWAP"
+                code = 188237
+            return {
+                "code": "0",
+                "data": [
+                    {
+                        "instId": inst,
+                        "instType": "SWAP",
+                        "settleCcy": "USDT",
+                        "instIdCode": code,
+                    }
+                ],
+            }
+
+        provider = LiveHttpMetadataProvider(http_get_json=http_get_json)
+        codes = prefetch_okx_inst_id_codes(
+            ["SOL-USDT-SWAP", "XRP-USDT-SWAP"],
+            fetch_fn=provider.okx_inst_id_code,
+        )
+        self.assertEqual(codes["SOL-USDT-SWAP"], 193761)
+        self.assertEqual(codes["XRP-USDT-SWAP"], 188237)
+        self.assertTrue(all("instruments" in url and "ticker" not in url for url in seen))
+        self.assertEqual(len(seen), 2)
+
+    def test_missing_code_does_not_call_sender(self) -> None:
+        result = place_live(
+            data_root=self.root,
+            spread_side="open_long",
+            base_coin="SOL",
+            signal_ts_ms=1_700_000_000_000,
+            okx_book=_book(2),
+            bybit_book=_book(2),
+            meta=_meta(
+                base_coin="SOL",
+                okx_symbol="SOL-USDT-SWAP",
+                bybit_symbol="SOLUSDT",
+            ),
+            sender=self.sender,
+            credentials=_creds(),
+            inst_id_code=None,
+            recv_fn=self._recv,
+        )
+        self.assertEqual(result.abort, "okx_inst_id_code_missing")
+        self.assertFalse(result.completed)
+        self.assertEqual(self.ws.sent, [])
+
+    def test_prefetched_code_is_passed_into_the_frame(self) -> None:
+        hits: list[str] = []
+
+        def fetch(symbol: str) -> int:
+            hits.append(symbol)
+            return {"SOL-USDT-SWAP": 193761, "XRP-USDT-SWAP": 188237}[symbol]
+
+        codes = prefetch_okx_inst_id_codes(
+            ["SOL-USDT-SWAP", "XRP-USDT-SWAP"],
+            env={"BBOT_OKX_INST_ID_CODES": "BTC-USDT-SWAP:1"},
+            fetch_fn=fetch,
+        )
+        self.assertEqual(hits, ["SOL-USDT-SWAP", "XRP-USDT-SWAP"])
+        self.assertEqual(lookup_okx_inst_id_code(codes, "BTC-USDT-SWAP"), 1)
+
+        for symbol, coin, code in (
+            ("SOL-USDT-SWAP", "SOL", 193761),
+            ("XRP-USDT-SWAP", "XRP", 188237),
+        ):
+            before = len(self.ws.sent)
+            result = place_live(
+                data_root=self.root,
+                spread_side="open_long",
+                base_coin=coin,
+                signal_ts_ms=1_700_000_000_000,
+                okx_book=_book(2),
+                bybit_book=_book(2),
+                meta=_meta(
+                    base_coin=coin,
+                    okx_symbol=symbol,
+                    bybit_symbol=f"{coin}USDT",
+                ),
+                sender=self.sender,
+                credentials=_creds(),
+                inst_id_code=lookup_okx_inst_id_code(codes, symbol),
+                recv_fn=self._recv,
+            )
+            self.assertTrue(result.completed, result.abort)
+            okx_frame = json.loads(self.ws.sent[before + 1])
+            self.assertEqual(okx_frame["args"][0]["instIdCode"], code)
+            self.assertIsInstance(okx_frame["args"][0]["instIdCode"], int)
+        self.assertEqual(hits, ["SOL-USDT-SWAP", "XRP-USDT-SWAP"])
 
 
 if __name__ == "__main__":
