@@ -670,5 +670,69 @@ class InstIdCodeTests(unittest.TestCase):
         self.assertEqual(hits, ["SOL-USDT-SWAP", "XRP-USDT-SWAP"])
 
 
+class ClOrdIdTests(unittest.TestCase):
+    def setUp(self) -> None:
+        clear_all()
+        self.tmp = Path(tempfile.mkdtemp())
+        self.root = self.tmp / "bbot"
+        self.root.mkdir()
+        self.ws = _Ws()
+        self.sender = _Sender(self.ws)
+        set_exchange_coins("okx", ["SOL"], True)
+        set_exchange_coins("bybit", ["SOL"], True)
+
+    def tearDown(self) -> None:
+        clear_all()
+
+    def _place(self, intent_id: str):
+        def recv(venue: str) -> str:
+            if venue == "okx":
+                return json.dumps({"fillPx": "2"})
+            return json.dumps({"avgPx": "2"})
+
+        return place_live(
+            data_root=self.root,
+            spread_side="open_long",
+            base_coin="SOL",
+            signal_ts_ms=1_700_000_000_000,
+            okx_book=_book(2),
+            bybit_book=_book(2),
+            meta=_meta(
+                base_coin="SOL",
+                okx_symbol="SOL-USDT-SWAP",
+                bybit_symbol="SOLUSDT",
+            ),
+            sender=self.sender,
+            credentials=_creds(),
+            inst_id_code=193761,
+            intent_id=intent_id,
+            recv_fn=recv,
+        )
+
+    def test_uuid_intent_cl_ord_id_is_alphanumeric(self) -> None:
+        intent = "50db2540-3a43-4bb9-9972-5beda0d6a5d0"
+        dual = intent.replace("-", "")[:32]
+        result = self._place(intent)
+        self.assertTrue(result.completed, result.abort)
+        self.assertEqual(len(self.ws.sent), 2)
+        okx = json.loads(self.ws.sent[1])
+        cl = okx["args"][0]["clOrdId"]
+        self.assertEqual(cl, ("o" + dual)[:32])
+        self.assertTrue(cl.isalnum())
+        self.assertGreaterEqual(len(cl), 1)
+        self.assertLessEqual(len(cl), 32)
+        self.assertNotIn("-", cl)
+        bybit = json.loads(self.ws.sent[0])
+        link = bybit["args"][0]["orderLinkId"]
+        self.assertEqual(link, ("b" + dual)[:36])
+        self.assertNotIn("-", link)
+
+    def test_illegal_cl_ord_id_does_not_send(self) -> None:
+        result = self._place("bad id!!")
+        self.assertEqual(result.abort, "okx_cl_ord_id_illegal")
+        self.assertFalse(result.completed)
+        self.assertEqual(self.ws.sent, [])
+
+
 if __name__ == "__main__":
     unittest.main()

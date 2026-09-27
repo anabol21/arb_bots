@@ -338,6 +338,11 @@ def build_okx_ping() -> WsOutboundMessage:
     )
 
 
+def _okx_cl_ord_id(order_attempt_id: str) -> str:
+    """OKX ``clOrdId``: drop ``_`` and ``-``, then at most 32 characters."""
+    return str(order_attempt_id).replace("_", "").replace("-", "")[:32]
+
+
 def _require_okx_inst_id_code(code: object) -> int:
     """Fail-closed: OKX WS place/cancel requires a positive JSON integer instIdCode."""
     if isinstance(code, bool) or not isinstance(code, int) or code <= 0:
@@ -363,7 +368,7 @@ def build_okx_trade_place(
         "tdMode": "cross",
         "side": plan.side,
         "sz": plan.qty,
-        "clOrdId": plan.order_attempt_id.replace("_", "")[:32],
+        "clOrdId": _okx_cl_ord_id(plan.order_attempt_id),
     }
     if plan.position_side in {"long", "short"}:
         args_obj["posSide"] = plan.position_side
@@ -398,7 +403,7 @@ def build_okx_trade_cancel(
     args_obj: dict[str, object] = {
         "instId": plan.symbol,
         "instIdCode": code,
-        "clOrdId": plan.order_attempt_id.replace("_", "")[:32],
+        "clOrdId": _okx_cl_ord_id(plan.order_attempt_id),
     }
     frame = {
         "id": sanitize_okx_ws_id(req_id),

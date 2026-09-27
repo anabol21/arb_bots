@@ -7,6 +7,8 @@
 
 from __future__ import annotations
 
+import json
+import re
 from dataclasses import dataclass
 from typing import Any, Callable, Optional
 
@@ -27,8 +29,32 @@ class SendLegsResult:
     sent: int
 
 
+_OKX_CL_ORD_ID = re.compile(r"^[A-Za-z0-9]{1,32}$")
+
+
 def _both_up(coin: str, leg_up_fn: LegUpFn) -> bool:
     return bool(leg_up_fn("okx", coin) and leg_up_fn("bybit", coin))
+
+
+def _attempt_ids(intent_id: str) -> tuple[str, str, str]:
+    """Same shape as ``LiveBroker``: hyphen-free hex, not a raw uuid.
+
+    OKX ``clOrdId`` is ``o`` + hex, at most 32. Bybit ``orderLinkId`` is
+    ``b`` + hex, at most 36.
+    """
+    dual = str(intent_id).replace("-", "")[:32]
+    return f"b{dual}"[:36], f"o{dual}"[:32], dual
+
+
+def _frame_cl_ord_id(okx_text: str) -> str:
+    try:
+        data = json.loads(okx_text)
+        args = data.get("args") or []
+        if not args or not isinstance(args[0], dict):
+            return ""
+        return str(args[0].get("clOrdId") or "")
+    except (json.JSONDecodeError, TypeError, AttributeError):
+        return ""
 
 
 def _send_pair(
@@ -58,6 +84,7 @@ def _send_pair(
     if code is None:
         return SendLegsResult(abort="okx_inst_id_code_missing", sent=0)
     inst_id_code = code
+    bybit_attempt, okx_attempt, dual_id = _attempt_ids(intent_id)
     try:
         bybit_text, bybit_req, _ = build_signed_place_text(
             venue="bybit",
@@ -66,8 +93,8 @@ def _send_pair(
             qty=str(bybit_qty),
             credentials=credentials,
             reduce_only=reduce_only,
-            order_attempt_id=f"{intent_id}-by",
-            dual_leg_id=str(intent_id).replace("-", "")[:32],
+            order_attempt_id=bybit_attempt,
+            dual_leg_id=dual_id,
         )
         okx_text, okx_req, _ = build_signed_place_text(
             venue="okx",
@@ -77,11 +104,14 @@ def _send_pair(
             credentials=credentials,
             reduce_only=reduce_only,
             inst_id_code=inst_id_code,
-            order_attempt_id=f"{intent_id}-ok",
-            dual_leg_id=str(intent_id).replace("-", "")[:32],
+            order_attempt_id=okx_attempt,
+            dual_leg_id=dual_id,
         )
     except Exception as exc:  # noqa: BLE001 — fail closed, no send
         return SendLegsResult(abort=f"place_build_failed:{type(exc).__name__}", sent=0)
+    cl_ord_id = _frame_cl_ord_id(okx_text)
+    if _OKX_CL_ORD_ID.fullmatch(cl_ord_id) is None:
+        return SendLegsResult(abort="okx_cl_ord_id_illegal", sent=0)
     send_signed_dual(
         sender=sender,
         bybit_text=bybit_text,
@@ -90,7 +120,7 @@ def _send_pair(
         okx_req_id=okx_req,
         phase=phase,
         intent_id=intent_id,
-        dual_leg_id=str(intent_id).replace("-", "")[:32],
+        dual_leg_id=dual_id,
         signal_ts_ms=int(signal_ts_ms),
     )
     return SendLegsResult(abort=None, sent=2)
