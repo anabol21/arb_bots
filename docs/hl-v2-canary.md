@@ -1,5 +1,7 @@
 # HL v2 canary (sharded l2Book)
 
+> **Integration branch: `main_hl`.** Hyperliquid / HL scaling work lives on long-lived `main_hl` only. Open HL PRs against `main_hl`. Do **not** merge HL work into `main` without an explicit decision. Prod-next on `main` stays Bybit/OKX → `/data/live`.
+
 Isolated Track-1 experiment. **Not** prod-next. **Do not** write `/data/live`.
 
 ## What it is
