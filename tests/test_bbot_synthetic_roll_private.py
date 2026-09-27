@@ -453,54 +453,109 @@ class FillWaitTests(unittest.TestCase):
         clear_all()
 
     def test_stash_before_inbound_queue(self) -> None:
-        ack = json.dumps({"op": "order", "code": "0", "data": [{"fillPx": "2.5"}]})
-        sock = _QueueSock([json.dumps({"fillPx": "9"})])
+        cl = "o50db25403a434bb999725beda0d6a5"
+        ack = json.dumps(
+            {"op": "order", "code": "0", "data": [{"sCode": "0", "clOrdId": cl}]}
+        )
+        fill = json.dumps(
+            {
+                "arg": {"channel": "orders", "instId": "BTC-USDT-SWAP"},
+                "data": [{"clOrdId": cl, "fillPx": "2.5"}],
+            }
+        )
+        sock = _QueueSock([fill])
         runtime = _FrameRuntime(["ping", ack], sock, "okx")
-        body = drain_trade_fill(
+        waited = drain_trade_fill(
             lambda timeout_sec: read_warm_trade_frame(runtime, timeout_sec),
             exchange="okx",
             timeout_sec=1.0,
         )
-        self.assertEqual(body, ack)
-        self.assertEqual(sock.calls, 0)
+        self.assertEqual(waited.ack_body, ack)
+        self.assertEqual(waited.fill_body, fill)
+        self.assertEqual(waited.verdict, "accept")
+        self.assertIsInstance(waited.fill_wall_ms, int)
+        self.assertEqual(sock.calls, 1)
         self.assertFalse(hasattr(sock, "recv"))
 
     def test_reject_is_returned_before_a_later_fill(self) -> None:
         reject = json.dumps(
             {"code": "1", "data": [{"sCode": "51000", "sMsg": "Parameter clOrdId error"}]}
         )
-        sock = _QueueSock([json.dumps({"fillPx": "2.5"})])
+        sock = _QueueSock([json.dumps({"fillPx": "2.5", "clOrdId": "x"})])
         runtime = _FrameRuntime([reject], sock, "okx")
-        body = drain_trade_fill(
+        waited = drain_trade_fill(
             lambda timeout_sec: read_warm_trade_frame(runtime, timeout_sec),
             exchange="okx",
             timeout_sec=1.0,
         )
-        self.assertEqual(body, reject)
+        self.assertEqual(waited.verdict, "reject")
+        self.assertEqual(waited.ack_body, reject)
+        self.assertIsNone(waited.fill_body)
         self.assertEqual(sock.calls, 0)
 
-    def test_ack_then_fill_yields_both_prices(self) -> None:
-        okx_fill = json.dumps(
+    def test_orders_push_after_ack_completes_with_that_fill_px(self) -> None:
+        okx_cl = "o50db25403a434bb999725beda0d6a5"
+        okx_ord = "998877"
+        bybit_link = "b50db25403a434bb999725beda0d6a5d0"
+        okx_ack = json.dumps(
             {
+                "id": "1",
                 "op": "order",
                 "code": "0",
-                "data": [{"sCode": "0", "fillPx": "2.1", "accFillSz": "5"}],
+                "data": [{"sCode": "0", "clOrdId": okx_cl, "ordId": okx_ord}],
+            }
+        )
+        other = json.dumps(
+            {
+                "arg": {"channel": "orders", "instId": "ETH-USDT-SWAP"},
+                "data": [{"clOrdId": "someone-else", "ordId": "1", "fillPx": "9.9"}],
+            }
+        )
+        okx_fill = json.dumps(
+            {
+                "arg": {
+                    "channel": "orders",
+                    "instType": "SWAP",
+                    "instId": "BTC-USDT-SWAP",
+                },
+                "data": [
+                    {
+                        "clOrdId": okx_cl,
+                        "ordId": okx_ord,
+                        "fillPx": "2.1",
+                        "avgPx": "2.1",
+                        "accFillSz": "5",
+                        "state": "filled",
+                    }
+                ],
+            }
+        )
+        bybit_ack = json.dumps(
+            {
+                "op": "order.create",
+                "retCode": 0,
+                "retMsg": "OK",
+                "data": {"orderId": "77", "orderLinkId": bybit_link},
+            }
+        )
+        bybit_fill = json.dumps(
+            {
+                "topic": "execution",
+                "data": [
+                    {
+                        "orderId": "77",
+                        "orderLinkId": bybit_link,
+                        "execPrice": "2.2",
+                    }
+                ],
             }
         )
         queues = {
-            "okx": [
-                "pong",
-                okx_fill,
-            ],
-            "bybit": [
-                json.dumps({"op": "pong"}),
-                json.dumps(
-                    {"retCode": 0, "op": "order.create", "data": [{"avgPx": "2.2"}]}
-                ),
-            ],
+            "okx": ["pong", okx_ack, other, okx_fill],
+            "bybit": [json.dumps({"op": "pong"}), bybit_ack, bybit_fill],
         }
 
-        def recv(venue: str) -> str | None:
+        def recv(venue: str) -> object:
             frames = queues[venue]
 
             def read(_timeout: float) -> str:
@@ -510,11 +565,12 @@ class FillWaitTests(unittest.TestCase):
 
             return drain_trade_fill(read, exchange=venue, timeout_sec=1.0)
 
+        signal_ts = 1_700_000_000_000
         result = place_live(
             data_root=self.root,
             spread_side="open_long",
             base_coin="BTC",
-            signal_ts_ms=1_700_000_000_000,
+            signal_ts_ms=signal_ts,
             okx_book=_book(2),
             bybit_book=_book(2),
             meta=_meta(),
@@ -524,15 +580,25 @@ class FillWaitTests(unittest.TestCase):
             recv_fn=recv,
         )
         self.assertTrue(result.completed)
+        self.assertIsNone(result.abort)
         self.assertEqual(result.okx_fill_px, "2.1")
         self.assertEqual(result.bybit_fill_px, "2.2")
+        self.assertEqual(result.latency_ms, result.fill_ts_ms - signal_ts)
         self.assertEqual(len(self.ws.sent), 2)
         rows = _read(theta_trades_jsonl_path(self.root, "2023-11-14"))
-        okx_msg = next(r for r in rows if r.get("venue") == "okx")
-        self.assertEqual(okx_msg["fields"]["fillPx"], "2.1")
-        self.assertEqual(okx_msg["fields"]["accFillSz"], "5")
-        self.assertEqual(okx_msg["fields"]["sCode"], "0")
-        self.assertEqual(okx_msg["body"], okx_fill)
+        self.assertIn("open", [r.get("status") for r in rows])
+        okx_ack_row = next(
+            r for r in rows if r.get("venue") == "okx" and r.get("venue_verdict") == "accept"
+        )
+        self.assertEqual(okx_ack_row["body"], okx_ack)
+        self.assertNotIn("fillPx", okx_ack_row.get("fields", {}))
+        okx_fill_row = next(
+            r for r in rows if r.get("venue") == "okx" and r.get("body") == okx_fill
+        )
+        self.assertEqual(okx_fill_row["fields"]["fillPx"], "2.1")
+        self.assertEqual(okx_fill_row["fields"]["accFillSz"], "5")
+        self.assertIsInstance(okx_fill_row["wall_ms"], int)
+        self.assertGreaterEqual(result.fill_ts_ms, okx_fill_row["wall_ms"])
 
     def test_accepted_without_fill_px_is_not_partial_fill(self) -> None:
         okx_body = json.dumps({"op": "order", "code": "0", "data": [{"sCode": "0"}]})

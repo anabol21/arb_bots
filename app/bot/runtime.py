@@ -499,6 +499,7 @@ class BotRuntime:
             place_live,
             read_warm_trade_frame,
         )
+        from app.bot.private.send_legs import _attempt_ids
         from app.bot.private.ws_trivial_dual_leg import (
             TrivialDualSender,
             warm_trade_send_fn,
@@ -529,15 +530,17 @@ class BotRuntime:
                 return session.okx_runtime
             raise ValueError(f"recv venue must be bybit|okx, got {venue!r}")
 
-        def _recv(venue: str) -> Optional[str]:
+        def _recv(venue: str) -> Any:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 return None
             runtime = _runtime_for(venue)
+            bybit_id, okx_id, _dual = _attempt_ids(str(kwargs.get("intent_id") or ""))
             return drain_trade_fill(
                 lambda timeout_sec: read_warm_trade_frame(runtime, timeout_sec),
                 exchange=str(getattr(runtime, "exchange", venue)),
                 timeout_sec=remaining,
+                order_ids={bybit_id, okx_id},
             )
 
         # Holds place-inflight so reconnect does not drop the sockets and a

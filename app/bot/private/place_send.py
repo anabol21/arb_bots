@@ -1,13 +1,14 @@
 """Thin synthetic_roll place path. Not ``LiveBroker.place``.
 
 Order: preprocess (sides + shared coin qty) → send_long/send_short → journal
-``pending`` → wait for each venue's order answer → journal the raw body and
-the fields that message actually contains → completed row only when both
-answers are accepted and both ``fillPx``/``avgPx`` are in those messages.
+``pending`` → read the place ack → keep reading the already-subscribed private
+orders/execution push for that order → journal each raw body. The ack does not
+finish the trade. ``open`` / ``closed`` is written only when the later push
+has the fill price. No REST query and no second order request.
 
-An accept with no fill price is not ``partial_fill``; the slot stays pending.
-A frame that is not an accept is a reject, and the venue message is kept.
-No order answer before the deadline stays ``partial_fill``.
+An accept whose fill push misses the bound stays pending and is not
+``partial_fill``. A reject stops immediately. No order answer before the
+deadline stays ``partial_fill``.
 
 Local mode uses the same journal and chrono steps. Fill prices come from the
 signal books. No sockets.
@@ -93,7 +94,21 @@ def _append_trade_rows(data_root: Path, rows: list[Mapping[str, Any]]) -> None:
             os.fsync(fh.fileno())
 
 
-_PARSED_KEYS = ("fillPx", "avgPx", "accFillSz", "code", "sCode", "retCode", "sMsg", "retMsg")
+_PARSED_KEYS = (
+    "fillPx",
+    "avgPx",
+    "accFillSz",
+    "execPrice",
+    "avgPrice",
+    "code",
+    "sCode",
+    "retCode",
+    "sMsg",
+    "retMsg",
+)
+_OKX_PX_KEYS = ("fillPx", "avgPx")
+_BYBIT_PX_KEYS = ("execPrice", "avgPrice", "fillPx", "avgPx")
+_ORDER_ID_KEYS = ("clOrdId", "ordId", "orderId", "orderLinkId")
 
 
 def _is_zero_code(val: object) -> bool:
@@ -131,40 +146,71 @@ def _present_fields(data: Mapping[str, Any]) -> dict[str, Any]:
     return found
 
 
-def _fill_px(body: Optional[str]) -> Optional[str]:
+def _fill_px(body: Optional[str], exchange: str = "okx") -> Optional[str]:
     data = _parse_json_obj(body)
     if data is None:
         return None
     fields = _present_fields(data)
-    for key in ("fillPx", "avgPx"):
+    keys = _BYBIT_PX_KEYS if str(exchange).strip().lower() == "bybit" else _OKX_PX_KEYS
+    for key in keys:
         val = fields.get(key)
         if val not in (None, ""):
             return str(val)
     return None
 
 
+def _frame_order_ids(body: Optional[str]) -> set[str]:
+    data = _parse_json_obj(body)
+    if data is None:
+        return set()
+    found: set[str] = set()
+
+    def walk(node: object) -> None:
+        if isinstance(node, dict):
+            for key, val in node.items():
+                if key in _ORDER_ID_KEYS and val not in (None, ""):
+                    found.add(str(val))
+                else:
+                    walk(val)
+        elif isinstance(node, list):
+            for item in node:
+                walk(item)
+
+    walk(data)
+    return found
+
+
 def classify_order_answer(exchange: str, body: Optional[str]) -> Optional[str]:
-    """``accept`` or ``reject`` for an order answer. ``None`` is not one.
+    """``accept`` or ``reject`` for a place ack. ``None`` is not one.
 
-    Classification uses the response code only. Fill fields are a later parse
-    of the same message.
-
-    OKX accepted: top-level ``code`` is ``0`` and ``data[0].sCode`` is ``0``
-    or absent. Bybit accepted: ``retCode`` is ``0``. Any other order answer
-    is a reject.
+    The orders/execution push is not an ack. OKX accepted: top-level ``code``
+    is ``0`` and ``data[0].sCode`` is ``0`` or absent. Bybit accepted:
+    ``retCode`` is ``0`` on ``order.create``. Any other place ack is a reject.
     """
     data = _parse_json_obj(body)
     if data is None:
         return None
     venue = str(exchange).strip().lower()
+    event = str(data.get("event") or "")
+    if event in {"subscribe", "login", "channel-conn-count", "notice"}:
+        return None
     if venue == "bybit":
+        op = str(data.get("op") or "")
+        if op in {"subscribe", "auth", "ping", "pong"}:
+            return None
+        topic = str(data.get("topic") or "")
+        if topic.startswith("order") or topic.startswith("execution"):
+            return None
         if "retCode" not in data:
-            if str(data.get("event") or "") == "error":
+            if event == "error":
                 return "reject"
             return None
         return "accept" if _is_zero_code(data.get("retCode")) else "reject"
+    arg = data.get("arg")
+    if isinstance(arg, dict) and str(arg.get("channel") or "") == "orders":
+        return None
     if "code" not in data:
-        if str(data.get("event") or "") == "error":
+        if event == "error":
             return "reject"
         return None
     if not _is_zero_code(data.get("code")):
@@ -176,23 +222,51 @@ def classify_order_answer(exchange: str, body: Optional[str]) -> Optional[str]:
     return "accept"
 
 
+def _is_matching_fill(exchange: str, body: str, known_ids: set[str]) -> bool:
+    """Later private push for this order, with a fill price. Not the place ack."""
+    if classify_order_answer(exchange, body) is not None:
+        return False
+    if not _fill_px(body, exchange):
+        return False
+    if not known_ids:
+        return False
+    return bool(_frame_order_ids(body) & known_ids)
+
+
+@dataclass
+class VenueWaitResult:
+    """Place ack plus the later fill push, if it arrived before the bound."""
+
+    ack_body: Optional[str] = None
+    fill_body: Optional[str] = None
+    verdict: Optional[str] = None
+    ack_wall_ms: Optional[int] = None
+    fill_wall_ms: Optional[int] = None
+
+
 def drain_trade_fill(
     read_frame: ReadFrameFn,
     *,
     exchange: str,
     timeout_sec: float = SYNTHETIC_FILL_WAIT_SEC,
-) -> Optional[str]:
-    """Read until an order answer, or the deadline.
+    order_ids: Optional[set[str]] = None,
+) -> VenueWaitResult:
+    """Read the place ack, then the matching orders/execution push.
 
     ``read_frame(timeout_sec)`` raises ``TimeoutError`` when no frame is ready.
-    Ping/pong is skipped. The first accept or reject is returned before any
-    price lookup. ``None`` means no order answer arrived, so the caller keeps
-    ``partial_fill``.
+    Ping/pong is skipped. An accept is recorded and does not finish the wait.
+    The fill is a later frame with ``fillPx``/``avgPx`` (Bybit ``execPrice`` or
+    ``avgPrice``) whose ``clOrdId`` or ``ordId`` matches the ack or ``order_ids``.
+    A reject stops immediately. No ack before the deadline leaves both bodies
+    empty so the caller keeps ``partial_fill``. An accept with no fill push
+    leaves ``fill_body`` empty.
     """
     from app.bot.private.ws_private import is_ws_noise_frame
 
     deadline = time.monotonic() + float(timeout_sec)
     venue = str(exchange).strip().lower()
+    known = {str(item) for item in (order_ids or set()) if str(item)}
+    result = VenueWaitResult()
     while time.monotonic() < deadline:
         remaining = deadline - time.monotonic()
         if remaining <= 0:
@@ -205,9 +279,27 @@ def drain_trade_fill(
             continue
         if is_ws_noise_frame(venue, raw):
             continue
-        if classify_order_answer(venue, raw) is not None:
-            return raw
-    return None
+        now_ms = int(time.time() * 1000)
+        verdict = classify_order_answer(venue, raw)
+        if verdict == "reject":
+            result.ack_body = raw
+            result.verdict = "reject"
+            result.ack_wall_ms = now_ms
+            return result
+        if verdict == "accept" and result.ack_body is None:
+            result.ack_body = raw
+            result.verdict = "accept"
+            result.ack_wall_ms = now_ms
+            known |= _frame_order_ids(raw)
+            if result.fill_body and _is_matching_fill(venue, result.fill_body, known):
+                return result
+            continue
+        if _is_matching_fill(venue, raw, known):
+            result.fill_body = raw
+            result.fill_wall_ms = now_ms
+            if result.verdict == "accept":
+                return result
+    return result
 
 
 def read_warm_trade_frame(runtime: Any, timeout_sec: float) -> str:
@@ -227,6 +319,27 @@ def read_warm_trade_frame(runtime: Any, timeout_sec: float) -> str:
     if sock is None:
         raise TimeoutError("trade socket missing")
     return str(sock.recv_text(timeout_sec=timeout_sec))
+
+
+def _frames_from_recv(
+    venue: str, raw: object
+) -> list[tuple[str, str, Optional[int], str, Optional[str]]]:
+    """Normalize one recv result into ``(venue, body, wall_ms, kind, verdict)``."""
+    if isinstance(raw, VenueWaitResult):
+        out: list[tuple[str, str, Optional[int], str, Optional[str]]] = []
+        if raw.ack_body:
+            out.append((venue, raw.ack_body, raw.ack_wall_ms, "ack", raw.verdict))
+        if raw.fill_body:
+            out.append((venue, raw.fill_body, raw.fill_wall_ms, "fill", None))
+        return out
+    if not isinstance(raw, str) or not raw:
+        return []
+    verdict = classify_order_answer(venue, raw)
+    if verdict is not None:
+        return [(venue, raw, int(time.time() * 1000), "ack", verdict)]
+    if _fill_px(raw, venue):
+        return [(venue, raw, int(time.time() * 1000), "fill", None)]
+    return [(venue, raw, None, "other", None)]
 
 
 def _book_body(venue: str, px: object) -> str:
@@ -347,24 +460,25 @@ def _place(
     chrono.enter("wait_fill")
     if wait_fn is not None:
         wait_fn()
-    bodies: list[tuple[str, str]] = []
+    seen: list[tuple[str, str, Optional[int], str, Optional[str]]] = []
     if transport == "local":
-        bodies = [
-            ("okx", _book_body("okx", okx_px)),
-            ("bybit", _book_body("bybit", bybit_px)),
+        now_ms = int(time.time() * 1000)
+        seen = [
+            ("okx", _book_body("okx", okx_px), now_ms, "fill", None),
+            ("bybit", _book_body("bybit", bybit_px), now_ms, "fill", None),
         ]
     elif recv_fn is not None:
         for venue in ("okx", "bybit"):
-            body = recv_fn(venue)
-            if body:
-                bodies.append((venue, body))
+            seen.extend(_frames_from_recv(venue, recv_fn(venue)))
     chrono.exit("wait_fill")
     chrono.flush()
 
     venue_rows: list[dict[str, Any]] = []
     verdicts: dict[str, Optional[str]] = {}
-    for venue, body in bodies:
-        chrono.venue_message(venue)
+    fill_px: dict[str, Optional[str]] = {}
+    fill_wall: dict[str, Optional[int]] = {}
+    for venue, body, wall_ms, kind, verdict in seen:
+        chrono.venue_message(venue, wall_ms=wall_ms)
         row: dict[str, Any] = {
             "schema_version": "bbot.synthetic_roll.v1",
             "intent_id": iid,
@@ -374,49 +488,55 @@ def _place(
             "signal_ts_ms": int(signal_ts_ms),
             "base_coin": coin,
         }
+        if wall_ms is not None:
+            row["wall_ms"] = int(wall_ms)
         parsed = _parse_json_obj(body)
         if parsed is not None:
             fields = _present_fields(parsed)
             if fields:
                 row["fields"] = fields
-        verdict = classify_order_answer(venue, body)
+        if verdict is None and kind == "ack":
+            verdict = classify_order_answer(venue, body)
         if verdict is not None:
             row["venue_verdict"] = verdict
-        verdicts[venue] = verdict
+            verdicts[venue] = verdict
+        if kind == "fill":
+            px = _fill_px(body, venue)
+            if px:
+                fill_px[venue] = px
+                fill_wall[venue] = wall_ms
         venue_rows.append(row)
     if venue_rows:
         _append_trade_rows(data_root, venue_rows)
     chrono.flush()
 
-    px = {venue: _fill_px(body) for venue, body in bodies}
-    okx_fill = px.get("okx")
-    bybit_fill = px.get("bybit")
+    okx_fill = fill_px.get("okx")
+    bybit_fill = fill_px.get("bybit")
     okx_verdict = verdicts.get("okx")
     bybit_verdict = verdicts.get("bybit")
     if okx_verdict == "reject" or bybit_verdict == "reject":
         both_reject = okx_verdict == "reject" and bybit_verdict == "reject"
         return _abort("venue_reject", keep_pending=not both_reject)
-    if okx_verdict == "accept" and bybit_verdict == "accept" and (
-        not okx_fill or not bybit_fill
-    ):
-        chrono.abort("accepted_no_fill")
-        chrono.flush()
-        return PlaceSendResult(
-            abort=None,
-            completed=False,
-            keep_pending=True,
-            status="accepted",
-            okx_fill_px=okx_fill,
-            bybit_fill_px=bybit_fill,
-            coin_qty=coin_qty,
-            base_coin=coin,
-            side=pos_side,
-            intent_id=iid,
-        )
-    if not okx_fill or not bybit_fill:
+    if not (okx_fill and bybit_fill):
+        if okx_verdict == "accept" or bybit_verdict == "accept":
+            chrono.abort("accepted_no_fill")
+            chrono.flush()
+            return PlaceSendResult(
+                abort=None,
+                completed=False,
+                keep_pending=True,
+                status="accepted",
+                okx_fill_px=okx_fill,
+                bybit_fill_px=bybit_fill,
+                coin_qty=coin_qty,
+                base_coin=coin,
+                side=pos_side,
+                intent_id=iid,
+            )
         return _abort("partial_fill", keep_pending=True)
 
-    fill_ts = int(time.time() * 1000)
+    walls = [w for w in (fill_wall.get("okx"), fill_wall.get("bybit")) if w is not None]
+    fill_ts = max(walls) if walls else int(time.time() * 1000)
     if fill_ts < int(signal_ts_ms):
         fill_ts = int(signal_ts_ms)
     latency = int(fill_ts) - int(signal_ts_ms)

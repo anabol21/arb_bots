@@ -69,8 +69,10 @@ class StepChrono:
         self.enter("abort")
         self.exit("abort", reason=str(reason))
 
-    def venue_message(self, venue: str) -> None:
+    def venue_message(self, venue: str, *, wall_ms: Optional[int] = None) -> None:
         wall, mono = self._stamp()
+        if wall_ms is not None:
+            wall = int(wall_ms)
         self._rows.append(
             {
                 "intent_id": self.intent_id,
