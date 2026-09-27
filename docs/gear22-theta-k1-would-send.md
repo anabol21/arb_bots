@@ -70,7 +70,7 @@ slip_spread = signal_spread − fill_spread
 
 ### PnL (close only, would_send)
 
-- `pnl_spread ≈ open_fill_spread − close_fill_spread` (pct points).
+- `pnl_spread ≈ open_fill_spread + close_fill_spread` (pct points; close fill is already the opposite-side formula).
 - `pnl_usdt_approx ≈ pnl_spread/100 * notional` (proxy only; not venue PnL).
 
 ## Schema `bbot.theta_trade.v1`

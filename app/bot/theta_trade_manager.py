@@ -1061,10 +1061,10 @@ class ThetaTradeManager:
                     okx_f, bybit_f, opposite_side(pos.side)
                 )
                 open_spread = pos.open_fill_spread
-                # would_send PnL proxy: open edge − close edge (pct points).
+                # would_send PnL proxy: open-side fill + opposite-side close fill (pct points).
                 pnl_spread = None
                 if open_spread is not None and close_spread is not None:
-                    pnl_spread = float(open_spread) - float(close_spread)
+                    pnl_spread = float(open_spread) + float(close_spread)
                 pnl_fields = {
                     "open_fill_spread": open_spread,
                     "close_fill_spread": close_spread,
@@ -1274,7 +1274,7 @@ class ThetaTradeManager:
                 open_spread = pos.open_fill_spread if pos is not None else None
                 pnl_spread = None
                 if open_spread is not None and close_spread is not None:
-                    pnl_spread = float(open_spread) - float(close_spread)
+                    pnl_spread = float(open_spread) + float(close_spread)
                 pnl_fields = {
                     "open_fill_spread": open_spread,
                     "close_fill_spread": close_spread,
@@ -1539,7 +1539,7 @@ class ThetaTradeManager:
                 open_spread = pos.open_fill_spread
                 pnl_spread = None
                 if open_spread is not None and close_spread is not None:
-                    pnl_spread = float(open_spread) - float(close_spread)
+                    pnl_spread = float(open_spread) + float(close_spread)
                 pnl_fields = {
                     "open_fill_spread": open_spread,
                     "close_fill_spread": close_spread,
