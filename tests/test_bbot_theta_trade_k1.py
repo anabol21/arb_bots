@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ast
+import asyncio
 import json
 import tempfile
 import unittest
@@ -19,7 +20,9 @@ from app.bot.paths import resolve_data_root
 from app.bot.theta_screener import ThetaSnapshot
 from app.bot.theta_trade_manager import (
     SCHEMA_VERSION,
+    OpenPosition,
     SlotState,
+    ThetaDecision,
     ThetaTradeConfig,
     ThetaTradeJournalWriter,
     ThetaTradeManager,
@@ -227,6 +230,349 @@ class DecideK1Tests(unittest.TestCase):
         )
         self.assertEqual(d.action, "skip")
         self.assertEqual(d.reject_reason, "insufficient_size")
+        self.assertEqual(d.size_event, "open")
+
+    def test_close_size_reject_uses_flatten_legs(self) -> None:
+        slot = SlotState(position=_held_long())
+        params = _close_params()
+        # Open legs (OKX ask / Bybit bid) are deep. Flatten legs are thin.
+        quotes = {
+            "SOL": _books(
+                okx_bid=100.5,
+                bybit_ask=100.0,
+                okx_ask_sz=10.0,
+                bybit_bid_sz=10.0,
+                okx_bid_sz=0.0001,
+                bybit_ask_sz=0.0001,
+            )
+        }
+        d = decide_theta_k1(
+            _close_snaps(),
+            slot=slot,
+            thr=0.2,
+            quotes=quotes,
+            notional_usdt=100.0,
+            policy_params=params,
+        )
+        self.assertEqual(d.action, "skip")
+        self.assertEqual(d.reject_reason, "insufficient_size")
+        self.assertEqual(d.size_event, "close")
+        self.assertIsNotNone(d.size_info)
+        assert d.size_info is not None
+        self.assertFalse(d.size_info["size_ok"])
+        self.assertEqual(d.size_info["okx_leg_side"], "sell")
+        self.assertEqual(d.size_info["bybit_leg_side"], "buy")
+        self.assertAlmostEqual(d.size_info["okx_available_size"], 0.0001)
+        self.assertAlmostEqual(d.size_info["bybit_available_size"], 0.0001)
+        self.assertIsNotNone(slot.position)
+
+    def test_close_uses_flatten_legs_not_open_legs(self) -> None:
+        # Open legs are thin; flatten legs (OKX bid / Bybit ask) are deep.
+        quotes = {
+            "SOL": _books(
+                okx_bid=100.5,
+                bybit_ask=100.0,
+                okx_ask_sz=0.0001,
+                bybit_bid_sz=0.0001,
+                okx_bid_sz=10.0,
+                bybit_ask_sz=10.0,
+            )
+        }
+        d = decide_theta_k1(
+            _close_snaps(),
+            slot=SlotState(position=_held_long()),
+            thr=0.2,
+            quotes=quotes,
+            notional_usdt=100.0,
+            policy_params=_close_params(),
+        )
+        self.assertEqual(d.action, "close")
+        self.assertEqual(d.reason, "close_min_profit")
+        self.assertEqual(d.size_event, "close")
+        assert d.size_info is not None
+        self.assertTrue(d.size_info["size_ok"])
+        self.assertEqual(d.size_info["okx_leg_side"], "sell")
+        self.assertAlmostEqual(d.size_info["okx_available_size"], 10.0)
+
+
+def _close_params():
+    from research.gear22_backtest.policy import PolicyParams
+
+    return PolicyParams(
+        theta_open=0.50,
+        p50_open=0.60,
+        min_profit_pp=0.0,
+        min_theta_close=0.05,
+        fee_round_trip_pp=0.30,
+    )
+
+
+def _held_long(coin: str = "SOL") -> OpenPosition:
+    return OpenPosition(
+        trade_id="t1",
+        base_coin=coin,
+        side="long",
+        open_signal_ts_ms=1,
+        open_fill_ts_ms=71,
+        open_fill_spread=0.3,
+        open_notional=100.0,
+        open_theta_1m=0.3,
+        fill_spread_pp=0.3,
+    )
+
+
+def _close_snaps(coin: str = "SOL") -> list[ThetaSnapshot]:
+    return [
+        _snap(coin, "long", 0.30, p50_1m=0.80, floor=0.50),
+        _snap(coin, "short", 0.60, p50_1m=1.20, floor=0.60),
+    ]
+
+
+class CloseSizeGateTests(unittest.TestCase):
+    def _manager(
+        self,
+        *,
+        live_send: bool = False,
+        place_fn=None,
+        slept: list[float] | None = None,
+    ) -> ThetaTradeManager:
+        tmp = Path(tempfile.mkdtemp())
+        slept = slept if slept is not None else []
+        kwargs = {}
+        if live_send:
+            kwargs = {
+                "live_send": True,
+                "place_fn": place_fn,
+                "meta_fn": lambda _coin: {"ok": True},
+            }
+        mgr = ThetaTradeManager(
+            data_root=tmp,
+            config=ThetaTradeConfig(
+                fill_delay_ms=70,
+                notional_usdt=100.0,
+                policy_params=_close_params(),
+            ),
+            sleep_fn=lambda seconds: slept.append(seconds),
+            **kwargs,
+        )
+        mgr.slot.position = _held_long()
+        return mgr
+
+    def test_thin_close_keeps_position_until_later_emit(self) -> None:
+        slept: list[float] = []
+        mgr = self._manager(slept=slept)
+        thin = {
+            "SOL": _books(
+                okx_bid=100.5,
+                bybit_ask=100.0,
+                okx_ask_sz=10.0,
+                bybit_bid_sz=10.0,
+                okx_bid_sz=0.0001,
+                bybit_ask_sz=0.0001,
+            )
+        }
+        rows = mgr.on_theta_snapshots(_close_snaps(), quotes=thin, now_ms=1_000_000)
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["event"], "skip")
+        self.assertEqual(rows[0]["reject_reason"], "insufficient_size")
+        self.assertFalse(rows[0]["would_send"])
+        self.assertFalse(rows[0]["send"])
+        self.assertIsNotNone(mgr.slot.position)
+        self.assertEqual(mgr.slot.position.trade_id, "t1")
+        self.assertFalse(mgr.slot.pending)
+        self.assertEqual(slept, [])
+
+        fat = {"SOL": _books(okx_bid=100.5, bybit_ask=100.0)}
+        rows2 = mgr.on_theta_snapshots(_close_snaps(), quotes=fat, now_ms=2_000_000)
+        self.assertEqual(len(rows2), 1)
+        self.assertEqual(rows2[0]["event"], "close")
+        self.assertEqual(rows2[0]["trade_id"], "t1")
+        self.assertTrue(rows2[0]["would_send"])
+        self.assertEqual(slept, [0.07])
+        self.assertIsNone(mgr.slot.position)
+
+    def test_live_close_reject_does_not_place(self) -> None:
+        slept: list[float] = []
+        calls: list[dict] = []
+
+        def _place(**kwargs):
+            calls.append(kwargs)
+            return None
+
+        mgr = self._manager(live_send=True, place_fn=_place, slept=slept)
+        quotes = {
+            "SOL": _books(
+                okx_bid=100.5,
+                bybit_ask=100.0,
+                okx_bid_sz=0.0001,
+                bybit_ask_sz=0.0001,
+            )
+        }
+        rows = mgr.on_theta_snapshots(_close_snaps(), quotes=quotes, now_ms=5_000)
+        self.assertEqual(rows[0]["event"], "skip")
+        self.assertEqual(rows[0]["reject_reason"], "insufficient_size")
+        self.assertFalse(rows[0]["would_send"])
+        self.assertEqual(calls, [])
+        self.assertEqual(slept, [])
+        self.assertEqual(mgr.slot.position.trade_id, "t1")
+
+    def test_execute_rechecks_close_size(self) -> None:
+        slept: list[float] = []
+        mgr = self._manager(slept=slept)
+        decision = ThetaDecision(
+            action="close",
+            base_coin="SOL",
+            side="long",
+            reason="close_min_profit",
+            size_info={"size_ok": False},
+        )
+        rows = mgr.execute_decision(
+            decision,
+            snapshots=_close_snaps(),
+            quotes={"SOL": _books(okx_bid=100.5, bybit_ask=100.0)},
+            now_ms=3_000,
+        )
+        self.assertEqual(rows[0]["event"], "skip")
+        self.assertEqual(rows[0]["reject_reason"], "insufficient_size")
+        self.assertFalse(rows[0]["would_send"])
+        self.assertEqual(slept, [])
+        self.assertEqual(mgr.slot.position.trade_id, "t1")
+
+    def test_execute_close_without_size_info_uses_flatten_legs(self) -> None:
+        slept: list[float] = []
+        mgr = self._manager(slept=slept)
+        decision = ThetaDecision(
+            action="close",
+            base_coin="SOL",
+            side="long",
+            reason="close_min_profit",
+        )
+        quotes = {
+            "SOL": _books(
+                okx_bid=100.5,
+                bybit_ask=100.0,
+                okx_ask_sz=50.0,
+                bybit_bid_sz=40.0,
+                okx_bid_sz=0.01,
+                bybit_ask_sz=0.02,
+            )
+        }
+        rows = mgr.execute_decision(
+            decision,
+            snapshots=_close_snaps(),
+            quotes=quotes,
+            now_ms=4_000,
+        )
+        self.assertEqual(rows[0]["reject_reason"], "insufficient_size")
+        self.assertFalse(rows[0]["would_send"])
+        self.assertAlmostEqual(rows[0]["signal_okx_available_size"], 0.01)
+        self.assertAlmostEqual(rows[0]["signal_bybit_available_size"], 0.02)
+        self.assertEqual(slept, [])
+        self.assertEqual(mgr.slot.position.trade_id, "t1")
+
+    def test_async_execute_rechecks_close_size(self) -> None:
+        slept: list[float] = []
+        mgr = self._manager(slept=slept)
+        decision = ThetaDecision(
+            action="close",
+            base_coin="SOL",
+            side="long",
+            reason="close_min_profit",
+            size_info={"size_ok": False},
+        )
+
+        async def _run():
+            return await mgr._execute_decision_async(  # noqa: SLF001
+                decision,
+                snapshots=_close_snaps(),
+                quotes={"SOL": _books(okx_bid=100.5, bybit_ask=100.0)},
+                now_ms=6_000,
+            )
+
+        rows = asyncio.run(_run())
+        self.assertEqual(rows[0]["event"], "skip")
+        self.assertEqual(rows[0]["reject_reason"], "insufficient_size")
+        self.assertFalse(rows[0]["would_send"])
+        self.assertEqual(slept, [])
+        self.assertEqual(mgr.slot.position.trade_id, "t1")
+        self.assertFalse(mgr.slot.pending)
+
+    def test_skip_journal_fallback_uses_close_legs(self) -> None:
+        from research.gear22_backtest.policy import Decision
+
+        quotes = {
+            "SOL": _books(
+                okx_bid=100.5,
+                bybit_ask=100.0,
+                okx_ask_sz=50.0,
+                bybit_bid_sz=40.0,
+                okx_bid_sz=0.01,
+                bybit_ask_sz=0.02,
+            )
+        }
+        cases = [
+            ThetaDecision(
+                action="skip",
+                base_coin="SOL",
+                side="long",
+                reason="reject",
+                reject_reason="insufficient_size",
+                size_event="close",
+            ),
+            ThetaDecision(
+                action="skip",
+                base_coin="SOL",
+                side="long",
+                reason="reject",
+                reject_reason="insufficient_size",
+                policy_decision=Decision(action="close", reason="close_min_profit"),
+            ),
+            ThetaDecision(
+                action="skip",
+                base_coin="SOL",
+                side="long",
+                reason="reject",
+                reject_reason="insufficient_size",
+            ),
+        ]
+        for decision in cases:
+            slept: list[float] = []
+            mgr = self._manager(slept=slept)
+            rows = mgr.execute_decision(
+                decision,
+                snapshots=_close_snaps(),
+                quotes=quotes,
+                now_ms=7_000,
+            )
+            self.assertEqual(rows[0]["event"], "skip")
+            self.assertEqual(rows[0]["reject_reason"], "insufficient_size")
+            self.assertFalse(rows[0]["would_send"])
+            self.assertAlmostEqual(rows[0]["signal_okx_available_size"], 0.01)
+            self.assertAlmostEqual(rows[0]["signal_bybit_available_size"], 0.02)
+            self.assertEqual(mgr.slot.position.trade_id, "t1")
+            self.assertEqual(slept, [])
+
+        # Open reject with no held coin still measures the open legs.
+        flat = ThetaTradeManager(
+            data_root=Path(tempfile.mkdtemp()),
+            config=ThetaTradeConfig(fill_delay_ms=70, notional_usdt=100.0),
+            sleep_fn=lambda _s: None,
+        )
+        rows = flat.execute_decision(
+            ThetaDecision(
+                action="skip",
+                base_coin="SOL",
+                side="long",
+                reason="reject",
+                reject_reason="insufficient_size",
+            ),
+            snapshots=_close_snaps(),
+            quotes=quotes,
+            now_ms=8_000,
+        )
+        self.assertFalse(rows[0]["would_send"])
+        self.assertAlmostEqual(rows[0]["signal_okx_available_size"], 50.0)
+        self.assertAlmostEqual(rows[0]["signal_bybit_available_size"], 40.0)
 
 
 class SlipAndFillTests(unittest.TestCase):

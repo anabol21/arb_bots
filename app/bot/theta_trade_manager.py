@@ -502,6 +502,33 @@ class ThetaDecision:
     size_info: Optional[dict[str, Any]] = None
     potential_pp: Optional[float] = None
     policy_decision: Optional[PolicyDecision] = None
+    # ``open`` or ``close``: which size_check produced an insufficient_size skip.
+    size_event: Optional[str] = None
+
+
+def insufficient_size_event(
+    decision: ThetaDecision,
+    *,
+    held: Optional[OpenPosition] = None,
+) -> str:
+    """Size-check event for an ``insufficient_size`` skip fallback.
+
+    Close rejects use the flatten legs (``event="close"``). Open rejects use
+    the open legs. A held slot for the same coin and side is a close reject
+    when the decision does not already name the event.
+    """
+    explicit = str(decision.size_event or "").strip().lower()
+    if explicit in ("open", "close"):
+        return explicit
+    pd = decision.policy_decision
+    if pd is not None and str(getattr(pd, "action", "")).strip().lower() == "close":
+        return "close"
+    if held is not None:
+        same_coin = str(held.base_coin).upper() == str(decision.base_coin).upper()
+        same_side = str(held.side).strip().lower() == str(decision.side).strip().lower()
+        if same_coin and same_side:
+            return "close"
+    return "open"
 
 
 def decide_theta_k1(
@@ -571,6 +598,20 @@ def decide_theta_k1(
             pot_pp = potential_profit_pp(feat, state, params.fee_round_trip_pp)
             own = by_key.get((pos.base_coin, pos.side))
             opp = by_key.get((pos.base_coin, opposite_side(pos.side)))
+            if not size_info["size_ok"]:
+                return ThetaDecision(
+                    action="skip",
+                    base_coin=pos.base_coin,
+                    side=pos.side,
+                    reason="reject",
+                    theta_1m=own.theta_1m if own else None,
+                    opposite_theta_1m=opp.theta_1m if opp else None,
+                    reject_reason="insufficient_size",
+                    size_info=size_info,
+                    potential_pp=pot_pp,
+                    policy_decision=pd,
+                    size_event="close",
+                )
             return ThetaDecision(
                 action="close",
                 base_coin=pos.base_coin,
@@ -581,6 +622,7 @@ def decide_theta_k1(
                 size_info=size_info,
                 potential_pp=pot_pp,
                 policy_decision=pd,
+                size_event="close",
             )
         
         own = by_key.get((pos.base_coin, pos.side))
@@ -655,6 +697,7 @@ def decide_theta_k1(
                         reject_reason="insufficient_size",
                         size_info=size_info,
                         policy_decision=pd,
+                        size_event="open",
                     )
                 continue
             return ThetaDecision(
@@ -900,9 +943,10 @@ class ThetaTradeManager:
     ) -> list[dict[str, Any]]:
         """Apply decide + fill delay; return journal rows (0–1).
 
-        Signal insufficient size → skip row with ``reject_reason`` (no trade_id
-        position). Signal OK but fill size bad → still journal would_fill with
-        ``fill_size_ok=false``.
+        Signal insufficient size on open or close → skip row with
+        ``reject_reason=insufficient_size`` and ``would_send=false``. A close
+        reject leaves the slot occupied. Signal OK but fill size bad → still
+        journal the fill with ``fill_size_ok=false``.
         """
         if decision.action == "skip":
             if decision.reject_reason == "insufficient_size":
@@ -918,7 +962,9 @@ class ThetaTradeManager:
                     okx=okx,
                     bybit=bybit,
                     side=decision.side,
-                    event="open",
+                    event=insufficient_size_event(
+                        decision, held=self.slot.position
+                    ),
                     notional_usdt=self.config.notional_usdt,
                     book_depth=self.config.book_depth,
                 )
@@ -976,8 +1022,8 @@ class ThetaTradeManager:
             notional_usdt=self.config.notional_usdt,
             book_depth=self.config.book_depth,
         )
-        if decision.action == "open" and not signal_size.get("size_ok"):
-            # Belt-and-suspenders (decide already gated).
+        if not signal_size.get("size_ok"):
+            # Belt-and-suspenders (decide already gated) for open and close.
             decision = ThetaDecision(
                 action="skip",
                 base_coin=decision.base_coin,
@@ -987,6 +1033,8 @@ class ThetaTradeManager:
                 opposite_theta_1m=decision.opposite_theta_1m,
                 reject_reason="insufficient_size",
                 size_info=signal_size,
+                policy_decision=decision.policy_decision,
+                size_event=decision.action,
             )
             return self.execute_decision(
                 decision, snapshots=snapshots, quotes=quotes, now_ms=signal_ts
@@ -1453,7 +1501,7 @@ class ThetaTradeManager:
             notional_usdt=self.config.notional_usdt,
             book_depth=self.config.book_depth,
         )
-        if decision.action == "open" and not signal_size.get("size_ok"):
+        if not signal_size.get("size_ok"):
             decision = ThetaDecision(
                 action="skip",
                 base_coin=decision.base_coin,
@@ -1463,6 +1511,8 @@ class ThetaTradeManager:
                 opposite_theta_1m=decision.opposite_theta_1m,
                 reject_reason="insufficient_size",
                 size_info=signal_size,
+                policy_decision=decision.policy_decision,
+                size_event=decision.action,
             )
             return self.execute_decision(
                 decision, snapshots=snapshots, quotes=quotes, now_ms=signal_ts
