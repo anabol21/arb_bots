@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import random
 import signal
 import sys
 import time
@@ -210,10 +211,12 @@ class BotRuntime:
             "gear22",
             "gear22_live_canary",
             "gear22_live",
+            "synthetic_roll",
         ):
             raise ValueError(
                 f"BBOT_PROFILE must be gear1|signal_test|gear2_would_send|"
-                f"canary_wal_eden|gear22_would_send|gear22_live_canary, "
+                f"canary_wal_eden|gear22_would_send|gear22_live_canary|"
+                f"synthetic_roll, "
                 f"got {self.profile!r}"
             )
         if self.profile == "default":
@@ -246,6 +249,8 @@ class BotRuntime:
                 coins_raw = "BTC,ETH,SOL,XRP"
             elif self.mode == "policy" and self.profile == "gear22_live_canary":
                 coins_raw = ",".join(GEAR22_HTML_TOP30)
+            elif self.mode == "policy" and self.profile == "synthetic_roll":
+                coins_raw = "BTC,ETH,SOL,XRP"
             else:
                 coins_raw = "BTC,ETH"
         self.coins = parse_coins(coins_raw)
@@ -266,6 +271,8 @@ class BotRuntime:
             self.notional = 10.0
         elif self.profile == "gear22_live_canary":
             self.notional = float(DEFAULT_LIVE_CANARY_NOTIONAL_USDT)
+        elif self.profile == "synthetic_roll":
+            self.notional = 10.0
         else:
             self.notional = 100.0
         self.trade_lat_ms = int(os.environ.get("BBOT_TRADE_LAT_MS") or "100")
@@ -288,14 +295,14 @@ class BotRuntime:
         self.policy = _try_load_policy() if self.mode == "policy" else None
         self.variation: dict[str, float] | None = None
         self.hyper: dict[str, object] | None = None
-        if self.policy is not None:
+        if self.policy is not None and self.profile != "synthetic_roll":
             self.variation = self.policy["variation_for_profile"](self.profile)
             self.hyper = self.policy["hyper_for_profile"](self.profile)
             if self.profile == "canary_wal_eden" and self.hyper is not None:
                 # Gate planned qty must match the broker notional ($10/leg).
                 self.hyper["position_size"] = float(self.notional)
         self.ma_windows: dict[str, Any] = {}
-        if self.policy is not None:
+        if self.policy is not None and self.profile != "synthetic_roll":
             CausalMaWindow = self.policy["CausalMaWindow"]
             avg_sec = float((self.hyper or self.policy["DEFAULT_HYPER"]).get("avg_window_sec") or 2.0)
             for c in self.coins:
@@ -369,16 +376,40 @@ class BotRuntime:
         if self.theta_trade_enabled:
             live_send = theta_live_send_requested(self.profile)
             theta_cfg = ThetaTradeConfig.from_env()
-            if live_send:
+            if live_send or self.profile == "synthetic_roll":
                 theta_cfg.notional_usdt = float(self.notional)
-            self.theta_trade = ThetaTradeManager(
-                data_root=self.data_root,
-                config=theta_cfg,
-                log=lambda m: self.log.info(m),
-                live_send=live_send,
-                place_fn=self.broker.place if live_send else None,
-                meta_fn=self._meta if live_send else None,
-            )
+            if self.profile == "synthetic_roll":
+                from app.bot.synthetic_policy import (
+                    make_synthetic_decide,
+                    synthetic_live_gates,
+                )
+
+                seed_raw = str(os.environ.get("BBOT_SYNTHETIC_SEED") or "").strip()
+                rng = random.Random(int(seed_raw)) if seed_raw else random.Random()
+                gates_on = synthetic_live_gates(os.environ)
+                # gear22_would_send / gear22_live_canary keep their own place_fn.
+                self.theta_trade = ThetaTradeManager(
+                    data_root=self.data_root,
+                    config=theta_cfg,
+                    log=lambda m: self.log.info(m),
+                    live_send=False,
+                    place_fn=(
+                        self._synthetic_live_place
+                        if gates_on
+                        else self._synthetic_local_place
+                    ),
+                    meta_fn=self._meta,
+                    decide_fn=make_synthetic_decide(self.coins, rng),
+                )
+            else:
+                self.theta_trade = ThetaTradeManager(
+                    data_root=self.data_root,
+                    config=theta_cfg,
+                    log=lambda m: self.log.info(m),
+                    live_send=live_send,
+                    place_fn=self.broker.place if live_send else None,
+                    meta_fn=self._meta if live_send else None,
+                )
         # Floor warm-start (standard for gear22 / when pickle present).
         self._floor_warm_path = resolve_floor_warm_path(self.data_root)
         self._floor_warm_loaded = False
@@ -449,6 +480,42 @@ class BotRuntime:
         from app.bot.private.ws_warm_session import start_warm_private_for_bot_process
 
         return start_warm_private_for_bot_process(**overrides)
+
+    def _synthetic_local_place(self, **kwargs: Any) -> Any:
+        """No sockets. Same journal and chrono as the live place path."""
+        from app.bot.private.place_send import place_local
+
+        return place_local(data_root=self.data_root, **kwargs)
+
+    def _synthetic_live_place(self, **kwargs: Any) -> Any:
+        """Live gates only. Uses the warm session sender; does not open a new socket."""
+        from app.bot.private.place_send import PlaceSendResult, place_live
+        from app.bot.private.ws_trivial_dual_leg import (
+            TrivialDualSender,
+            warm_trade_send_fn,
+        )
+
+        session = self._private_warm
+        if session is None:
+            return PlaceSendResult(abort="private_channel_down")
+        sender = getattr(self, "_synthetic_sender", None)
+        if sender is None:
+            sender = TrivialDualSender(send_fn=warm_trade_send_fn(session))
+            self._synthetic_sender = sender
+        inst = getattr(session.okx_runtime, "okx_inst_id_code", None)
+
+        def _recv(venue: str) -> str:
+            timeout = float(os.environ.get("BBOT_PRIVATE_ACK_TIMEOUT_SEC") or "2")
+            return session.connector().recv_trade(venue, timeout_sec=timeout)
+
+        return place_live(
+            data_root=self.data_root,
+            sender=sender,
+            credentials=session.bybit_credentials,
+            inst_id_code=inst,
+            recv_fn=_recv,
+            **kwargs,
+        )
 
     def _meta(self, coin: str) -> InstrumentMeta:
         if coin not in self.universe:
@@ -839,6 +906,32 @@ class BotRuntime:
                 await self._flush_tw_p50_rows(rows)
             if self.theta_enabled and self.theta_screener is not None:
                 await self._emit_theta_from_tw(snapshots)
+
+    async def _synthetic_roll_loop(self) -> None:
+        """~1 Hz pool roll. Does not wait on theta snapshots."""
+        while not self.stop_event.is_set():
+            try:
+                await asyncio.wait_for(
+                    self.stop_event.wait(), timeout=EMIT_INTERVAL_SEC
+                )
+                break
+            except asyncio.TimeoutError:
+                pass
+            if self.theta_trade is None:
+                continue
+            try:
+                await self.theta_trade.on_theta_snapshots_async(
+                    [],
+                    quotes=self.quotes,
+                    coin_order=self.coins,
+                )
+            except Exception as exc:  # noqa: BLE001
+                if not self._theta_trade_warned:
+                    self._theta_trade_warned = True
+                    self.log.warning(
+                        "theta_trade_failed | err=%s",
+                        type(exc).__name__,
+                    )
 
     async def _theta_emit_loop(self) -> None:
         """~1 Hz theta when TW p50 watch is off but theta is on."""
@@ -1336,6 +1429,10 @@ class BotRuntime:
             # Theta alone (TW off): still emit ~1 Hz from last RAM snapshots.
             tasks.append(
                 asyncio.create_task(self._theta_emit_loop(), name="theta-emit")
+            )
+        if self.profile == "synthetic_roll" and self.theta_trade is not None:
+            tasks.append(
+                asyncio.create_task(self._synthetic_roll_loop(), name="synthetic-roll")
             )
         for coin in self.coins:
             meta = self._meta(coin)

@@ -161,6 +161,19 @@ def theta_trades_jsonl_path(data_root: Path, event_date: str) -> Path:
     return path / "trades.jsonl"
 
 
+def theta_step_chrono_jsonl_path(data_root: Path, event_date: str) -> Path:
+    """``{data_root}/theta_trades/event_date=YYYY-MM-DD/step_chrono.jsonl``.
+
+    Step stamps for the synthetic_roll place path. Same D-tree refusal as
+    ``theta_trades_jsonl_path``. Not the canary chronometry dashboard.
+    """
+    if _is_under_denied(data_root):
+        raise RuntimeError(f"refusing step chrono under denied path: {data_root}")
+    path = data_root / "theta_trades" / f"event_date={event_date}"
+    path.mkdir(parents=True, exist_ok=True)
+    return path / "step_chrono.jsonl"
+
+
 def floor_warm_pickle_path(data_root: Path) -> Path:
     """Default warm pickle: ``{data_root}/state/floor_warm.pkl``."""
     return state_dir(data_root) / "floor_warm.pkl"

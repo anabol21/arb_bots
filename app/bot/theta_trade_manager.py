@@ -13,6 +13,9 @@ inside Contour B. This module does not import ``app.bot.private``.
 
 **Policy:** Gear 2.2 research policy (`research.gear22_backtest.policy.decide`)
 with frozen observation knobs from `research.gear22_backtest.params_frozen`.
+Optional ``decide_fn`` (profile ``synthetic_roll``) replaces that call once
+per tick; the size gate and K=1 slot stay here. This module does not import
+``app.bot.private``.
 """
 
 from __future__ import annotations
@@ -103,7 +106,7 @@ class ThetaLiveSendError(RuntimeError):
     """Fail-closed live canary: missing LIVE_ORDERS / private_live / VENUE=live."""
 
 
-PlaceFn = Callable[..., Optional[str]]
+PlaceFn = Callable[..., Any]
 MetaFn = Callable[[str], Any]
 
 
@@ -241,7 +244,11 @@ def theta_trade_enabled(
     if raw in ("1", "true", "on", "yes"):
         return True
     name = str(profile).strip().lower()
-    return name in GEAR22_WOULD_SEND_PROFILES or name in GEAR22_LIVE_CANARY_PROFILES
+    return (
+        name in GEAR22_WOULD_SEND_PROFILES
+        or name in GEAR22_LIVE_CANARY_PROFILES
+        or name == "synthetic_roll"
+    )
 
 
 def _env_float(env: Mapping[str, str], key: str, default: float) -> float:
@@ -504,6 +511,50 @@ class ThetaDecision:
     policy_decision: Optional[PolicyDecision] = None
     # ``open`` or ``close``: which size_check produced an insufficient_size skip.
     size_event: Optional[str] = None
+
+
+def coerce_external_decision(raw: Any) -> ThetaDecision:
+    """Adapt a synthetic (or other) decide result into ``ThetaDecision``.
+
+    ``hold`` becomes ``skip`` so the manager does not send. Size info is left
+    empty so ``execute_decision`` still runs ``size_check`` for open and close.
+    """
+    if isinstance(raw, ThetaDecision):
+        return raw
+    action = str(getattr(raw, "action", "") or "").strip().lower()
+    if action == "hold":
+        action = "skip"
+    if action not in ("open", "close", "skip"):
+        action = "skip"
+    coin = getattr(raw, "coin", None)
+    if coin is None:
+        coin = getattr(raw, "base_coin", "") or ""
+    side = str(getattr(raw, "side", "") or "").strip().lower()
+    reason = str(getattr(raw, "reason", "") or "").strip()
+    if not reason:
+        reason = "hold" if action == "skip" else "synthetic_roll"
+    return ThetaDecision(
+        action=action,
+        base_coin=str(coin).upper(),
+        side=side,
+        reason=reason,
+    )
+
+
+def _read_place_result(result: Any) -> tuple[Optional[str], bool, bool, Optional[int]]:
+    """Normalize place_fn return into abort, completed, keep_pending, fill_ts_ms."""
+    if result is None:
+        return None, True, False, None
+    if isinstance(result, str):
+        return result, False, False, None
+    abort = getattr(result, "abort", None)
+    if abort is not None:
+        abort = str(abort)
+    completed = bool(getattr(result, "completed", False)) and not abort
+    keep_pending = bool(getattr(result, "keep_pending", False))
+    fill_ts = getattr(result, "fill_ts_ms", None)
+    fill_i = int(fill_ts) if fill_ts is not None else None
+    return abort, completed, keep_pending, fill_i
 
 
 def insufficient_size_event(
@@ -777,6 +828,7 @@ class ThetaTradeManager:
         live_send: bool = False,
         place_fn: Optional[PlaceFn] = None,
         meta_fn: Optional[MetaFn] = None,
+        decide_fn: Optional[Callable[..., Any]] = None,
     ) -> None:
         self.data_root = Path(data_root)
         self.config = config or ThetaTradeConfig.from_env()
@@ -787,6 +839,9 @@ class ThetaTradeManager:
         self.live_send = bool(live_send)
         self._place_fn = place_fn
         self._meta_fn = meta_fn
+        # None keeps frozen gear 2.2 ``decide_theta_k1``. A synthetic profile
+        # injects one pool-level decide; size gate and K=1 stay in this manager.
+        self._decide_fn = decide_fn
         if self.live_send and (self._place_fn is None or self._meta_fn is None):
             raise ThetaLiveSendError(
                 "theta live send requires place_fn and meta_fn (fail closed)"
@@ -1012,6 +1067,9 @@ class ThetaTradeManager:
         if decision.action not in ("open", "close"):
             return []
 
+        if self._decide_fn is not None and self._slot_blocks(decision):
+            return []
+
         signal_ts = int(now_ms if now_ms is not None else time.time() * 1000)
         okx_s, bybit_s = self._books_for(quotes, decision.base_coin)
         signal_size = decision.size_info or size_check(
@@ -1038,6 +1096,14 @@ class ThetaTradeManager:
             )
             return self.execute_decision(
                 decision, snapshots=snapshots, quotes=quotes, now_ms=signal_ts
+            )
+
+        if self._decide_fn is not None:
+            return self._execute_injected_place(
+                decision,
+                signal_ts=signal_ts,
+                okx_s=okx_s,
+                bybit_s=bybit_s,
             )
 
         if self.live_send:
@@ -1414,6 +1480,133 @@ class ThetaTradeManager:
         finally:
             self.slot.pending = False
 
+    def _slot_blocks(self, decision: ThetaDecision) -> bool:
+        """K=1: no second open while busy/pending, no close while flat or pending."""
+        if decision.action == "open" and self.slot.slot_busy():
+            return True
+        if decision.action == "close" and (
+            self.slot.position is None or self.slot.pending
+        ):
+            return True
+        return False
+
+    def _decide(
+        self,
+        snapshots: Sequence[ThetaSnapshot],
+        *,
+        quotes: Mapping[str, Mapping[str, Mapping[str, Any]]],
+        coin_order: Optional[Sequence[str]],
+    ) -> ThetaDecision:
+        if self._decide_fn is None:
+            return decide_theta_k1(
+                snapshots,
+                slot=self.slot,
+                thr=self.config.theta_thr,
+                quotes=quotes,
+                notional_usdt=self.config.notional_usdt,
+                book_depth=self.config.book_depth,
+                coin_order=coin_order,
+                policy_params=self.config.policy_params,
+            )
+        raw = self._decide_fn(
+            snapshots=snapshots,
+            slot=self.slot,
+            quotes=quotes,
+            coin_order=coin_order,
+            notional_usdt=float(self.config.notional_usdt),
+            book_depth=int(self.config.book_depth),
+            thr=float(self.config.theta_thr),
+            policy_params=self.config.policy_params,
+        )
+        return coerce_external_decision(raw)
+
+    def _execute_injected_place(
+        self,
+        decision: ThetaDecision,
+        *,
+        signal_ts: int,
+        okx_s: Mapping[str, Any],
+        bybit_s: Mapping[str, Any],
+    ) -> list[dict[str, Any]]:
+        """Call the injected place_fn. Journal rows belong to that function.
+
+        A partial fill (``keep_pending``) leaves the slot pending and does not
+        clear or open the position. Size rejects never reach here.
+        """
+        if self._place_fn is None or decision.action not in ("open", "close"):
+            return []
+        if decision.action == "open":
+            trade_id = str(uuid.uuid4())
+            intent_id = trade_id
+            coin = decision.base_coin
+            side = decision.side
+            spread_side = spread_side_for(side, event="open")
+            close_of: Optional[str] = None
+        else:
+            pos = self.slot.position
+            if pos is None:
+                return []
+            trade_id = pos.trade_id
+            intent_id = str(uuid.uuid4())
+            coin = pos.base_coin
+            side = pos.side
+            spread_side = "close"
+            close_of = "open_long" if side == "long" else "open_short"
+
+        meta = None
+        if self._meta_fn is not None:
+            try:
+                meta = self._meta_fn(str(coin).upper())
+            except Exception as exc:  # noqa: BLE001
+                from app.bot.sentry_setup import capture_exception
+
+                capture_exception(
+                    exc,
+                    extras={"trade_id": trade_id, "coin": coin, "event": decision.action},
+                )
+                return []
+
+        extra = {
+            "trade_id": trade_id,
+            "intent_id": intent_id,
+            "synthetic_roll": self._decide_fn is not None,
+        }
+        self.slot.pending = True
+        keep_pending = False
+        try:
+            result = self._place_fn(
+                spread_side=spread_side,
+                base_coin=str(coin).upper(),
+                signal_ts_ms=int(signal_ts),
+                okx_book=dict(okx_s),
+                bybit_book=dict(bybit_s),
+                meta=meta,
+                close_of=close_of,
+                extra=extra,
+                intent_id=intent_id,
+            )
+            _abort, completed, keep_pending, fill_ts = _read_place_result(result)
+            if completed and decision.action == "open":
+                fill_ts_i = int(fill_ts if fill_ts is not None else time.time() * 1000)
+                fill_spread = spread_for_side(okx_s, bybit_s, side)
+                self.slot.position = OpenPosition(
+                    trade_id=trade_id,
+                    base_coin=str(coin).upper(),
+                    side=side,
+                    open_signal_ts_ms=int(signal_ts),
+                    open_fill_ts_ms=fill_ts_i,
+                    open_fill_spread=fill_spread,
+                    open_notional=float(self.config.notional_usdt),
+                    open_theta_1m=decision.theta_1m,
+                    fill_spread_pp=fill_spread,
+                )
+            elif completed and decision.action == "close":
+                self.slot.position = None
+            return []
+        finally:
+            if not keep_pending:
+                self.slot.pending = False
+
     def on_theta_snapshots(
         self,
         snapshots: Sequence[ThetaSnapshot],
@@ -1423,15 +1616,8 @@ class ThetaTradeManager:
         now_ms: Optional[int] = None,
     ) -> list[dict[str, Any]]:
         """Sync entry (unit tests / offline). Prefer ``on_theta_snapshots_async`` live."""
-        decision = decide_theta_k1(
-            snapshots,
-            slot=self.slot,
-            thr=self.config.theta_thr,
-            quotes=quotes,
-            notional_usdt=self.config.notional_usdt,
-            book_depth=self.config.book_depth,
-            coin_order=coin_order,
-            policy_params=self.config.policy_params,
+        decision = self._decide(
+            snapshots, quotes=quotes, coin_order=coin_order
         )
         return self.execute_decision(
             decision, snapshots=snapshots, quotes=quotes, now_ms=now_ms
@@ -1448,15 +1634,8 @@ class ThetaTradeManager:
         """Async emit-loop entry: ``fill_ts = signal_ts + BBOT_FILL_DELAY_MS``."""
         import asyncio
 
-        decision = decide_theta_k1(
-            snapshots,
-            slot=self.slot,
-            thr=self.config.theta_thr,
-            quotes=quotes,
-            notional_usdt=self.config.notional_usdt,
-            book_depth=self.config.book_depth,
-            coin_order=coin_order,
-            policy_params=self.config.policy_params,
+        decision = self._decide(
+            snapshots, quotes=quotes, coin_order=coin_order
         )
 
         async def _async_sleep(seconds: float) -> None:
@@ -1491,6 +1670,9 @@ class ThetaTradeManager:
         if decision.action not in ("open", "close"):
             return []
 
+        if self._decide_fn is not None and self._slot_blocks(decision):
+            return []
+
         signal_ts = int(now_ms if now_ms is not None else time.time() * 1000)
         okx_s, bybit_s = self._books_for(quotes, decision.base_coin)
         signal_size = decision.size_info or size_check(
@@ -1516,6 +1698,14 @@ class ThetaTradeManager:
             )
             return self.execute_decision(
                 decision, snapshots=snapshots, quotes=quotes, now_ms=signal_ts
+            )
+
+        if self._decide_fn is not None:
+            return self._execute_injected_place(
+                decision,
+                signal_ts=signal_ts,
+                okx_s=okx_s,
+                bybit_s=bybit_s,
             )
 
         if self.live_send:

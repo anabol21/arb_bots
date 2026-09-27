@@ -268,6 +268,8 @@ Send: strategy filters in `LiveBroker.place` → Contour B dual `ws.send` → wa
 
 Journals for live: theta_trades `send` flag; private `events.jsonl` (`bbot.private.journal.v1`) when private writer is used; append-only `wire.jsonl` (`bbot.private.wire.v1`). Stub `legs.jsonl` `send` stays false by construction.
 
+Profile `synthetic_roll` keeps the gear 2.2 K=1 slot and size gate, and swaps in a synthetic pool roll (`app/bot/synthetic_policy.py`) instead of `decide_theta_k1`. Its place path is `app/bot/private/place_send.py` (not `LiveBroker.place`): shared coin qty near 10 USD, `send_long` / `send_short` only when both private legs are up, then a theta-trade journal chain `pending` → `open` / `closed`. Step stamps go to `{BBOT_DATA_ROOT}/theta_trades/event_date=*/step_chrono.jsonl` (not the canary chronometry dashboard) and refuse `/data/live`, `/data/bars`, `/data/compacted`, and `/data/spool`. Live exchange send for this profile runs only when `BBOT_BROKER=private_live`, `VENUE=live`, and `LIVE_ORDERS=1`; otherwise the process uses the local sender and does not open order sockets. `gear22_would_send` and `gear22_live_canary` are unchanged.
+
 ### D. Offline model (not a VPS process)
 
 `model.ipynb` / `research/gear22_backtest/`: read parquet; `policy.decide`; dummy 1 Hz replay; fill = `spread_last`, not `Trade_Lat`. Gear 2.2 observation is **closed**. Gear 2.5 blocked until unlock. Not live-ready.
@@ -303,7 +305,7 @@ Local lean only: `SPREAD_LEAN_PARQUET_ROOT`, `SPREAD_LEAN_BARS_ROOT`, `SPREAD_LE
 | Name | Role |
 |---|---|
 | `BBOT_MODE` | `probe` \| `policy` |
-| `BBOT_PROFILE` | `gear1`, `signal_test`, `gear2_would_send` (`gear2`), `canary_wal_eden` (`canary`), `gear22_would_send` (`gear22`), `gear22_live_canary` (`gear22_live`) |
+| `BBOT_PROFILE` | `gear1`, `signal_test`, `gear2_would_send` (`gear2`), `canary_wal_eden` (`canary`), `gear22_would_send` (`gear22`), `gear22_live_canary` (`gear22_live`), `synthetic_roll` |
 | `BBOT_BROKER` | `stub` (default) \| `private_testnet` \| `private_live` (`live`) |
 | `BBOT_COINS`, `BBOT_NOTIONAL_USDT`, `BBOT_TRADE_LAT_MS` | universe / size / stub Trade_Lat |
 | `BBOT_DATA_ROOT`, `BBOT_LOG_PATH` | bot data + log (never `runtime.log`) |
@@ -368,7 +370,7 @@ Created by `resolve_data_root()`: `journal/`, `floor/`, `tw_p50/`, `theta/`, `th
 | `/data/bbot-gear22-live-canary` | theta_trades + floor/tw/theta metrics; `BBOT_PRIVATE_DATA_ROOT=.../private` |
 | `/data/bbot-theta-k1-canary` | claimed in docs for would_send canary; **unit not in this tree** — **TODO verify** |
 
-Also: `{root}/floor/event_date=*/metrics.jsonl` (`bbot.floor.v1`); `tw_p50/.../metrics.jsonl`; `theta/.../metrics.jsonl`; `theta_trades/.../trades.jsonl`; `{root}/state/pending.json`, `state/floor_warm.pkl`.
+Also: `{root}/floor/event_date=*/metrics.jsonl` (`bbot.floor.v1`); `tw_p50/.../metrics.jsonl`; `theta/.../metrics.jsonl`; `theta_trades/.../trades.jsonl`; `theta_trades/.../step_chrono.jsonl` (`synthetic_roll` place steps only); `{root}/state/pending.json`, `state/floor_warm.pkl`.
 
 ### B-private
 
