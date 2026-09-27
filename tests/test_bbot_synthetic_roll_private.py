@@ -13,7 +13,11 @@ from app.bot.private.coin_qty import CoinQtyError, shared_coin_qty, shared_from_
 from app.bot.private.journal_v1 import PrivateJournalWriter
 from app.bot.paths import theta_step_chrono_jsonl_path, theta_trades_jsonl_path
 from app.bot.private.order_sign import LiveCredentials
-from app.bot.private.place_send import place_live
+from app.bot.private.place_send import (
+    drain_trade_fill,
+    place_live,
+    read_warm_trade_frame,
+)
 from app.bot.private.private_leg_up import clear_all, leg_up, set_exchange_coins
 from app.bot.private.step_chrono import StepChrono
 from app.bot.private.ws_private import PrivateStreamRuntime, SubscriptionReadiness
@@ -403,6 +407,147 @@ class LiveCycleTests(unittest.TestCase):
         self.assertEqual(opened["bybit_fill_px"], "2.2")
         # Notional 5 coins * 2 USD = 10, closer than 4*2=8 or 6*2=12.
         self.assertEqual(Decimal(opened["coin_qty"]) * Decimal("2"), Decimal("10"))
+
+
+class _QueueSock:
+    """Trade inbound queue. ``recv`` is absent so a raw websocket read fails."""
+
+    def __init__(self, frames: list[str]) -> None:
+        self.frames = list(frames)
+        self.calls = 0
+
+    def recv_text(self, *, timeout_sec: float | None = None) -> str:
+        del timeout_sec
+        self.calls += 1
+        if not self.frames:
+            raise TimeoutError("empty")
+        return self.frames.pop(0)
+
+
+class _FrameRuntime:
+    def __init__(self, stash: list[str], sock: _QueueSock, exchange: str) -> None:
+        self._stash = list(stash)
+        self.trade_socket = sock
+        self.exchange = exchange
+
+    def _pop_trade_inbound(self) -> str | None:
+        if not self._stash:
+            return None
+        return self._stash.pop(0)
+
+
+class FillWaitTests(unittest.TestCase):
+    def setUp(self) -> None:
+        clear_all()
+        self.tmp = Path(tempfile.mkdtemp())
+        self.root = self.tmp / "bbot"
+        self.root.mkdir()
+        self.ws = _Ws()
+        self.sender = _Sender(self.ws)
+        set_exchange_coins("okx", ["BTC"], True)
+        set_exchange_coins("bybit", ["BTC"], True)
+
+    def tearDown(self) -> None:
+        clear_all()
+
+    def test_stash_before_inbound_queue(self) -> None:
+        sock = _QueueSock([json.dumps({"fillPx": "2.5"})])
+        runtime = _FrameRuntime(
+            ["ping", json.dumps({"op": "order", "code": "0"})],
+            sock,
+            "okx",
+        )
+        body = drain_trade_fill(
+            lambda timeout_sec: read_warm_trade_frame(runtime, timeout_sec),
+            exchange="okx",
+            timeout_sec=1.0,
+        )
+        self.assertEqual(body, json.dumps({"fillPx": "2.5"}))
+        self.assertEqual(sock.calls, 1)
+        self.assertFalse(hasattr(sock, "recv"))
+
+    def test_ack_then_fill_yields_both_prices(self) -> None:
+        queues = {
+            "okx": [
+                "pong",
+                json.dumps({"op": "order", "code": "0"}),
+                json.dumps({"fillPx": "2.1"}),
+            ],
+            "bybit": [
+                json.dumps({"op": "pong"}),
+                json.dumps({"retCode": 0, "op": "order.create"}),
+                json.dumps({"data": [{"avgPx": "2.2"}]}),
+            ],
+        }
+
+        def recv(venue: str) -> str | None:
+            frames = queues[venue]
+
+            def read(_timeout: float) -> str:
+                if not frames:
+                    raise TimeoutError("empty")
+                return frames.pop(0)
+
+            return drain_trade_fill(read, exchange=venue, timeout_sec=1.0)
+
+        result = place_live(
+            data_root=self.root,
+            spread_side="open_long",
+            base_coin="BTC",
+            signal_ts_ms=1_700_000_000_000,
+            okx_book=_book(2),
+            bybit_book=_book(2),
+            meta=_meta(),
+            sender=self.sender,
+            credentials=_creds(),
+            inst_id_code=101,
+            recv_fn=recv,
+        )
+        self.assertTrue(result.completed)
+        self.assertEqual(result.okx_fill_px, "2.1")
+        self.assertEqual(result.bybit_fill_px, "2.2")
+        self.assertEqual(len(self.ws.sent), 2)
+
+    def test_timeout_partial_fill_does_not_send_again(self) -> None:
+        calls = {"n": 0}
+
+        def recv(venue: str) -> str | None:
+            def read(_timeout: float) -> str:
+                raise TimeoutError("empty")
+
+            return drain_trade_fill(read, exchange=venue, timeout_sec=0.05)
+
+        def place(**kwargs):
+            calls["n"] += 1
+            return place_live(
+                data_root=self.root,
+                sender=self.sender,
+                credentials=_creds(),
+                inst_id_code=101,
+                recv_fn=recv,
+                **kwargs,
+            )
+
+        def decide(*, slot, **_kwargs):
+            del slot
+            return SimpleNamespace(action="open", coin="BTC", side="long")
+
+        mgr = ThetaTradeManager(
+            data_root=self.root,
+            config=ThetaTradeConfig(notional_usdt=10.0, fill_delay_ms=0),
+            decide_fn=decide,
+            place_fn=place,
+            meta_fn=lambda coin: _meta(base_coin=coin),
+        )
+        quotes = {"BTC": {"okx": _book(2), "bybit": _book(2)}}
+        mgr.on_theta_snapshots([], quotes=quotes, coin_order=["BTC"], now_ms=1_700_000_000_000)
+        self.assertEqual(calls["n"], 1)
+        self.assertEqual(len(self.ws.sent), 2)
+        self.assertTrue(mgr.slot.pending)
+        self.assertIsNone(mgr.slot.position)
+        mgr.on_theta_snapshots([], quotes=quotes, coin_order=["BTC"], now_ms=1_700_000_001_000)
+        self.assertEqual(calls["n"], 1)
+        self.assertEqual(len(self.ws.sent), 2)
 
 
 if __name__ == "__main__":

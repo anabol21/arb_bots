@@ -373,6 +373,7 @@ class BotRuntime:
         self.theta_trade_enabled = theta_trade_enabled(self.profile)
         self.theta_trade: ThetaTradeManager | None = None
         self._theta_trade_warned = False
+        self._synthetic_roll_halted = False
         if self.theta_trade_enabled:
             live_send = theta_live_send_requested(self.profile)
             theta_cfg = ThetaTradeConfig.from_env()
@@ -489,7 +490,13 @@ class BotRuntime:
 
     def _synthetic_live_place(self, **kwargs: Any) -> Any:
         """Live gates only. Uses the warm session sender; does not open a new socket."""
-        from app.bot.private.place_send import PlaceSendResult, place_live
+        from app.bot.private.place_send import (
+            SYNTHETIC_FILL_WAIT_SEC,
+            PlaceSendResult,
+            drain_trade_fill,
+            place_live,
+            read_warm_trade_frame,
+        )
         from app.bot.private.ws_trivial_dual_leg import (
             TrivialDualSender,
             warm_trade_send_fn,
@@ -503,19 +510,38 @@ class BotRuntime:
             sender = TrivialDualSender(send_fn=warm_trade_send_fn(session))
             self._synthetic_sender = sender
         inst = getattr(session.okx_runtime, "okx_inst_id_code", None)
+        deadline = time.monotonic() + SYNTHETIC_FILL_WAIT_SEC
 
-        def _recv(venue: str) -> str:
-            timeout = float(os.environ.get("BBOT_PRIVATE_ACK_TIMEOUT_SEC") or "2")
-            return session.connector().recv_trade(venue, timeout_sec=timeout)
+        def _runtime_for(venue: str) -> Any:
+            key = str(venue).strip().lower()
+            if key == "bybit":
+                return session.bybit_runtime
+            if key == "okx":
+                return session.okx_runtime
+            raise ValueError(f"recv venue must be bybit|okx, got {venue!r}")
 
-        return place_live(
-            data_root=self.data_root,
-            sender=sender,
-            credentials=session.bybit_credentials,
-            inst_id_code=inst,
-            recv_fn=_recv,
-            **kwargs,
-        )
+        def _recv(venue: str) -> Optional[str]:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return None
+            runtime = _runtime_for(venue)
+            return drain_trade_fill(
+                lambda timeout_sec: read_warm_trade_frame(runtime, timeout_sec),
+                exchange=str(getattr(runtime, "exchange", venue)),
+                timeout_sec=remaining,
+            )
+
+        # Holds place-inflight so reconnect does not drop the sockets and a
+        # thread keepalive stashes trade frames instead of racing recv_text.
+        with session.place_io_section():
+            return place_live(
+                data_root=self.data_root,
+                sender=sender,
+                credentials=session.bybit_credentials,
+                inst_id_code=inst,
+                recv_fn=_recv,
+                **kwargs,
+            )
 
     def _meta(self, coin: str) -> InstrumentMeta:
         if coin not in self.universe:
@@ -932,6 +958,14 @@ class BotRuntime:
                         "theta_trade_failed | err=%s",
                         type(exc).__name__,
                     )
+                continue
+            if self.theta_trade.slot.pending:
+                if not self._synthetic_roll_halted:
+                    self._synthetic_roll_halted = True
+                    self.log.warning(
+                        "synthetic_roll_stopped | reason=partial_fill"
+                    )
+                break
 
     async def _theta_emit_loop(self) -> None:
         """~1 Hz theta when TW p50 watch is off but theta is on."""

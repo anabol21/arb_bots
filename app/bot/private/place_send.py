@@ -33,6 +33,10 @@ from app.bot.stub_broker import legs_for_spread_side, reverse_sides
 
 RecvFn = Callable[[str], Optional[str]]
 WaitFn = Callable[[], None]
+ReadFrameFn = Callable[[float], str]
+
+# Shared bound for both venues. One ack/ping must not end the wait.
+SYNTHETIC_FILL_WAIT_SEC = 5.0
 
 
 @dataclass
@@ -110,6 +114,58 @@ def _fill_px(body: Optional[str]) -> Optional[str]:
             if key == prefer:
                 return val
     return None
+
+
+def drain_trade_fill(
+    read_frame: ReadFrameFn,
+    *,
+    exchange: str,
+    timeout_sec: float = SYNTHETIC_FILL_WAIT_SEC,
+) -> Optional[str]:
+    """Read until a frame carries ``fillPx`` or ``avgPx``, or the deadline.
+
+    ``read_frame(timeout_sec)`` raises ``TimeoutError`` when no frame is ready.
+    Ping/pong and other frames without a fill price are skipped. Returns
+    ``None`` when the bound expires so the caller keeps ``partial_fill``.
+    """
+    from app.bot.private.ws_private import is_ws_noise_frame
+
+    deadline = time.monotonic() + float(timeout_sec)
+    venue = str(exchange).strip().lower()
+    while time.monotonic() < deadline:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
+        try:
+            raw = read_frame(min(1.0, remaining))
+        except TimeoutError:
+            continue
+        if not raw:
+            continue
+        if is_ws_noise_frame(venue, raw):
+            continue
+        if _fill_px(raw):
+            return raw
+    return None
+
+
+def read_warm_trade_frame(runtime: Any, timeout_sec: float) -> str:
+    """One trade frame from the warm session. No new socket and no ``ws.recv``.
+
+    Order matches ``PrivateStreamRuntime.recv_trade_ack``: the in-memory stash
+    first (thread keepalive parks frames there while place is in flight), then
+    ``trade_socket.recv_text``. On the production warm loop that pop is the
+    listen-task inbound queue, not a second read of the websocket.
+    """
+    pop = getattr(runtime, "_pop_trade_inbound", None)
+    if callable(pop):
+        stashed = pop()
+        if stashed:
+            return str(stashed)
+    sock = getattr(runtime, "trade_socket", None)
+    if sock is None:
+        raise TimeoutError("trade socket missing")
+    return str(sock.recv_text(timeout_sec=timeout_sec))
 
 
 def _book_body(venue: str, px: object) -> str:

@@ -346,5 +346,63 @@ class RuntimeWireTests(unittest.TestCase):
             self.assertFalse(gear.theta_trade.live_send)
 
 
+class _ListLog:
+    def __init__(self) -> None:
+        self.warnings: list[str] = []
+
+    def warning(self, msg: str, *args: object) -> None:
+        self.warnings.append(msg % args if args else msg)
+
+
+class RollHaltTests(unittest.TestCase):
+    def test_partial_fill_stops_the_roll_loop(self) -> None:
+        import asyncio
+        from unittest.mock import patch
+
+        calls = {"place": 0, "decide": 0}
+
+        def decide(*, slot: object, **_kwargs: object) -> SyntheticDecision:
+            del slot
+            calls["decide"] += 1
+            return SyntheticDecision(action="open", coin="BTC", side="long", roll=17)
+
+        def place(**_kwargs: object) -> PlaceSendResult:
+            calls["place"] += 1
+            return PlaceSendResult(
+                abort="partial_fill", completed=False, keep_pending=True
+            )
+
+        mgr = ThetaTradeManager(
+            data_root=Path(tempfile.mkdtemp()) / "bbot",
+            config=ThetaTradeConfig(notional_usdt=10.0, fill_delay_ms=0),
+            decide_fn=decide,
+            place_fn=place,
+            meta_fn=_meta,
+        )
+        (mgr.data_root).mkdir(parents=True, exist_ok=True)
+        log = _ListLog()
+
+        class Host:
+            def __init__(self) -> None:
+                self.stop_event = asyncio.Event()
+                self.theta_trade = mgr
+                self.quotes = _quotes()
+                self.coins = list(POOL)
+                self.log = log
+                self._theta_trade_warned = False
+                self._synthetic_roll_halted = False
+
+        host = Host()
+        with patch("app.bot.runtime.EMIT_INTERVAL_SEC", 0):
+            from app.bot.runtime import BotRuntime
+
+            asyncio.run(BotRuntime._synthetic_roll_loop(host))
+        self.assertEqual(calls["place"], 1)
+        self.assertEqual(calls["decide"], 1)
+        self.assertTrue(host._synthetic_roll_halted)
+        self.assertIn("synthetic_roll_stopped | reason=partial_fill", log.warnings)
+        self.assertTrue(mgr.slot.pending)
+
+
 if __name__ == "__main__":
     unittest.main()
