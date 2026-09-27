@@ -5,6 +5,7 @@ Artifacts for VPS production/staging packaging:
 | Path | Role |
 |---|---|
 | `deploy/systemd/spread-collector.service` | Long-running collector |
+| `deploy/systemd/spread-collector-hl-v2.service` | HL v2 canary template (disabled; `/data/live_hl_v2`; see `docs/hl-v2-canary.md`) |
 | `deploy/systemd/spread-compactor.service` + `.timer` | Compactor every 5m under flock |
 | `deploy/systemd/spread-backup-transfer.service` + `.timer` | Tick compacted transfer every 5m (offset) |
 | `deploy/systemd/spread-bars-backup-transfer.service` + `.timer` | Bars hive → `backup1tb:spread-bars` every 5m |

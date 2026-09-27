@@ -49,6 +49,7 @@ Long-running (`Type=simple`):
 |---|---|---|
 | `spread-collector-next.service` | `app/screaner_b_o.py` | Live D writer (HOT_ADD). WorkingDirectory `/root/spread_staging`. Parquet `/data/live`; spool `/data/spool-next`, gaps `/data/gaps-next`, bars `/data/bars-next`. |
 | `spread-collector.service` | `app/screaner_b_o.py` | Previous D unit template. Leave disabled. Do not enable it over the next writer. |
+| `spread-collector-hl-v2.service` | `python -m app.hl_v2` | **Template only** (no `[Install]`). HL v2 canary: Bybit+OKX staff + sharded HL `l2Book` → `/data/live_hl_v2`. `InaccessiblePaths` blocks `/data/live`. Do not enable without an explicit deploy gate. See `docs/hl-v2-canary.md`. |
 | `spread-bbot.service` | `python -m app.bot` | Historical stub (`BBOT_MODE=probe`, `/data/bbot`). Comments: not enabled merely by existing in git. |
 | `spread-bbot-gear2.service` | `python -m app.bot` | Gear-2 `would_send` stub (`BBOT_BROKER` unset → stub). `/data/bbot-gear2`. |
 | `spread-bbot-canary-wal-eden.service` | `python -m app.bot` | Live-send canary Contour B (`BBOT_BROKER=private_live`). `/data/bbot-canary-wal-eden`. Secrets via `EnvironmentFile=-/etc/spread/bbot-canary-wal-eden.env`. |
@@ -85,6 +86,7 @@ No backup units in this tree for `/data/bbot-canary-wal-eden` or `/data/bbot-gea
 | Entry | Role |
 |---|---|
 | `python -m app.bot.private` | Read-only / explicit-flag CLI harness. Default path asserts **no** order transport and **no** WS (`app/bot/private/__main__.py`). |
+| `python -m app.hl_v2` | HL v2 canary entrypoint (Bybit+OKX staff + sharded HL l2Book). Default root `/data/live_hl_v2`. Not production. |
 | `app/screaner_local_lean.py` | Local lean experiment. Not production. Own `SPREAD_LEAN_*` env names. |
 | `model.ipynb` / `research/gear22_backtest/replay.py` | Offline simulation. |
 | `deploy/cron/spread-maintenance.cron` | Cron **fallback** vs systemd timers; cadence in cron (compactor every 5 min) **differs** from `spread-compactor.timer` (2 min). **TODO verify** which is installed on VPS. |

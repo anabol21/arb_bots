@@ -15,6 +15,8 @@
 
 Вход среды исполнения: `app/screaner_b_o.py` → нормализация/запись: `app/storage/writer.py`.
 
+Отдельный canary (не prod): Hyperliquid v2 staff+HL (`schema_mode=hl_v2`, корень `/data/live_hl_v2`) — [`docs/hl-v2-canary.md`](hl-v2-canary.md), код `app/hl_v2/`, схема [`app/schema/hl_v2_event.py`](../app/schema/hl_v2_event.py). В `/data/live` не пишет.
+
 Флаги режима (по умолчанию **выкл.** → v1; производственное накопление тиков → `lean`):
 
 | Флаг | Эффект |
