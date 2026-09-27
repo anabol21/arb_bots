@@ -317,6 +317,7 @@ class LegAndSendTests(unittest.TestCase):
             authenticated=True,
             subscription_readiness=SubscriptionReadiness.READY,
         )
+        rt.journal_auth(success=True)
         rt.publish_private_leg_state()
         self.assertTrue(leg_up("okx", "BTC"))
         rt.mark_reconnect()

@@ -329,7 +329,12 @@ class RuntimeWireTests(unittest.TestCase):
             self.assertIsNotNone(rt.theta_trade)
             self.assertIsNotNone(rt.theta_trade._decide_fn)  # noqa: SLF001
             self.assertFalse(rt.theta_trade.live_send)
-            self.assertIs(rt.theta_trade._place_fn, rt._synthetic_local_place)  # noqa: SLF001
+            # Each attribute lookup builds a new bound method; compare the function.
+            self.assertIs(
+                rt.theta_trade._place_fn.__func__,  # noqa: SLF001
+                type(rt)._synthetic_local_place,
+            )
+            self.assertIs(rt.theta_trade._place_fn.__self__, rt)  # noqa: SLF001
 
         env["BBOT_PROFILE"] = "gear22_would_send"
         with patch.dict("os.environ", env, clear=False):
