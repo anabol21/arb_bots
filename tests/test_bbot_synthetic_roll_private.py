@@ -453,32 +453,50 @@ class FillWaitTests(unittest.TestCase):
         clear_all()
 
     def test_stash_before_inbound_queue(self) -> None:
-        sock = _QueueSock([json.dumps({"fillPx": "2.5"})])
-        runtime = _FrameRuntime(
-            ["ping", json.dumps({"op": "order", "code": "0"})],
-            sock,
-            "okx",
-        )
+        ack = json.dumps({"op": "order", "code": "0", "data": [{"fillPx": "2.5"}]})
+        sock = _QueueSock([json.dumps({"fillPx": "9"})])
+        runtime = _FrameRuntime(["ping", ack], sock, "okx")
         body = drain_trade_fill(
             lambda timeout_sec: read_warm_trade_frame(runtime, timeout_sec),
             exchange="okx",
             timeout_sec=1.0,
         )
-        self.assertEqual(body, json.dumps({"fillPx": "2.5"}))
-        self.assertEqual(sock.calls, 1)
+        self.assertEqual(body, ack)
+        self.assertEqual(sock.calls, 0)
         self.assertFalse(hasattr(sock, "recv"))
 
+    def test_reject_is_returned_before_a_later_fill(self) -> None:
+        reject = json.dumps(
+            {"code": "1", "data": [{"sCode": "51000", "sMsg": "Parameter clOrdId error"}]}
+        )
+        sock = _QueueSock([json.dumps({"fillPx": "2.5"})])
+        runtime = _FrameRuntime([reject], sock, "okx")
+        body = drain_trade_fill(
+            lambda timeout_sec: read_warm_trade_frame(runtime, timeout_sec),
+            exchange="okx",
+            timeout_sec=1.0,
+        )
+        self.assertEqual(body, reject)
+        self.assertEqual(sock.calls, 0)
+
     def test_ack_then_fill_yields_both_prices(self) -> None:
+        okx_fill = json.dumps(
+            {
+                "op": "order",
+                "code": "0",
+                "data": [{"sCode": "0", "fillPx": "2.1", "accFillSz": "5"}],
+            }
+        )
         queues = {
             "okx": [
                 "pong",
-                json.dumps({"op": "order", "code": "0"}),
-                json.dumps({"fillPx": "2.1"}),
+                okx_fill,
             ],
             "bybit": [
                 json.dumps({"op": "pong"}),
-                json.dumps({"retCode": 0, "op": "order.create"}),
-                json.dumps({"data": [{"avgPx": "2.2"}]}),
+                json.dumps(
+                    {"retCode": 0, "op": "order.create", "data": [{"avgPx": "2.2"}]}
+                ),
             ],
         }
 
@@ -509,6 +527,97 @@ class FillWaitTests(unittest.TestCase):
         self.assertEqual(result.okx_fill_px, "2.1")
         self.assertEqual(result.bybit_fill_px, "2.2")
         self.assertEqual(len(self.ws.sent), 2)
+        rows = _read(theta_trades_jsonl_path(self.root, "2023-11-14"))
+        okx_msg = next(r for r in rows if r.get("venue") == "okx")
+        self.assertEqual(okx_msg["fields"]["fillPx"], "2.1")
+        self.assertEqual(okx_msg["fields"]["accFillSz"], "5")
+        self.assertEqual(okx_msg["fields"]["sCode"], "0")
+        self.assertEqual(okx_msg["body"], okx_fill)
+
+    def test_accepted_without_fill_px_is_not_partial_fill(self) -> None:
+        okx_body = json.dumps({"op": "order", "code": "0", "data": [{"sCode": "0"}]})
+        bybit_body = json.dumps({"retCode": 0, "retMsg": "OK", "op": "order.create"})
+
+        def recv(venue: str) -> str:
+            if venue == "okx":
+                return okx_body
+            return bybit_body
+
+        result = place_live(
+            data_root=self.root,
+            spread_side="open_long",
+            base_coin="BTC",
+            signal_ts_ms=1_700_000_000_000,
+            okx_book=_book(2),
+            bybit_book=_book(2),
+            meta=_meta(),
+            sender=self.sender,
+            credentials=_creds(),
+            inst_id_code=101,
+            recv_fn=recv,
+        )
+        self.assertIsNone(result.abort)
+        self.assertFalse(result.completed)
+        self.assertTrue(result.keep_pending)
+        self.assertEqual(result.status, "accepted")
+        self.assertNotEqual(result.abort, "partial_fill")
+        rows = _read(theta_trades_jsonl_path(self.root, "2023-11-14"))
+        statuses = [r.get("status") for r in rows]
+        self.assertIn("pending", statuses)
+        self.assertNotIn("open", statuses)
+        self.assertNotIn("closed", statuses)
+        okx_msg = next(r for r in rows if r.get("venue") == "okx")
+        bybit_msg = next(r for r in rows if r.get("venue") == "bybit")
+        self.assertEqual(okx_msg["body"], okx_body)
+        self.assertEqual(okx_msg["venue_verdict"], "accept")
+        self.assertEqual(okx_msg["fields"]["code"], "0")
+        self.assertEqual(okx_msg["fields"]["sCode"], "0")
+        self.assertNotIn("fillPx", okx_msg["fields"])
+        self.assertNotIn("avgPx", okx_msg["fields"])
+        self.assertEqual(bybit_msg["body"], bybit_body)
+        self.assertEqual(bybit_msg["venue_verdict"], "accept")
+        self.assertEqual(bybit_msg["fields"]["retCode"], 0)
+        self.assertEqual(bybit_msg["fields"]["retMsg"], "OK")
+
+    def test_reject_keeps_the_venue_message(self) -> None:
+        okx_body = json.dumps(
+            {
+                "code": "0",
+                "data": [{"sCode": "51000", "sMsg": "Parameter clOrdId error"}],
+            }
+        )
+        bybit_body = json.dumps({"retCode": 0, "retMsg": "OK"})
+
+        def recv(venue: str) -> str:
+            if venue == "okx":
+                return okx_body
+            return bybit_body
+
+        result = place_live(
+            data_root=self.root,
+            spread_side="open_long",
+            base_coin="BTC",
+            signal_ts_ms=1_700_000_000_000,
+            okx_book=_book(2),
+            bybit_book=_book(2),
+            meta=_meta(),
+            sender=self.sender,
+            credentials=_creds(),
+            inst_id_code=101,
+            recv_fn=recv,
+        )
+        self.assertEqual(result.abort, "venue_reject")
+        self.assertFalse(result.completed)
+        self.assertTrue(result.keep_pending)
+        rows = _read(theta_trades_jsonl_path(self.root, "2023-11-14"))
+        statuses = [r.get("status") for r in rows]
+        self.assertNotIn("open", statuses)
+        self.assertNotIn("closed", statuses)
+        okx_msg = next(r for r in rows if r.get("venue") == "okx")
+        self.assertEqual(okx_msg["body"], okx_body)
+        self.assertEqual(okx_msg["venue_verdict"], "reject")
+        self.assertEqual(okx_msg["fields"]["sCode"], "51000")
+        self.assertEqual(okx_msg["fields"]["sMsg"], "Parameter clOrdId error")
 
     def test_timeout_partial_fill_does_not_send_again(self) -> None:
         calls = {"n": 0}

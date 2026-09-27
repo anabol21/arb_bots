@@ -233,6 +233,108 @@ class ManagerTests(unittest.TestCase):
         self.assertTrue(mgr.slot.pending)
         self.assertIsNone(mgr.slot.position)
 
+    def test_xrp_pending_journal_restores_and_does_not_place(self) -> None:
+        day = "2023-11-14"
+        path = theta_trades_jsonl_path(self.root, day)
+        pending = {
+            "schema_version": "bbot.synthetic_roll.v1",
+            "intent_id": "50db2540-3a43-4bb9-9972-5beda0d6a5d0",
+            "status": "pending",
+            "event": "open",
+            "base_coin": "XRP",
+            "side": "long",
+            "coin_qty": "6.6",
+            "okx_side": "buy",
+            "bybit_side": "sell",
+            "signal_ts_ms": 1_700_000_000_000,
+            "reduce_only": False,
+        }
+        gear22 = {
+            "schema_version": "bbot.theta_trade.v1",
+            "event": "open",
+            "intent_id": "gear22-row",
+            "base_coin": "XRP",
+            "side": "long",
+            "signal_ts_ms": 1_700_000_000_000,
+        }
+        path.write_text(
+            json.dumps(pending) + "\n" + json.dumps(gear22) + "\n",
+            encoding="utf-8",
+        )
+        calls = {"n": 0}
+
+        def place(**_kwargs):
+            calls["n"] += 1
+            return PlaceSendResult(completed=True, status="open")
+
+        def decide(*, slot, **_kwargs):
+            del slot
+            return SimpleNamespace(action="open", coin="XRP", side="long")
+
+        mgr = ThetaTradeManager(
+            data_root=self.root,
+            config=ThetaTradeConfig(notional_usdt=10.0, fill_delay_ms=0),
+            decide_fn=decide,
+            place_fn=place,
+            meta_fn=_meta,
+        )
+        self.assertTrue(mgr.slot.pending)
+        self.assertIsNone(mgr.slot.position)
+        self.assertTrue(mgr.slot.slot_busy())
+        quotes = {"XRP": {"okx": _book(2, 1000), "bybit": _book(2, 1000)}}
+        mgr.on_theta_snapshots(
+            [], quotes=quotes, coin_order=["XRP"], now_ms=1_700_000_000_000
+        )
+        self.assertEqual(calls["n"], 0)
+        self.assertTrue(mgr.slot.pending)
+        self.assertIsNone(mgr.slot.position)
+
+    def test_open_journal_blocks_a_new_open(self) -> None:
+        path = theta_trades_jsonl_path(self.root, "2023-11-14")
+        path.write_text(
+            json.dumps(
+                {
+                    "schema_version": "bbot.synthetic_roll.v1",
+                    "intent_id": "50db2540-3a43-4bb9-9972-5beda0d6a5d0",
+                    "status": "open",
+                    "event": "open",
+                    "base_coin": "XRP",
+                    "side": "long",
+                    "coin_qty": "6.6",
+                    "signal_ts_ms": 1_700_000_000_000,
+                    "fill_ts_ms": 1_700_000_000_100,
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        calls = {"n": 0}
+
+        def place(**_kwargs):
+            calls["n"] += 1
+            return PlaceSendResult(completed=True, status="open")
+
+        def decide(*, slot, **_kwargs):
+            del slot
+            return SimpleNamespace(action="open", coin="XRP", side="long")
+
+        mgr = ThetaTradeManager(
+            data_root=self.root,
+            config=ThetaTradeConfig(notional_usdt=10.0, fill_delay_ms=0),
+            decide_fn=decide,
+            place_fn=place,
+            meta_fn=_meta,
+        )
+        self.assertFalse(mgr.slot.pending)
+        self.assertIsNotNone(mgr.slot.position)
+        self.assertEqual(mgr.slot.position.base_coin, "XRP")
+        self.assertEqual(mgr.slot.position.side, "long")
+        quotes = {"XRP": {"okx": _book(2, 1000), "bybit": _book(2, 1000)}}
+        mgr.on_theta_snapshots(
+            [], quotes=quotes, coin_order=["XRP"], now_ms=1_700_000_001_000
+        )
+        self.assertEqual(calls["n"], 0)
+
     def test_process_local_chain_one_slot(self) -> None:
         seed, coin, side = _find_open_hold_close_seed(POOL)
         mgr = self._manager(random.Random(seed))

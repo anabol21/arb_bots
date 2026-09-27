@@ -1,8 +1,13 @@
 """Thin synthetic_roll place path. Not ``LiveBroker.place``.
 
 Order: preprocess (sides + shared coin qty) → send_long/send_short → journal
-``pending`` → wait for fills → journal each raw venue body → completed row
-only when both ``fillPx``/``avgPx`` exist. One price leaves the slot pending.
+``pending`` → wait for each venue's order answer → journal the raw body and
+the fields that message actually contains → completed row only when both
+answers are accepted and both ``fillPx``/``avgPx`` are in those messages.
+
+An accept with no fill price is not ``partial_fill``; the slot stays pending.
+A frame that is not an accept is a reject, and the venue message is kept.
+No order answer before the deadline stays ``partial_fill``.
 
 Local mode uses the same journal and chrono steps. Fill prices come from the
 signal books. No sockets.
@@ -88,20 +93,34 @@ def _append_trade_rows(data_root: Path, rows: list[Mapping[str, Any]]) -> None:
             os.fsync(fh.fileno())
 
 
-def _fill_px(body: Optional[str]) -> Optional[str]:
+_PARSED_KEYS = ("fillPx", "avgPx", "accFillSz", "code", "sCode", "retCode", "sMsg", "retMsg")
+
+
+def _is_zero_code(val: object) -> bool:
+    return val == 0 or str(val) == "0"
+
+
+def _parse_json_obj(body: Optional[str]) -> Optional[dict[str, Any]]:
     if not body:
         return None
     try:
         data = json.loads(body)
     except json.JSONDecodeError:
         return None
-    found: list[tuple[str, str]] = []
+    if not isinstance(data, dict):
+        return None
+    return data
+
+
+def _present_fields(data: Mapping[str, Any]) -> dict[str, Any]:
+    """First value of each order field that the message actually contains."""
+    found: dict[str, Any] = {}
 
     def walk(node: object) -> None:
         if isinstance(node, dict):
             for key, val in node.items():
-                if key in ("fillPx", "avgPx") and val not in (None, ""):
-                    found.append((str(key), str(val)))
+                if key in _PARSED_KEYS and val not in (None, "") and key not in found:
+                    found[str(key)] = val
                 else:
                     walk(val)
         elif isinstance(node, list):
@@ -109,11 +128,52 @@ def _fill_px(body: Optional[str]) -> Optional[str]:
                 walk(item)
 
     walk(data)
-    for prefer in ("fillPx", "avgPx"):
-        for key, val in found:
-            if key == prefer:
-                return val
+    return found
+
+
+def _fill_px(body: Optional[str]) -> Optional[str]:
+    data = _parse_json_obj(body)
+    if data is None:
+        return None
+    fields = _present_fields(data)
+    for key in ("fillPx", "avgPx"):
+        val = fields.get(key)
+        if val not in (None, ""):
+            return str(val)
     return None
+
+
+def classify_order_answer(exchange: str, body: Optional[str]) -> Optional[str]:
+    """``accept`` or ``reject`` for an order answer. ``None`` is not one.
+
+    Classification uses the response code only. Fill fields are a later parse
+    of the same message.
+
+    OKX accepted: top-level ``code`` is ``0`` and ``data[0].sCode`` is ``0``
+    or absent. Bybit accepted: ``retCode`` is ``0``. Any other order answer
+    is a reject.
+    """
+    data = _parse_json_obj(body)
+    if data is None:
+        return None
+    venue = str(exchange).strip().lower()
+    if venue == "bybit":
+        if "retCode" not in data:
+            if str(data.get("event") or "") == "error":
+                return "reject"
+            return None
+        return "accept" if _is_zero_code(data.get("retCode")) else "reject"
+    if "code" not in data:
+        if str(data.get("event") or "") == "error":
+            return "reject"
+        return None
+    if not _is_zero_code(data.get("code")):
+        return "reject"
+    rows = data.get("data")
+    if isinstance(rows, list) and rows and isinstance(rows[0], dict) and "sCode" in rows[0]:
+        if not _is_zero_code(rows[0].get("sCode")):
+            return "reject"
+    return "accept"
 
 
 def drain_trade_fill(
@@ -122,11 +182,12 @@ def drain_trade_fill(
     exchange: str,
     timeout_sec: float = SYNTHETIC_FILL_WAIT_SEC,
 ) -> Optional[str]:
-    """Read until a frame carries ``fillPx`` or ``avgPx``, or the deadline.
+    """Read until an order answer, or the deadline.
 
     ``read_frame(timeout_sec)`` raises ``TimeoutError`` when no frame is ready.
-    Ping/pong and other frames without a fill price are skipped. Returns
-    ``None`` when the bound expires so the caller keeps ``partial_fill``.
+    Ping/pong is skipped. The first accept or reject is returned before any
+    price lookup. ``None`` means no order answer arrived, so the caller keeps
+    ``partial_fill``.
     """
     from app.bot.private.ws_private import is_ws_noise_frame
 
@@ -144,7 +205,7 @@ def drain_trade_fill(
             continue
         if is_ws_noise_frame(venue, raw):
             continue
-        if _fill_px(raw):
+        if classify_order_answer(venue, raw) is not None:
             return raw
     return None
 
@@ -301,19 +362,28 @@ def _place(
     chrono.flush()
 
     venue_rows: list[dict[str, Any]] = []
+    verdicts: dict[str, Optional[str]] = {}
     for venue, body in bodies:
         chrono.venue_message(venue)
-        venue_rows.append(
-            {
-                "schema_version": "bbot.synthetic_roll.v1",
-                "intent_id": iid,
-                "status": "venue_message",
-                "venue": venue,
-                "body": body,
-                "signal_ts_ms": int(signal_ts_ms),
-                "base_coin": coin,
-            }
-        )
+        row: dict[str, Any] = {
+            "schema_version": "bbot.synthetic_roll.v1",
+            "intent_id": iid,
+            "status": "venue_message",
+            "venue": venue,
+            "body": body,
+            "signal_ts_ms": int(signal_ts_ms),
+            "base_coin": coin,
+        }
+        parsed = _parse_json_obj(body)
+        if parsed is not None:
+            fields = _present_fields(parsed)
+            if fields:
+                row["fields"] = fields
+        verdict = classify_order_answer(venue, body)
+        if verdict is not None:
+            row["venue_verdict"] = verdict
+        verdicts[venue] = verdict
+        venue_rows.append(row)
     if venue_rows:
         _append_trade_rows(data_root, venue_rows)
     chrono.flush()
@@ -321,6 +391,28 @@ def _place(
     px = {venue: _fill_px(body) for venue, body in bodies}
     okx_fill = px.get("okx")
     bybit_fill = px.get("bybit")
+    okx_verdict = verdicts.get("okx")
+    bybit_verdict = verdicts.get("bybit")
+    if okx_verdict == "reject" or bybit_verdict == "reject":
+        both_reject = okx_verdict == "reject" and bybit_verdict == "reject"
+        return _abort("venue_reject", keep_pending=not both_reject)
+    if okx_verdict == "accept" and bybit_verdict == "accept" and (
+        not okx_fill or not bybit_fill
+    ):
+        chrono.abort("accepted_no_fill")
+        chrono.flush()
+        return PlaceSendResult(
+            abort=None,
+            completed=False,
+            keep_pending=True,
+            status="accepted",
+            okx_fill_px=okx_fill,
+            bybit_fill_px=bybit_fill,
+            coin_qty=coin_qty,
+            base_coin=coin,
+            side=pos_side,
+            intent_id=iid,
+        )
     if not okx_fill or not bybit_fill:
         return _abort("partial_fill", keep_pending=True)
 

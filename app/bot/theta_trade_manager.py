@@ -767,6 +767,78 @@ def decide_theta_k1(
     return ThetaDecision(action="skip", base_coin="", side="", reason="no_signal")
 
 
+_SYNTHETIC_ROLL_SCHEMA = "bbot.synthetic_roll.v1"
+_SYNTHETIC_SLOT_STATUSES = ("pending", "open", "closed")
+
+
+def restore_synthetic_slot(
+    data_root: Path, *, notional_usdt: float
+) -> tuple[Optional[OpenPosition], bool, str, str]:
+    """Latest ``bbot.synthetic_roll.v1`` intent in the theta trade journal.
+
+    Reads existing ``trades.jsonl`` files and does not create directories.
+    A ``pending`` row with no later ``open`` or ``closed`` for that intent
+    restores as pending. An ``open`` row restores the position. ``closed``
+    leaves the slot flat. Gear 2.2 rows are ignored.
+    """
+    root = Path(data_root) / "theta_trades"
+    if not root.is_dir():
+        return None, False, "", ""
+    paths = sorted(p for p in root.glob("event_date=*/trades.jsonl") if p.is_file())
+    latest_id: Optional[str] = None
+    rows_for: dict[str, list[dict[str, Any]]] = {}
+    for path in paths:
+        try:
+            text = path.read_text(encoding="utf-8")
+        except OSError:
+            continue
+        for line in text.splitlines():
+            if not line.strip():
+                continue
+            try:
+                rec = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(rec, dict):
+                continue
+            if rec.get("schema_version") != _SYNTHETIC_ROLL_SCHEMA:
+                continue
+            iid = rec.get("intent_id")
+            if not iid:
+                continue
+            iid_s = str(iid)
+            latest_id = iid_s
+            rows_for.setdefault(iid_s, []).append(rec)
+    if latest_id is None:
+        return None, False, "", ""
+    last_status: Optional[str] = None
+    last_row: Optional[dict[str, Any]] = None
+    for rec in rows_for[latest_id]:
+        status = rec.get("status")
+        if status in _SYNTHETIC_SLOT_STATUSES:
+            last_status = str(status)
+            last_row = rec
+    if last_row is None or last_status == "closed":
+        return None, False, "", ""
+    coin = str(last_row.get("base_coin") or "")
+    side = str(last_row.get("side") or "")
+    if last_status == "pending":
+        return None, True, coin, side
+    signal_ts = int(last_row.get("signal_ts_ms") or 0)
+    fill_ts = int(last_row.get("fill_ts_ms") or signal_ts)
+    position = OpenPosition(
+        trade_id=latest_id,
+        base_coin=coin,
+        side=side,
+        open_signal_ts_ms=signal_ts,
+        open_fill_ts_ms=fill_ts,
+        open_fill_spread=None,
+        open_notional=float(notional_usdt),
+        open_theta_1m=None,
+    )
+    return position, False, coin, side
+
+
 class ThetaTradeJournalWriter:
     """Append-only would_send trades under ``{data_root}/theta_trades/``."""
 
@@ -847,6 +919,16 @@ class ThetaTradeManager:
                 "theta live send requires place_fn and meta_fn (fail closed)"
             )
         self.slot = SlotState(k=int(self.config.slot_k))
+        position, pending, coin, side = restore_synthetic_slot(
+            self.data_root, notional_usdt=float(self.config.notional_usdt)
+        )
+        self.slot.position = position
+        self.slot.pending = pending
+        if pending or position is not None:
+            self._log(
+                "theta_trade_slot_restored | pending=%s | coin=%s | side=%s"
+                % (str(pending).lower(), coin, side)
+            )
         self._skip_log_budget = 0
 
     def _books_for(self, quotes: Mapping[str, Any], coin: str) -> tuple[dict, dict]:

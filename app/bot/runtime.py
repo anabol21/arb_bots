@@ -543,7 +543,7 @@ class BotRuntime:
         # Holds place-inflight so reconnect does not drop the sockets and a
         # thread keepalive stashes trade frames instead of racing recv_text.
         with session.place_io_section():
-            return place_live(
+            result = place_live(
                 data_root=self.data_root,
                 sender=sender,
                 credentials=session.bybit_credentials,
@@ -551,6 +551,13 @@ class BotRuntime:
                 recv_fn=_recv,
                 **kwargs,
             )
+        if getattr(result, "keep_pending", False):
+            abort = getattr(result, "abort", None)
+            if abort is None and getattr(result, "status", None) == "accepted":
+                self._synthetic_roll_halt_reason = "accepted_no_fill"
+            elif abort not in (None, "partial_fill"):
+                self._synthetic_roll_halt_reason = str(abort)
+        return result
 
     def _prefetch_okx_inst_id_codes(self) -> None:
         """Public instruments lookup once, before the roll loop. Not on place."""
