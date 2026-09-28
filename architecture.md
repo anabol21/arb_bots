@@ -268,6 +268,8 @@ Send: strategy filters in `LiveBroker.place` → Contour B dual `ws.send` → wa
 
 Journals for live: theta_trades `send` flag; private `events.jsonl` (`bbot.private.journal.v1`) when private writer is used; append-only `wire.jsonl` (`bbot.private.wire.v1`). Stub `legs.jsonl` `send` stays false by construction.
 
+Profile `synthetic_roll` keeps the gear 2.2 K=1 slot and size gate, and swaps in a synthetic pool roll (`app/bot/synthetic_policy.py`) instead of `decide_theta_k1`. Its place path is `app/bot/private/place_send.py` (not `LiveBroker.place`): shared coin qty near 10 USD, `send_long` / `send_short` only when both private legs are up, then a theta-trade journal chain `pending` → `open` / `closed`. Step stamps go to `{BBOT_DATA_ROOT}/theta_trades/event_date=*/step_chrono.jsonl` (not the canary chronometry dashboard) and refuse `/data/live`, `/data/bars`, `/data/compacted`, and `/data/spool`. Live exchange send for this profile runs only when `BBOT_BROKER=private_live`, `VENUE=live`, and `LIVE_ORDERS=1`; otherwise the process uses the local sender and does not open order sockets. After a successful send, the live wait drains each venue's warm trade inbound — private-runtime stash, then loop-owned `recv_text` (the listen queue, not a second `ws.recv`) — for about 5 seconds, skipping ping/pong. The place ack is classified before any price lookup: OKX is accepted when top-level `code` is `0` and `data[0].sCode` is `0` or absent; Bybit is accepted when `retCode` is `0`. That ack is journaled and does not finish the trade. The wait keeps reading the already-subscribed private `orders` push (OKX `build_okx_private_subscribe`) or the Bybit execution/order push, matched by `clOrdId` or `ordId`, for about 5 seconds. It does not send another request and does not open a REST query. When that push contains `fillPx` or `avgPx` (Bybit: `execPrice` or `avgPrice`), the journal stamps `venue_message` with `wall_ms` and writes `open` or `closed` with latency from `signal_ts_ms`. A reject stops immediately. An accept whose fill push does not arrive before the bound stays pending and is not `partial_fill`. A timeout with no order answer stays `partial_fill` and the synthetic roll task logs once and stops. On startup the manager restores the K=1 slot from the latest `bbot.synthetic_roll.v1` intent in `theta_trades`: a pending row with no later open or closed stays pending, and pending or open does not send a new open. OKX ``instIdCode`` is prefetched per symbol at warm start from the public instruments lookup (not from the single runtime field, and not on the place path). A missing code aborts with ``okx_inst_id_code_missing`` before ``ws.send`` and stops the roll the same way. OKX ``ctVal`` is prefetched the same way, off the place path. One shared coin qty is the amount nearest 10 USD; OKX ``sz = coin_qty / ctVal`` snapped to ``lotSz``; Bybit ``qty`` is that same coin qty snapped to ``qtyStep``. Unequal snapped coin amounts abort ``qty_mismatch`` and do not send. A missing ``ctVal`` aborts before send. On the live private path only, warmup sets leverage to 1 once per configured coin on OKX and Bybit before any place, outside the measured ``ws_send`` interval. If leverage is not 1 the place does not send. That call does not market-close or flatten. `gear22_would_send` and `gear22_live_canary` are unchanged.
+
 ### D. Offline model (not a VPS process)
 
 `model.ipynb` / `research/gear22_backtest/`: read parquet; `policy.decide`; dummy 1 Hz replay; fill = `spread_last`, not `Trade_Lat`. Gear 2.2 observation is **closed**. Gear 2.5 blocked until unlock. Not live-ready.
@@ -303,7 +305,7 @@ Local lean only: `SPREAD_LEAN_PARQUET_ROOT`, `SPREAD_LEAN_BARS_ROOT`, `SPREAD_LE
 | Name | Role |
 |---|---|
 | `BBOT_MODE` | `probe` \| `policy` |
-| `BBOT_PROFILE` | `gear1`, `signal_test`, `gear2_would_send` (`gear2`), `canary_wal_eden` (`canary`), `gear22_would_send` (`gear22`), `gear22_live_canary` (`gear22_live`) |
+| `BBOT_PROFILE` | `gear1`, `signal_test`, `gear2_would_send` (`gear2`), `canary_wal_eden` (`canary`), `gear22_would_send` (`gear22`), `gear22_live_canary` (`gear22_live`), `synthetic_roll` |
 | `BBOT_BROKER` | `stub` (default) \| `private_testnet` \| `private_live` (`live`) |
 | `BBOT_COINS`, `BBOT_NOTIONAL_USDT`, `BBOT_TRADE_LAT_MS` | universe / size / stub Trade_Lat |
 | `BBOT_DATA_ROOT`, `BBOT_LOG_PATH` | bot data + log (never `runtime.log`) |
@@ -368,7 +370,7 @@ Created by `resolve_data_root()`: `journal/`, `floor/`, `tw_p50/`, `theta/`, `th
 | `/data/bbot-gear22-live-canary` | theta_trades + floor/tw/theta metrics; `BBOT_PRIVATE_DATA_ROOT=.../private` |
 | `/data/bbot-theta-k1-canary` | claimed in docs for would_send canary; **unit not in this tree** — **TODO verify** |
 
-Also: `{root}/floor/event_date=*/metrics.jsonl` (`bbot.floor.v1`); `tw_p50/.../metrics.jsonl`; `theta/.../metrics.jsonl`; `theta_trades/.../trades.jsonl`; `{root}/state/pending.json`, `state/floor_warm.pkl`.
+Also: `{root}/floor/event_date=*/metrics.jsonl` (`bbot.floor.v1`); `tw_p50/.../metrics.jsonl`; `theta/.../metrics.jsonl`; `theta_trades/.../trades.jsonl`; `theta_trades/.../step_chrono.jsonl` (`synthetic_roll` place steps only); `{root}/state/pending.json`, `state/floor_warm.pkl`.
 
 ### B-private
 

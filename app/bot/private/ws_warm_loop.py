@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import asyncio
 import concurrent.futures
+import json
 import logging
 import queue
 import threading
@@ -50,6 +51,23 @@ def reconnect_sleep_sec(
 ) -> float:
     n = max(0, int(attempt))
     return min(float(cap), float(base) * (2**n))
+
+
+def _is_private_order_push(exchange: str, text: str) -> bool:
+    """OKX ``orders`` channel or Bybit order/execution topic. Not a place ack."""
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError:
+        return False
+    if not isinstance(data, dict):
+        return False
+    if str(exchange).strip().lower() == "bybit":
+        topic = str(data.get("topic") or "")
+        return topic.startswith("order") or topic.startswith("execution")
+    arg = data.get("arg")
+    if isinstance(arg, dict) and str(arg.get("channel") or "") == "orders":
+        return True
+    return False
 
 
 def _decode_ws_message(message: Any) -> str:
@@ -526,6 +544,16 @@ class PrivateWarmLoop:
                         runtime.handle_inbound_text(text)
                     except Exception:  # noqa: BLE001
                         raise
+                    # Orders/execution pushes are not the op=order reply. While
+                    # a place is in flight, keep the raw frame for that wait.
+                    # No second socket and no REST query.
+                    inflight = slot.place_inflight_fn
+                    if (
+                        inflight is not None
+                        and inflight()
+                        and _is_private_order_push(sock.exchange, text)
+                    ):
+                        runtime.stash_trade_inbound(text)
                     continue
             sock.push_inbound(text)
 

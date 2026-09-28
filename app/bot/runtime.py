@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import random
 import signal
 import sys
 import time
@@ -210,10 +211,12 @@ class BotRuntime:
             "gear22",
             "gear22_live_canary",
             "gear22_live",
+            "synthetic_roll",
         ):
             raise ValueError(
                 f"BBOT_PROFILE must be gear1|signal_test|gear2_would_send|"
-                f"canary_wal_eden|gear22_would_send|gear22_live_canary, "
+                f"canary_wal_eden|gear22_would_send|gear22_live_canary|"
+                f"synthetic_roll, "
                 f"got {self.profile!r}"
             )
         if self.profile == "default":
@@ -246,6 +249,8 @@ class BotRuntime:
                 coins_raw = "BTC,ETH,SOL,XRP"
             elif self.mode == "policy" and self.profile == "gear22_live_canary":
                 coins_raw = ",".join(GEAR22_HTML_TOP30)
+            elif self.mode == "policy" and self.profile == "synthetic_roll":
+                coins_raw = "BTC,ETH,SOL,XRP"
             else:
                 coins_raw = "BTC,ETH"
         self.coins = parse_coins(coins_raw)
@@ -266,6 +271,8 @@ class BotRuntime:
             self.notional = 10.0
         elif self.profile == "gear22_live_canary":
             self.notional = float(DEFAULT_LIVE_CANARY_NOTIONAL_USDT)
+        elif self.profile == "synthetic_roll":
+            self.notional = 10.0
         else:
             self.notional = 100.0
         self.trade_lat_ms = int(os.environ.get("BBOT_TRADE_LAT_MS") or "100")
@@ -288,14 +295,14 @@ class BotRuntime:
         self.policy = _try_load_policy() if self.mode == "policy" else None
         self.variation: dict[str, float] | None = None
         self.hyper: dict[str, object] | None = None
-        if self.policy is not None:
+        if self.policy is not None and self.profile != "synthetic_roll":
             self.variation = self.policy["variation_for_profile"](self.profile)
             self.hyper = self.policy["hyper_for_profile"](self.profile)
             if self.profile == "canary_wal_eden" and self.hyper is not None:
                 # Gate planned qty must match the broker notional ($10/leg).
                 self.hyper["position_size"] = float(self.notional)
         self.ma_windows: dict[str, Any] = {}
-        if self.policy is not None:
+        if self.policy is not None and self.profile != "synthetic_roll":
             CausalMaWindow = self.policy["CausalMaWindow"]
             avg_sec = float((self.hyper or self.policy["DEFAULT_HYPER"]).get("avg_window_sec") or 2.0)
             for c in self.coins:
@@ -366,19 +373,49 @@ class BotRuntime:
         self.theta_trade_enabled = theta_trade_enabled(self.profile)
         self.theta_trade: ThetaTradeManager | None = None
         self._theta_trade_warned = False
+        self._synthetic_roll_halted = False
+        self._synthetic_roll_halt_reason: Optional[str] = None
+        self._okx_inst_id_codes: dict[str, int] = {}
+        self._okx_ct_vals: dict[str, Any] = {}
+        # (venue, symbol) → "1" after warmup. Never stores a lever above 1.
+        self._leverage_one: dict[tuple[str, str], str] = {}
         if self.theta_trade_enabled:
             live_send = theta_live_send_requested(self.profile)
             theta_cfg = ThetaTradeConfig.from_env()
-            if live_send:
+            if live_send or self.profile == "synthetic_roll":
                 theta_cfg.notional_usdt = float(self.notional)
-            self.theta_trade = ThetaTradeManager(
-                data_root=self.data_root,
-                config=theta_cfg,
-                log=lambda m: self.log.info(m),
-                live_send=live_send,
-                place_fn=self.broker.place if live_send else None,
-                meta_fn=self._meta if live_send else None,
-            )
+            if self.profile == "synthetic_roll":
+                from app.bot.synthetic_policy import (
+                    make_synthetic_decide,
+                    synthetic_live_gates,
+                )
+
+                seed_raw = str(os.environ.get("BBOT_SYNTHETIC_SEED") or "").strip()
+                rng = random.Random(int(seed_raw)) if seed_raw else random.Random()
+                gates_on = synthetic_live_gates(os.environ)
+                # gear22_would_send / gear22_live_canary keep their own place_fn.
+                self.theta_trade = ThetaTradeManager(
+                    data_root=self.data_root,
+                    config=theta_cfg,
+                    log=lambda m: self.log.info(m),
+                    live_send=False,
+                    place_fn=(
+                        self._synthetic_live_place
+                        if gates_on
+                        else self._synthetic_local_place
+                    ),
+                    meta_fn=self._meta,
+                    decide_fn=make_synthetic_decide(self.coins, rng),
+                )
+            else:
+                self.theta_trade = ThetaTradeManager(
+                    data_root=self.data_root,
+                    config=theta_cfg,
+                    log=lambda m: self.log.info(m),
+                    live_send=live_send,
+                    place_fn=self.broker.place if live_send else None,
+                    meta_fn=self._meta if live_send else None,
+                )
         # Floor warm-start (standard for gear22 / when pickle present).
         self._floor_warm_path = resolve_floor_warm_path(self.data_root)
         self._floor_warm_loaded = False
@@ -449,6 +486,194 @@ class BotRuntime:
         from app.bot.private.ws_warm_session import start_warm_private_for_bot_process
 
         return start_warm_private_for_bot_process(**overrides)
+
+    def _synthetic_local_place(self, **kwargs: Any) -> Any:
+        """No sockets. Same journal and chrono as the live place path."""
+        from app.bot.private.okx_ct_val import bind_okx_ct_val
+        from app.bot.private.place_send import PlaceSendResult, place_local
+
+        bound, err = bind_okx_ct_val(kwargs.get("meta"), self._okx_ct_vals)
+        if err:
+            return PlaceSendResult(abort=err)
+        call = dict(kwargs)
+        call["meta"] = bound
+        return place_local(data_root=self.data_root, **call)
+
+    def _synthetic_live_place(self, **kwargs: Any) -> Any:
+        """Live gates only. Uses the warm session sender; does not open a new socket."""
+        from app.bot.private.place_send import (
+            SYNTHETIC_FILL_WAIT_SEC,
+            PlaceSendResult,
+            drain_trade_fill,
+            place_live,
+            read_warm_trade_frame,
+        )
+        from app.bot.private.send_legs import _attempt_ids
+        from app.bot.private.ws_trivial_dual_leg import (
+            TrivialDualSender,
+            warm_trade_send_fn,
+        )
+
+        session = self._private_warm
+        if session is None:
+            return PlaceSendResult(abort="private_channel_down")
+        from app.bot.private.okx_ct_val import bind_okx_ct_val
+        from app.bot.private.okx_inst_id import lookup_okx_inst_id_code
+
+        meta = kwargs.get("meta")
+        bound, ct_err = bind_okx_ct_val(meta, self._okx_ct_vals)
+        if ct_err:
+            self._synthetic_roll_halt_reason = ct_err
+            return PlaceSendResult(abort=ct_err)
+        symbol = str(getattr(bound, "okx_symbol", "") or "")
+        bybit_symbol = str(getattr(bound, "bybit_symbol", "") or "")
+        inst = lookup_okx_inst_id_code(self._okx_inst_id_codes, symbol)
+        if inst is None:
+            self._synthetic_roll_halt_reason = "okx_inst_id_code_missing"
+            return PlaceSendResult(abort="okx_inst_id_code_missing")
+        if not (
+            self._leverage_one.get(("okx", symbol)) == "1"
+            and self._leverage_one.get(("bybit", bybit_symbol)) == "1"
+        ):
+            self._synthetic_roll_halt_reason = "leverage_not_one"
+            return PlaceSendResult(abort="leverage_not_one")
+        kwargs = dict(kwargs)
+        kwargs["meta"] = bound
+        sender = getattr(self, "_synthetic_sender", None)
+        if sender is None:
+            sender = TrivialDualSender(send_fn=warm_trade_send_fn(session))
+            self._synthetic_sender = sender
+        deadline = time.monotonic() + SYNTHETIC_FILL_WAIT_SEC
+
+        def _runtime_for(venue: str) -> Any:
+            key = str(venue).strip().lower()
+            if key == "bybit":
+                return session.bybit_runtime
+            if key == "okx":
+                return session.okx_runtime
+            raise ValueError(f"recv venue must be bybit|okx, got {venue!r}")
+
+        def _recv(venue: str) -> Any:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return None
+            runtime = _runtime_for(venue)
+            bybit_id, okx_id, _dual = _attempt_ids(str(kwargs.get("intent_id") or ""))
+            return drain_trade_fill(
+                lambda timeout_sec: read_warm_trade_frame(runtime, timeout_sec),
+                exchange=str(getattr(runtime, "exchange", venue)),
+                timeout_sec=remaining,
+                order_ids={bybit_id, okx_id},
+            )
+
+        # Holds place-inflight so reconnect does not drop the sockets and a
+        # thread keepalive stashes trade frames instead of racing recv_text.
+        with session.place_io_section():
+            result = place_live(
+                data_root=self.data_root,
+                sender=sender,
+                credentials=session.bybit_credentials,
+                inst_id_code=inst,
+                recv_fn=_recv,
+                leverage_one=True,
+                **kwargs,
+            )
+        if getattr(result, "keep_pending", False):
+            abort = getattr(result, "abort", None)
+            if abort is None and getattr(result, "status", None) == "accepted":
+                self._synthetic_roll_halt_reason = "accepted_no_fill"
+            elif abort not in (None, "partial_fill"):
+                self._synthetic_roll_halt_reason = str(abort)
+        return result
+
+    def _prefetch_okx_inst_id_codes(self) -> None:
+        """Public instruments lookup once, before the roll loop. Not on place."""
+        from app.bot.private.okx_inst_id import (
+            fetch_okx_inst_id_code,
+            prefetch_okx_inst_id_codes,
+        )
+
+        symbols: list[str] = []
+        for coin in self.coins:
+            try:
+                symbols.append(self._meta(coin).okx_symbol)
+            except KeyError:
+                self.log.warning("okx_inst_id_skip | coin=%s | err=KeyError", coin)
+        self._okx_inst_id_codes = prefetch_okx_inst_id_codes(
+            symbols,
+            env=os.environ,
+            fetch_fn=fetch_okx_inst_id_code,
+        )
+        missing = [s for s in symbols if s not in self._okx_inst_id_codes]
+        self.log.info(
+            "okx_inst_id_prefetched | n=%s | missing=%s",
+            len(self._okx_inst_id_codes),
+            ",".join(missing) if missing else "-",
+        )
+
+    def _prefetch_okx_ct_vals(self) -> None:
+        """Public instruments ctVal once, before the roll loop. Not on place."""
+        from app.bot.private.okx_ct_val import fetch_okx_ct_val, prefetch_okx_ct_vals
+
+        symbols: list[str] = []
+        for coin in self.coins:
+            try:
+                symbols.append(self._meta(coin).okx_symbol)
+            except KeyError:
+                self.log.warning("okx_ct_val_skip | coin=%s | err=KeyError", coin)
+        self._okx_ct_vals = prefetch_okx_ct_vals(
+            symbols,
+            fetch_fn=fetch_okx_ct_val,
+        )
+        missing = [s for s in symbols if s not in self._okx_ct_vals]
+        self.log.info(
+            "okx_ct_val_prefetched | n=%s | missing=%s",
+            len(self._okx_ct_vals),
+            ",".join(missing) if missing else "-",
+        )
+
+    def _set_leverage_one(self) -> None:
+        """One signed leverage=1 POST per coin per venue. Not inside ws_send."""
+        from app.bot.private.leverage_one import LeverageTarget, set_leverage_one
+        from app.bot.private.venue import endpoints_for_venue
+
+        session = self._private_warm
+        if session is None:
+            return
+        targets: list[LeverageTarget] = []
+        for coin in self.coins:
+            try:
+                meta = self._meta(coin)
+            except KeyError:
+                self.log.warning("leverage_one_skip | coin=%s | err=KeyError", coin)
+                continue
+            targets.append(
+                LeverageTarget(
+                    coin=coin,
+                    okx_symbol=meta.okx_symbol,
+                    bybit_symbol=meta.bybit_symbol,
+                )
+            )
+        self._leverage_one = set_leverage_one(
+            targets,
+            okx_credentials=session.okx_credentials,
+            bybit_credentials=session.bybit_credentials,
+            endpoints=endpoints_for_venue("live"),
+        )
+        missing = [
+            f"{venue}:{symbol}"
+            for target in targets
+            for venue, symbol in (
+                ("okx", target.okx_symbol),
+                ("bybit", target.bybit_symbol),
+            )
+            if self._leverage_one.get((venue, symbol)) != "1"
+        ]
+        self.log.info(
+            "leverage_one_warmup | n=%s | missing=%s",
+            len(self._leverage_one),
+            ",".join(missing) if missing else "-",
+        )
 
     def _meta(self, coin: str) -> InstrumentMeta:
         if coin not in self.universe:
@@ -839,6 +1064,42 @@ class BotRuntime:
                 await self._flush_tw_p50_rows(rows)
             if self.theta_enabled and self.theta_screener is not None:
                 await self._emit_theta_from_tw(snapshots)
+
+    async def _synthetic_roll_loop(self) -> None:
+        """~1 Hz pool roll. Does not wait on theta snapshots."""
+        while not self.stop_event.is_set():
+            try:
+                await asyncio.wait_for(
+                    self.stop_event.wait(), timeout=EMIT_INTERVAL_SEC
+                )
+                break
+            except asyncio.TimeoutError:
+                pass
+            if self.theta_trade is None:
+                continue
+            try:
+                await self.theta_trade.on_theta_snapshots_async(
+                    [],
+                    quotes=self.quotes,
+                    coin_order=self.coins,
+                )
+            except Exception as exc:  # noqa: BLE001
+                if not self._theta_trade_warned:
+                    self._theta_trade_warned = True
+                    self.log.warning(
+                        "theta_trade_failed | err=%s",
+                        type(exc).__name__,
+                    )
+                continue
+            halt = getattr(self, "_synthetic_roll_halt_reason", None)
+            if self.theta_trade.slot.pending or halt:
+                if not self._synthetic_roll_halted:
+                    self._synthetic_roll_halted = True
+                    self.log.warning(
+                        "synthetic_roll_stopped | reason=%s",
+                        halt or "partial_fill",
+                    )
+                break
 
     async def _theta_emit_loop(self) -> None:
         """~1 Hz theta when TW p50 watch is off but theta is on."""
@@ -1314,8 +1575,14 @@ class BotRuntime:
                 self._private_warm._handshake_count,  # noqa: SLF001
                 self._private_warm.keepalive_running,
             )
+            if self.profile == "synthetic_roll":
+                self._prefetch_okx_ct_vals()
+                self._prefetch_okx_inst_id_codes()
+                self._set_leverage_one()
         else:
             self.log.info("private_warm_skipped | live_private_send=false")
+            if self.profile == "synthetic_roll":
+                self._prefetch_okx_ct_vals()
 
         tasks: list[asyncio.Task] = [asyncio.create_task(self._heartbeat())]
         # Periodic floor warm pickle save (if floor observer is enabled)
@@ -1336,6 +1603,10 @@ class BotRuntime:
             # Theta alone (TW off): still emit ~1 Hz from last RAM snapshots.
             tasks.append(
                 asyncio.create_task(self._theta_emit_loop(), name="theta-emit")
+            )
+        if self.profile == "synthetic_roll" and self.theta_trade is not None:
+            tasks.append(
+                asyncio.create_task(self._synthetic_roll_loop(), name="synthetic-roll")
             )
         for coin in self.coins:
             meta = self._meta(coin)
