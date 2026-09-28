@@ -10,6 +10,10 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from app.bot.private.coin_qty import CoinQtyError, shared_coin_qty, shared_from_meta
+from app.bot.private.leverage_one import LeverageTarget, set_leverage_one
+from app.bot.private.okx_ct_val import bind_okx_ct_val, prefetch_okx_ct_vals
+from app.bot.private.venue import endpoints_for_venue
+from app.bot.stub_broker import InstrumentMeta
 from app.bot.private.journal_v1 import PrivateJournalWriter
 from app.bot.paths import theta_step_chrono_jsonl_path, theta_trades_jsonl_path
 from app.bot.private.order_sign import LiveCredentials
@@ -132,6 +136,17 @@ class CoinQtyTests(unittest.TestCase):
             )
         self.assertEqual(ctx.exception.code, "qty_mismatch")
 
+    def test_absent_ct_val_attribute_is_qty_mismatch(self) -> None:
+        meta = SimpleNamespace(
+            okx_lot_size=Decimal("0.01"),
+            okx_min_size=Decimal("0.01"),
+            bybit_qty_step=Decimal("0.1"),
+            bybit_min_order_qty=Decimal("0.1"),
+        )
+        with self.assertRaises(CoinQtyError) as ctx:
+            shared_from_meta(meta=meta, okx_px=Decimal("1.52"), bybit_px=Decimal("1.52"))
+        self.assertEqual(ctx.exception.code, "qty_mismatch")
+
 
 class LegAndSendTests(unittest.TestCase):
     def setUp(self) -> None:
@@ -160,7 +175,7 @@ class LegAndSendTests(unittest.TestCase):
             meta=_meta(),
             sender=self.sender,
             credentials=_creds(),
-            inst_id_code=101,
+            leverage_one=True, inst_id_code=101,
             recv_fn=lambda _v: None,
         )
         self.assertEqual(result.abort, "private_channel_down")
@@ -180,7 +195,7 @@ class LegAndSendTests(unittest.TestCase):
             meta=_meta(okx_ct_val=None),
             sender=self.sender,
             credentials=_creds(),
-            inst_id_code=101,
+            leverage_one=True, inst_id_code=101,
         )
         self.assertEqual(mismatch.abort, "qty_mismatch")
         self.assertEqual(self.ws.sent, [])
@@ -194,7 +209,7 @@ class LegAndSendTests(unittest.TestCase):
             meta=_meta(),
             sender=self.sender,
             credentials=_creds(),
-            inst_id_code=101,
+            leverage_one=True, inst_id_code=101,
         )
         self.assertEqual(band.abort, "min_notional_above_band")
         self.assertEqual(self.ws.sent, [])
@@ -218,7 +233,7 @@ class LegAndSendTests(unittest.TestCase):
             meta=_meta(),
             sender=self.sender,
             credentials=_creds(),
-            inst_id_code=101,
+            leverage_one=True, inst_id_code=101,
             recv_fn=recv,
         )
         self.assertEqual(len(self.ws.sent), 2)
@@ -251,7 +266,7 @@ class LegAndSendTests(unittest.TestCase):
             meta=_meta(),
             sender=self.sender,
             credentials=_creds(),
-            inst_id_code=101,
+            leverage_one=True, inst_id_code=101,
             recv_fn=recv,
         )
         self.assertEqual(len(self.ws.sent), 2)
@@ -285,7 +300,7 @@ class LegAndSendTests(unittest.TestCase):
             close_of="open_long",
             sender=self.sender,
             credentials=_creds(),
-            inst_id_code=101,
+            leverage_one=True, inst_id_code=101,
             recv_fn=recv,
         )
         self.assertEqual(result.status, "closed")
@@ -359,7 +374,7 @@ class LiveCycleTests(unittest.TestCase):
                 data_root=self.root,
                 sender=self.sender,
                 credentials=_creds(),
-                inst_id_code=101,
+                leverage_one=True, inst_id_code=101,
                 recv_fn=recv,
                 **kwargs,
             )
@@ -576,7 +591,7 @@ class FillWaitTests(unittest.TestCase):
             meta=_meta(),
             sender=self.sender,
             credentials=_creds(),
-            inst_id_code=101,
+            leverage_one=True, inst_id_code=101,
             recv_fn=recv,
         )
         self.assertTrue(result.completed)
@@ -619,7 +634,7 @@ class FillWaitTests(unittest.TestCase):
             meta=_meta(),
             sender=self.sender,
             credentials=_creds(),
-            inst_id_code=101,
+            leverage_one=True, inst_id_code=101,
             recv_fn=recv,
         )
         self.assertIsNone(result.abort)
@@ -669,7 +684,7 @@ class FillWaitTests(unittest.TestCase):
             meta=_meta(),
             sender=self.sender,
             credentials=_creds(),
-            inst_id_code=101,
+            leverage_one=True, inst_id_code=101,
             recv_fn=recv,
         )
         self.assertEqual(result.abort, "venue_reject")
@@ -700,7 +715,7 @@ class FillWaitTests(unittest.TestCase):
                 data_root=self.root,
                 sender=self.sender,
                 credentials=_creds(),
-                inst_id_code=101,
+                leverage_one=True, inst_id_code=101,
                 recv_fn=recv,
                 **kwargs,
             )
@@ -794,7 +809,7 @@ class InstIdCodeTests(unittest.TestCase):
             ),
             sender=self.sender,
             credentials=_creds(),
-            inst_id_code=None,
+            leverage_one=True, inst_id_code=None,
             recv_fn=self._recv,
         )
         self.assertEqual(result.abort, "okx_inst_id_code_missing")
@@ -835,7 +850,7 @@ class InstIdCodeTests(unittest.TestCase):
                 ),
                 sender=self.sender,
                 credentials=_creds(),
-                inst_id_code=lookup_okx_inst_id_code(codes, symbol),
+                leverage_one=True, inst_id_code=lookup_okx_inst_id_code(codes, symbol),
                 recv_fn=self._recv,
             )
             self.assertTrue(result.completed, result.abort)
@@ -879,7 +894,7 @@ class ClOrdIdTests(unittest.TestCase):
             ),
             sender=self.sender,
             credentials=_creds(),
-            inst_id_code=193761,
+            leverage_one=True, inst_id_code=193761,
             intent_id=intent_id,
             recv_fn=recv,
         )
@@ -907,6 +922,265 @@ class ClOrdIdTests(unittest.TestCase):
         self.assertEqual(result.abort, "okx_cl_ord_id_illegal")
         self.assertFalse(result.completed)
         self.assertEqual(self.ws.sent, [])
+
+
+class XrpContractSizeTests(unittest.TestCase):
+    """ctVal=100 must not send the coin count as OKX sz."""
+
+    def setUp(self) -> None:
+        clear_all()
+        self.tmp = Path(tempfile.mkdtemp())
+        self.root = self.tmp / "bbot"
+        self.root.mkdir()
+        self.ws = _Ws()
+        self.sender = _Sender(self.ws)
+        set_exchange_coins("okx", ["XRP"], True)
+        set_exchange_coins("bybit", ["XRP"], True)
+
+    def tearDown(self) -> None:
+        clear_all()
+
+    def test_xrp_ct_val_100_rejects_sz_6_6(self) -> None:
+        px = Decimal("1.52")
+        ct_val = Decimal("100")
+        lot = Decimal("0.01")
+        step = Decimal("0.1")
+        sized = shared_coin_qty(
+            okx_px=px,
+            bybit_px=px,
+            ct_val=ct_val,
+            okx_lot_sz=lot,
+            okx_min_sz=lot,
+            bybit_qty_step=step,
+            bybit_min_qty=step,
+            bybit_min_notional=Decimal("5"),
+        )
+        self.assertGreaterEqual(sized.okx_sz, Decimal("0.06"))
+        self.assertLessEqual(sized.okx_sz, Decimal("0.07"))
+        self.assertNotEqual(sized.okx_sz, Decimal("6.6"))
+        self.assertEqual(sized.okx_sz * ct_val, sized.bybit_qty)
+        self.assertEqual(sized.coin_qty, sized.bybit_qty)
+        self.assertLess(abs(sized.okx_notional - Decimal("10")), Decimal("2"))
+        self.assertLess(abs(sized.bybit_notional - Decimal("10")), Decimal("2"))
+        self.assertEqual(sized.okx_sz, Decimal("0.07"))
+        self.assertEqual(sized.coin_qty, Decimal("7"))
+
+        universe = InstrumentMeta(
+            base_coin="XRP",
+            okx_symbol="XRP-USDT-SWAP",
+            bybit_symbol="XRPUSDT",
+            okx_lot_size=0.01,
+            okx_min_size=0.01,
+            bybit_qty_step=0.1,
+            bybit_min_order_qty=0.1,
+            bybit_min_notional_value=5,
+        )
+        bare = place_live(
+            data_root=self.root,
+            spread_side="open_long",
+            base_coin="XRP",
+            signal_ts_ms=1_700_000_000_000,
+            okx_book=_book_px("1.52"),
+            bybit_book=_book_px("1.52"),
+            meta=universe,
+            sender=self.sender,
+            credentials=_creds(),
+            leverage_one=True,
+            inst_id_code=188237,
+            recv_fn=lambda _v: None,
+        )
+        self.assertEqual(bare.abort, "qty_mismatch")
+        self.assertEqual(self.ws.sent, [])
+
+        cache = prefetch_okx_ct_vals(
+            ["XRP-USDT-SWAP"],
+            fetch_fn=lambda _symbol: ct_val,
+        )
+        bound, err = bind_okx_ct_val(universe, cache)
+        self.assertIsNone(err)
+
+        def recv(venue: str) -> str:
+            if venue == "okx":
+                return json.dumps({"fillPx": "1.52"})
+            return json.dumps({"avgPx": "1.52"})
+
+        result = place_live(
+            data_root=self.root,
+            spread_side="open_long",
+            base_coin="XRP",
+            signal_ts_ms=1_700_000_000_000,
+            okx_book=_book_px("1.52"),
+            bybit_book=_book_px("1.52"),
+            meta=bound,
+            sender=self.sender,
+            credentials=_creds(),
+            leverage_one=True,
+            inst_id_code=188237,
+            recv_fn=recv,
+        )
+        self.assertTrue(result.completed, result.abort)
+        self.assertEqual(len(self.ws.sent), 2)
+        bybit = json.loads(self.ws.sent[0])
+        okx = json.loads(self.ws.sent[1])
+        okx_args = okx["args"][0]
+        bybit_args = bybit["args"][0]
+        self.assertNotIn("lever", okx_args)
+        self.assertNotIn("lever", bybit_args)
+        self.assertEqual(okx_args["sz"], "0.07")
+        self.assertNotEqual(okx_args["sz"], "6.6")
+        self.assertEqual(bybit_args["qty"], "7")
+        self.assertEqual(Decimal(okx_args["sz"]) * ct_val, Decimal(bybit_args["qty"]))
+        old_coin = Decimal("6.6") * ct_val
+        self.assertNotEqual(old_coin, Decimal(bybit_args["qty"]))
+        self.assertGreater(old_coin * px, Decimal("15"))
+        self.assertNotIn("set-leverage", " ".join(self.ws.sent))
+
+
+def _method_body(source: str, name: str) -> str:
+    start = -1
+    for marker in (f"    async def {name}(", f"    def {name}("):
+        found = source.find(marker)
+        if found >= 0:
+            start = found
+            break
+    if start < 0:
+        raise AssertionError(f"missing method {name}")
+    rest = source[start + 1 :]
+    cuts = [n for n in (rest.find("\n    def "), rest.find("\n    async def ")) if n >= 0]
+    end = min(cuts) if cuts else len(rest)
+    return source[start : start + 1 + end]
+
+
+def _book_px(px: str) -> dict:
+    return {
+        "bid_price": px,
+        "ask_price": px,
+        "bid_size": "1000",
+        "ask_size": "1000",
+    }
+
+
+class LeverageOneTests(unittest.TestCase):
+    def test_warmup_posts_lever_one_and_place_does_not(self) -> None:
+        posts: list[tuple[str, str]] = []
+
+        def post(url: str, _headers: object, body: str) -> tuple[int, dict]:
+            posts.append((url, body))
+            data = json.loads(body)
+            if "lever" in data:
+                self.assertEqual(data["lever"], "1")
+                return 200, {"code": "0", "data": [{"lever": "1", "mgnMode": "cross"}]}
+            self.assertEqual(data["buyLeverage"], "1")
+            self.assertEqual(data["sellLeverage"], "1")
+            return 200, {"retCode": 0, "retMsg": "OK", "result": {}}
+
+        confirmed = set_leverage_one(
+            [
+                LeverageTarget("XRP", "XRP-USDT-SWAP", "XRPUSDT"),
+                LeverageTarget("SOL", "SOL-USDT-SWAP", "SOLUSDT"),
+            ],
+            okx_credentials=_creds(),
+            bybit_credentials=_creds(),
+            endpoints=endpoints_for_venue("live"),
+            post_fn=post,
+        )
+        self.assertEqual(confirmed[("okx", "XRP-USDT-SWAP")], "1")
+        self.assertEqual(confirmed[("bybit", "XRPUSDT")], "1")
+        self.assertEqual(confirmed[("okx", "SOL-USDT-SWAP")], "1")
+        self.assertEqual(confirmed[("bybit", "SOLUSDT")], "1")
+        self.assertEqual(len(posts), 4)
+        for url, body in posts:
+            self.assertTrue(url.endswith("/api/v5/account/set-leverage") or url.endswith("/v5/position/set-leverage"))
+            self.assertNotIn("close", url)
+            self.assertNotIn("flatten", url)
+            parsed = json.loads(body)
+            for key in ("lever", "buyLeverage", "sellLeverage"):
+                if key in parsed:
+                    self.assertEqual(parsed[key], "1")
+        with self.assertRaises(TypeError):
+            set_leverage_one(  # type: ignore[call-arg]
+                [],
+                okx_credentials=_creds(),
+                bybit_credentials=_creds(),
+                endpoints=endpoints_for_venue("live"),
+                lever="20",
+            )
+        demo_posts: list[str] = []
+
+        def demo_post(url: str, _headers: object, body: str) -> tuple[int, dict]:
+            demo_posts.append(url)
+            return 200, {}
+
+        skipped = set_leverage_one(
+            [LeverageTarget("XRP", "XRP-USDT-SWAP", "XRPUSDT")],
+            okx_credentials=_creds(),
+            bybit_credentials=_creds(),
+            endpoints=endpoints_for_venue("testnet"),
+            post_fn=demo_post,
+        )
+        self.assertEqual(skipped, {})
+        self.assertEqual(demo_posts, [])
+
+        def bad_okx(url: str, _headers: object, body: str) -> tuple[int, dict]:
+            if "set-leverage" in url and "okx.com" in url:
+                return 200, {"code": "0", "data": [{"lever": "20"}]}
+            return 200, {"retCode": 110043, "retMsg": "leverage not modified"}
+
+        not_one = set_leverage_one(
+            [LeverageTarget("XRP", "XRP-USDT-SWAP", "XRPUSDT")],
+            okx_credentials=_creds(),
+            bybit_credentials=_creds(),
+            endpoints=endpoints_for_venue("live"),
+            post_fn=bad_okx,
+        )
+        self.assertNotIn(("okx", "XRP-USDT-SWAP"), not_one)
+        self.assertEqual(not_one.get(("bybit", "XRPUSDT")), "1")
+
+        runtime_text = Path("app/bot/runtime.py").read_text(encoding="utf-8")
+        place_src = _method_body(runtime_text, "_synthetic_live_place")
+        run_src = _method_body(runtime_text, "run")
+        self.assertNotIn("set_leverage_one", place_src)
+        self.assertIn("_set_leverage_one", run_src)
+        from app.bot.private import place_send as place_mod
+
+        text = Path(place_mod.__file__).read_text(encoding="utf-8")
+        self.assertNotIn("set_leverage_one", text)
+        self.assertNotIn("set-leverage", text)
+
+    def test_leverage_not_one_does_not_send(self) -> None:
+        clear_all()
+        tmp = Path(tempfile.mkdtemp())
+        root = tmp / "bbot"
+        root.mkdir()
+        ws = _Ws()
+        set_exchange_coins("okx", ["XRP"], True)
+        set_exchange_coins("bybit", ["XRP"], True)
+        result = place_live(
+            data_root=root,
+            spread_side="open_long",
+            base_coin="XRP",
+            signal_ts_ms=1_700_000_000_000,
+            okx_book=_book_px("1.52"),
+            bybit_book=_book_px("1.52"),
+            meta=_meta(
+                base_coin="XRP",
+                okx_symbol="XRP-USDT-SWAP",
+                bybit_symbol="XRPUSDT",
+                okx_ct_val=Decimal("100"),
+                okx_lot_size=Decimal("0.01"),
+                okx_min_size=Decimal("0.01"),
+                bybit_qty_step=Decimal("0.1"),
+                bybit_min_order_qty=Decimal("0.1"),
+            ),
+            sender=_Sender(ws),
+            credentials=_creds(),
+            inst_id_code=188237,
+        )
+        self.assertEqual(result.abort, "leverage_not_one")
+        self.assertEqual(ws.sent, [])
+        rows = _read(theta_step_chrono_jsonl_path(root, "2023-11-14"))
+        self.assertFalse(any(row.get("block") == "ws_send" for row in rows))
+        clear_all()
 
 
 if __name__ == "__main__":

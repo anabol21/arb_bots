@@ -367,6 +367,7 @@ def _place(
     inst_id_code: Optional[int] = None,
     recv_fn: Optional[RecvFn] = None,
     wait_fn: Optional[WaitFn] = None,
+    leverage_one: bool = False,
 ) -> PlaceSendResult:
     del extra  # manager passes the live-canary extra dict; this path does not use it
     iid = str(intent_id or uuid.uuid4())
@@ -406,6 +407,10 @@ def _place(
             chrono.exit("channel_check")
             return _abort("private_channel_down")
     chrono.exit("channel_check")
+
+    # Account leverage is set once at warmup. This read stays outside ws_send.
+    if transport == "live" and leverage_one is not True:
+        return _abort("leverage_not_one")
 
     chrono.enter("ws_send")
     send_abort: Optional[str] = None
@@ -623,6 +628,7 @@ def place_live(
     close_of: Optional[str] = None,
     extra: Optional[dict[str, Any]] = None,
     intent_id: Optional[str] = None,
+    leverage_one: bool = False,
     **_ignored: Any,
 ) -> PlaceSendResult:
     """Production live place. ``sender`` is injected in tests (no exchange sockets)."""
@@ -643,4 +649,5 @@ def place_live(
         inst_id_code=inst_id_code,
         recv_fn=recv_fn,
         wait_fn=wait_fn,
+        leverage_one=leverage_one,
     )

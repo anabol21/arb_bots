@@ -4,6 +4,7 @@ OKX ``sz = coin_qty / ctVal`` snapped with the same ROUND_UP step helper as
 ``order_plan._quantize_qty``. Bybit ``qty`` is that coin amount snapped to
 ``qtyStep``. Unequal post-snap coin amounts abort ``qty_mismatch``. A minimum
 legal notional already above 15 USD aborts ``min_notional_above_band``.
+A missing ``ctVal`` aborts ``qty_mismatch``. It is never defaulted to 1.
 """
 
 from __future__ import annotations
@@ -225,12 +226,10 @@ def shared_from_meta(
     ct_raw = getattr(meta, "okx_ct_val", _MISSING)
     if ct_raw is _MISSING:
         ct_raw = getattr(meta, "ct_val", _MISSING)
-    if ct_raw is None:
+    # Never assume ctVal=1. A missing value is the XRP bug: coin count sent as sz.
+    if ct_raw is _MISSING or ct_raw is None or ct_raw == "":
         raise CoinQtyError("qty_mismatch")
-    if ct_raw is _MISSING:
-        ct_val: Optional[Decimal] = Decimal("1")
-    else:
-        ct_val = _as_decimal(ct_raw, field="ct_val")
+    ct_val = _as_decimal(ct_raw, field="ct_val")
 
     def _opt(name: str) -> Optional[Decimal]:
         raw = getattr(meta, name, None)

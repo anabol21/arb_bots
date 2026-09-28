@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass
+from decimal import Decimal
 from typing import Any, Callable, Mapping, Optional, Protocol
 
 from app.bot.private.order_metadata import (
@@ -141,6 +142,16 @@ class LiveHttpMetadataProvider:
         """Public instruments ``instIdCode`` only. No ticker and no order."""
         row = self._okx_swap_instrument_row(symbol)
         return parse_inst_id_code(row.get("instIdCode"))
+
+    def okx_ct_val(self, symbol: str) -> Decimal:
+        """Public instruments ``ctVal`` (base coin per contract). No order."""
+        row = self._okx_swap_instrument_row(symbol)
+        if "ctVal" not in row or row.get("ctVal") in (None, ""):
+            raise MetadataError("okx ctVal missing")
+        ct_val = parse_decimal(row.get("ctVal"), field="ct_val")
+        if ct_val <= 0:
+            raise MetadataError("okx ctVal missing")
+        return ct_val
 
     def _okx_swap_instrument_row(self, symbol: str) -> Mapping[str, Any]:
         from app.bot.private.rest_readonly import okx_public_rest_headers

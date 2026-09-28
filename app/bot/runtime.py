@@ -376,6 +376,9 @@ class BotRuntime:
         self._synthetic_roll_halted = False
         self._synthetic_roll_halt_reason: Optional[str] = None
         self._okx_inst_id_codes: dict[str, int] = {}
+        self._okx_ct_vals: dict[str, Any] = {}
+        # (venue, symbol) → "1" after warmup. Never stores a lever above 1.
+        self._leverage_one: dict[tuple[str, str], str] = {}
         if self.theta_trade_enabled:
             live_send = theta_live_send_requested(self.profile)
             theta_cfg = ThetaTradeConfig.from_env()
@@ -486,9 +489,15 @@ class BotRuntime:
 
     def _synthetic_local_place(self, **kwargs: Any) -> Any:
         """No sockets. Same journal and chrono as the live place path."""
-        from app.bot.private.place_send import place_local
+        from app.bot.private.okx_ct_val import bind_okx_ct_val
+        from app.bot.private.place_send import PlaceSendResult, place_local
 
-        return place_local(data_root=self.data_root, **kwargs)
+        bound, err = bind_okx_ct_val(kwargs.get("meta"), self._okx_ct_vals)
+        if err:
+            return PlaceSendResult(abort=err)
+        call = dict(kwargs)
+        call["meta"] = bound
+        return place_local(data_root=self.data_root, **call)
 
     def _synthetic_live_place(self, **kwargs: Any) -> Any:
         """Live gates only. Uses the warm session sender; does not open a new socket."""
@@ -508,14 +517,28 @@ class BotRuntime:
         session = self._private_warm
         if session is None:
             return PlaceSendResult(abort="private_channel_down")
+        from app.bot.private.okx_ct_val import bind_okx_ct_val
         from app.bot.private.okx_inst_id import lookup_okx_inst_id_code
 
         meta = kwargs.get("meta")
-        symbol = str(getattr(meta, "okx_symbol", "") or "")
+        bound, ct_err = bind_okx_ct_val(meta, self._okx_ct_vals)
+        if ct_err:
+            self._synthetic_roll_halt_reason = ct_err
+            return PlaceSendResult(abort=ct_err)
+        symbol = str(getattr(bound, "okx_symbol", "") or "")
+        bybit_symbol = str(getattr(bound, "bybit_symbol", "") or "")
         inst = lookup_okx_inst_id_code(self._okx_inst_id_codes, symbol)
         if inst is None:
             self._synthetic_roll_halt_reason = "okx_inst_id_code_missing"
             return PlaceSendResult(abort="okx_inst_id_code_missing")
+        if not (
+            self._leverage_one.get(("okx", symbol)) == "1"
+            and self._leverage_one.get(("bybit", bybit_symbol)) == "1"
+        ):
+            self._synthetic_roll_halt_reason = "leverage_not_one"
+            return PlaceSendResult(abort="leverage_not_one")
+        kwargs = dict(kwargs)
+        kwargs["meta"] = bound
         sender = getattr(self, "_synthetic_sender", None)
         if sender is None:
             sender = TrivialDualSender(send_fn=warm_trade_send_fn(session))
@@ -552,6 +575,7 @@ class BotRuntime:
                 credentials=session.bybit_credentials,
                 inst_id_code=inst,
                 recv_fn=_recv,
+                leverage_one=True,
                 **kwargs,
             )
         if getattr(result, "keep_pending", False):
@@ -584,6 +608,70 @@ class BotRuntime:
         self.log.info(
             "okx_inst_id_prefetched | n=%s | missing=%s",
             len(self._okx_inst_id_codes),
+            ",".join(missing) if missing else "-",
+        )
+
+    def _prefetch_okx_ct_vals(self) -> None:
+        """Public instruments ctVal once, before the roll loop. Not on place."""
+        from app.bot.private.okx_ct_val import fetch_okx_ct_val, prefetch_okx_ct_vals
+
+        symbols: list[str] = []
+        for coin in self.coins:
+            try:
+                symbols.append(self._meta(coin).okx_symbol)
+            except KeyError:
+                self.log.warning("okx_ct_val_skip | coin=%s | err=KeyError", coin)
+        self._okx_ct_vals = prefetch_okx_ct_vals(
+            symbols,
+            fetch_fn=fetch_okx_ct_val,
+        )
+        missing = [s for s in symbols if s not in self._okx_ct_vals]
+        self.log.info(
+            "okx_ct_val_prefetched | n=%s | missing=%s",
+            len(self._okx_ct_vals),
+            ",".join(missing) if missing else "-",
+        )
+
+    def _set_leverage_one(self) -> None:
+        """One signed leverage=1 POST per coin per venue. Not inside ws_send."""
+        from app.bot.private.leverage_one import LeverageTarget, set_leverage_one
+        from app.bot.private.venue import endpoints_for_venue
+
+        session = self._private_warm
+        if session is None:
+            return
+        targets: list[LeverageTarget] = []
+        for coin in self.coins:
+            try:
+                meta = self._meta(coin)
+            except KeyError:
+                self.log.warning("leverage_one_skip | coin=%s | err=KeyError", coin)
+                continue
+            targets.append(
+                LeverageTarget(
+                    coin=coin,
+                    okx_symbol=meta.okx_symbol,
+                    bybit_symbol=meta.bybit_symbol,
+                )
+            )
+        self._leverage_one = set_leverage_one(
+            targets,
+            okx_credentials=session.okx_credentials,
+            bybit_credentials=session.bybit_credentials,
+            endpoints=endpoints_for_venue("live"),
+        )
+        missing = [
+            f"{venue}:{symbol}"
+            for target in targets
+            for venue, symbol in (
+                ("okx", target.okx_symbol),
+                ("bybit", target.bybit_symbol),
+            )
+            if self._leverage_one.get((venue, symbol)) != "1"
+        ]
+        self.log.info(
+            "leverage_one_warmup | n=%s | missing=%s",
+            len(self._leverage_one),
             ",".join(missing) if missing else "-",
         )
 
@@ -1488,9 +1576,13 @@ class BotRuntime:
                 self._private_warm.keepalive_running,
             )
             if self.profile == "synthetic_roll":
+                self._prefetch_okx_ct_vals()
                 self._prefetch_okx_inst_id_codes()
+                self._set_leverage_one()
         else:
             self.log.info("private_warm_skipped | live_private_send=false")
+            if self.profile == "synthetic_roll":
+                self._prefetch_okx_ct_vals()
 
         tasks: list[asyncio.Task] = [asyncio.create_task(self._heartbeat())]
         # Periodic floor warm pickle save (if floor observer is enabled)
