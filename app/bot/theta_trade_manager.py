@@ -794,6 +794,29 @@ class ThetaTradeManager:
         self.slot = SlotState(k=int(self.config.slot_k))
         self._skip_log_budget = 0
 
+    def abort_coin_if_held(self, coin: str, *, reason: str = "hot_drop") -> bool:
+        """Clear K=1 slot when it holds/pends ``coin`` (hot-drop tear-down).
+
+        Returns True when the slot was cleared. Does not place broker cancels
+        (would_send stub has nothing on the wire; live_send canary should not
+        hot-drop under a live position without an explicit close path).
+        """
+        coin_u = str(coin).strip().upper()
+        if not coin_u:
+            return False
+        pos = self.slot.position
+        held = pos is not None and str(pos.base_coin).upper() == coin_u
+        # pending alone: we cannot know the coin without a position; if pending
+        # and position already set to this coin, clear both.
+        if not held:
+            return False
+        self.slot.position = None
+        self.slot.pending = False
+        self._log(
+            f"theta_trade_abort_coin | base_coin={coin_u} | reason={reason}"
+        )
+        return True
+
     def _books_for(self, quotes: Mapping[str, Any], coin: str) -> tuple[dict, dict]:
         books = quotes.get(coin) or {}
         return dict(books.get("okx") or {}), dict(books.get("bybit") or {})

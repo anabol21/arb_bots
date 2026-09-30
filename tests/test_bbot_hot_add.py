@@ -480,6 +480,9 @@ class RuntimeWiringTests(unittest.TestCase):
         self.assertIn("async def drop_coin(", src)
         self.assertIn("run_okx_books5", src)
         self.assertIn("run_bybit_orderbook1", src)
+        self.assertIn("hot_add_warm", src)
+        self.assertIn("_warm_hot_added_coin", src)
+        self.assertIn("_trade_coin_order", src)
         # Must not wire collector SPREAD_HOT_ADD_* into the bot process.
         self.assertNotIn("SPREAD_HOT_ADD", src)
         self.assertIn("await asyncio.gather(*tasks)", src)  # off-path preserved

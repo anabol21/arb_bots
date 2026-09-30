@@ -300,8 +300,66 @@ When off, bot behavior is indistinguishable from the pre-B1 gather path.
 Local proof:
 
 ```bash
-python3 -m py_compile app/bot/hot_add.py app/bot/runtime.py
-python3 -m unittest tests/test_bbot_hot_add.py
+python3 -m py_compile app/bot/hot_add.py app/bot/hot_add_warm.py app/bot/runtime.py
+python3 -m unittest tests/test_bbot_hot_add.py tests/test_bbot_hot_add_warm.py
 ```
 
 Isolation contract remains [`b-bot-isolation.md`](b-bot-isolation.md).
+
+---
+
+## B2 bot hot-add → would_send warm (`BBOT_HOT_ADD` + history)
+
+Extends B1 so a hot-added coin can enter the **gear 2.2 would_send** path
+(`policy.decide` via theta K=1) without waiting ~12h of live SMA-12. Still
+**would_send only** (`send=false`). Do **not** fan-out or restart
+`spread-bbot-theta-k1-canary` — run a **duplicate canary** unit with its own
+`BBOT_DATA_ROOT`.
+
+Code: `app/bot/hot_add_warm.py` + `BotRuntime._warm_hot_added_coin` /
+`_trade_coin_order` / `drop_coin` abort in `app/bot/runtime.py`.
+
+| Env | Default | Meaning |
+|-----|---------|---------|
+| `BBOT_HOT_ADD_WARM` | on (when unset) | Set `0` to skip history warm (coin stays non-eligible for trades). |
+| `BBOT_HOT_ADD_HISTORY_ROOT` | unset → `{BBOT_DATA_ROOT}` | Read-only history root. Relative paths resolve under `BBOT_DATA_ROOT`. |
+| `BBOT_HOT_ADD_HISTORY_HOURS` | `12` | Minimum history window for slim-tick span check. |
+| `BBOT_HOT_ADD_HISTORY_MIN_SMA12` | `40` | Min finite SMA-12 tips per side after warm (fail-closed if short). |
+
+| Seam | Rule |
+|------|------|
+| Warm source 1 | `{history_root}/floor/event_date=*/metrics.jsonl` via existing `build_warm_state_from_floor_journal` (same payload shape as restart `floor_warm.pkl`). |
+| Warm source 2 | Slim ticks: `{history_root}/spread_ticks.jsonl` (or `spreads/*.jsonl|*.csv`) with `event_local_ts_ms,base_coin,spread_long,spread_short`. Replay through `LiveFloorObserver.note_spreads`. |
+| Parquet | **Not** read in-process (no pandas/pyarrow on the bot path). Offline: materialize floor journal or slim ticks under `HISTORY_ROOT`. |
+| Eligibility | Bootstrap `BBOT_COINS` start eligible. Hot-added coins join `_trade_eligible` only after warm OK. `_run_theta_trade` passes `_trade_coin_order()` into `policy.decide`. |
+| Fail-closed | Missing/short history → log `bbot_hot_add_warm_fail_closed`; keep WS+quotes for observability; **do not** open would_send on that coin. |
+| Drop | `abort_coin_if_held` clears K=1 if needed; drop floor/TW-p50 state; cancel WS; shrink maps. No orphan observers. |
+| Cap | Unchanged: `BBOT_HOT_ADD_MAX_EXTRA` (default 8). |
+
+Local proof:
+
+```bash
+python3 -m py_compile app/bot/hot_add.py app/bot/hot_add_warm.py app/bot/runtime.py
+python3 -m unittest tests/test_bbot_hot_add.py tests/test_bbot_hot_add_warm.py
+```
+
+### Duplicate would_send canary checklist (ops — do not deploy from this patch)
+
+1. **Own tree**: clone unit e.g. `spread-bbot-theta-k1-hotadd-canary` — never edit the live theta-k1 unit.
+2. **Own data root**: `BBOT_DATA_ROOT=/data/bbot-theta-k1-hotadd-canary` (writable journals only here).
+3. **History RO mount**: prepare a readable copy of collector history (floor journal and/or slim ticks). Example: offline oneshot from compacted → floor metrics under `/data/bbot-hotadd-history`, then:
+   - `BBOT_HOT_ADD_HISTORY_ROOT=/data/bbot-hotadd-history`
+   - systemd `ReadOnlyPaths=/data/bbot-hotadd-history` (and optionally RO compact copy). Prefer **not** granting live unit write to `/data/compacted` / `/data/live`.
+4. **Flags**: `BBOT_HOT_ADD=1`, `BBOT_HOT_ADD_WARM=1`, `BBOT_PROFILE=gear22_would_send`, `BBOT_BROKER=stub`, theta/floor/tw_p50 watches on (profile defaults).
+5. **Driver**: reuse D/B1 delta/drop files under the canary data root (`hot_add_delta.csv` / `hot_add_drop.csv`) with full lot/tick columns.
+6. **Green**:
+   - `bbot_hot_add_spawned | … | trade_eligible=true`
+   - `bbot_hot_add_warm_ok | source=floor_journal` (or `slim_spreads`)
+   - theta / `theta_trades` rows can cite the hot-added coin
+   - drop → `bbot_hot_add_dropped`, no leftover `okx:{coin}` / `bybit:{coin}` tasks; slot cleared if held
+   - missing history coin → `trade_eligible=false` + `bbot_hot_add_warm_fail_closed`, bootstrap coins still trade
+7. **Abort**: any write under `/data/live`; NRestarts on production collector or live theta-k1 canary; live `send=true`.
+
+Isolation contract remains [`b-bot-isolation.md`](b-bot-isolation.md).
+Would_send contour: [`gear22-theta-k1-would-send.md`](gear22-theta-k1-would-send.md).
+

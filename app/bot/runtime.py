@@ -66,6 +66,14 @@ from app.bot.hot_add import (
     bbot_hot_add_poll_sec,
     run_hot_add_poller,
 )
+from app.bot.hot_add_warm import (
+    bbot_hot_add_warm_enabled,
+    drop_floor_coin_state,
+    drop_tw_p50_coin_state,
+    resolve_hot_add_history_root,
+    seed_tw_p50_from_slim_ticks,
+    warm_floor_from_history,
+)
 from app.utils.task_supervisor import TaskSupervisor
 from app.utils.tick_validity import TickValidityGate, book_l1_complete
 from app.utils.universe_csv import load_take_yes_base_coins, read_universe_dicts
@@ -421,6 +429,11 @@ class BotRuntime:
                         "~12h SMA-12 history; build via python -m app.bot.floor_warm",
                         warm_path,
                     )
+        # Bootstrap coins are trade-eligible; hot-added coins join only after
+        # a successful history warm (fail-closed otherwise).
+        self._trade_eligible: set[str] = {str(c).upper() for c in self.coins}
+        self._hot_added_coins: set[str] = set()
+        self._hot_add_history_root = resolve_hot_add_history_root(self.data_root)
 
     def _uses_market_manager(self) -> bool:
         if self.policy is not None:
@@ -493,10 +506,74 @@ class BotRuntime:
                 c for c in self.theta_screener.coins if c != coin
             ]
 
+
+    def _warm_hot_added_coin(self, coin: str) -> None:
+        """Load ~12h history into floor (+ optional TW-p50 seed). Fail-closed."""
+        coin_u = str(coin).strip().upper()
+        if not bbot_hot_add_warm_enabled():
+            self.log.info(
+                "bbot_hot_add_warm_skipped | base_coin=%s | reason=warm_disabled",
+                coin_u,
+            )
+            return
+        if self.floor_observer is None:
+            self.log.error(
+                "bbot_hot_add_warm_fail_closed | base_coin=%s | reason=no_floor_observer",
+                coin_u,
+            )
+            return
+        history_root = self._hot_add_history_root
+        if history_root is None:
+            # Fall back to bot data_root floor journals from prior runs.
+            history_root = self.data_root
+        try:
+            result = warm_floor_from_history(
+                self.floor_observer,
+                coin_u,
+                history_root,
+                logger=self.log,
+            )
+        except Exception as exc:  # noqa: BLE001 — never kill the pool on warm
+            self.log.error(
+                "bbot_hot_add_warm_fail_closed | base_coin=%s | reason=warm_exception | "
+                "err=%s",
+                coin_u,
+                type(exc).__name__,
+            )
+            return
+        if result.ok:
+            self._trade_eligible.add(coin_u)
+            try:
+                n = seed_tw_p50_from_slim_ticks(
+                    self.tw_p50_observer, coin_u, history_root
+                )
+                if n:
+                    self.log.info(
+                        "bbot_hot_add_tw_p50_seeded | base_coin=%s | ticks=%s",
+                        coin_u,
+                        n,
+                    )
+            except Exception as exc:  # noqa: BLE001
+                self.log.warning(
+                    "bbot_hot_add_tw_p50_seed_failed | base_coin=%s | err=%s",
+                    coin_u,
+                    type(exc).__name__,
+                )
+        else:
+            self.log.error(
+                "bbot_hot_add_warm_fail_closed | %s",
+                result.as_log_fields(),
+            )
+
+    def _trade_coin_order(self) -> list[str]:
+        """Coins eligible for policy.decide / theta would_send opens."""
+        return [c for c in self.coins if c in self._trade_eligible]
+
     def spawn_coin(self, row: dict[str, str]) -> None:
         """Orchestration-only hot-add: init quotes, extend maps, spawn bot WS tasks.
 
         Prefer TaskSupervisor. Does not call REST. Does not touch D paths.
+        After WS spawn, attempt ~12h history warm; only then mark trade-eligible.
         """
         supervisor = getattr(self, "_task_supervisor", None)
         if supervisor is None:
@@ -536,15 +613,21 @@ class BotRuntime:
             ),
             name=f"bybit:{coin}",
         )
+        self._hot_added_coins.add(coin)
+        # Fail-closed: not trade-eligible until history warm succeeds.
+        self._trade_eligible.discard(coin)
+        self._warm_hot_added_coin(coin)
         self.log.info(
-            "bbot_hot_add_spawned | base_coin=%s | okx_symbol=%s | bybit_symbol=%s",
+            "bbot_hot_add_spawned | base_coin=%s | okx_symbol=%s | bybit_symbol=%s | "
+            "trade_eligible=%s",
             coin,
             okx_symbol,
             bybit_symbol,
+            str(coin in self._trade_eligible).lower(),
         )
 
     async def drop_coin(self, coin: str) -> None:
-        """Orchestration-only hot-drop: cancel WS tasks, then del from maps."""
+        """Orchestration-only hot-drop: abort would_send, cancel WS, clear state."""
         supervisor = getattr(self, "_task_supervisor", None)
         if supervisor is None:
             raise RuntimeError("drop_coin requires an active task supervisor")
@@ -558,6 +641,13 @@ class BotRuntime:
                 coin,
             )
             return
+        # Cancel would_send / clear K=1 if this coin holds the slot.
+        if self.theta_trade is not None:
+            self.theta_trade.abort_coin_if_held(coin, reason="hot_drop")
+        self._trade_eligible.discard(coin)
+        self._hot_added_coins.discard(coin)
+        drop_floor_coin_state(self.floor_observer, coin)
+        drop_tw_p50_coin_state(self.tw_p50_observer, coin)
         cancelled = supervisor.cancel_named(f"okx:{coin}", f"bybit:{coin}")
         await supervisor.drain_named(cancelled)
         del self.quotes[coin]
@@ -1022,7 +1112,7 @@ class BotRuntime:
             await self.theta_trade.on_theta_snapshots_async(
                 theta_snaps,
                 quotes=self.quotes,
-                coin_order=self.coins,
+                coin_order=self._trade_coin_order(),
             )
         except Exception as exc:  # noqa: BLE001 — never stall the public book path
             if not self._theta_trade_warned:
@@ -1456,14 +1546,18 @@ class BotRuntime:
 
         delta_path = bbot_hot_add_delta_path(self.data_root)
         drop_path = bbot_hot_add_drop_path(self.data_root)
+        hist = self._hot_add_history_root
         self.log.info(
-            "bbot_hot_add | enabled=%s | delta=%s | drop=%s | max_extra=%s",
+            "bbot_hot_add | enabled=%s | delta=%s | drop=%s | max_extra=%s | "
+            "warm=%s | history_root=%s",
             str(hot_add_on).lower(),
             delta_path,
             drop_path,
             bbot_hot_add_max_extra() if hot_add_on else os.environ.get(
                 "BBOT_HOT_ADD_MAX_EXTRA", "8"
             ),
+            str(bbot_hot_add_warm_enabled()).lower() if hot_add_on else "off",
+            hist if hist is not None else self.data_root,
         )
 
         if not hot_add_on:
