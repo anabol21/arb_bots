@@ -356,7 +356,7 @@ python3 -m unittest tests/test_bbot_hot_add.py tests/test_bbot_hot_add_warm.py
    - `bbot_hot_add_spawned | … | trade_eligible=true`
    - `bbot_hot_add_warm_ok | source=floor_journal` (or `slim_spreads`)
    - theta / `theta_trades` rows can cite the hot-added coin
-   - drop → `bbot_hot_add_dropped`, no leftover `okx:{coin}` / `bybit:{coin}` tasks; slot cleared if held
+   - drop → `bbot_hot_add_dropped`, no leftover `okx:{coin}` / `bybit:{coin}` tasks; slot cleared if held; cumulative re-poll of an already-gone coin is a silent no-op (`bbot_drop_coin_skip` debug, not Sentry)
    - missing history coin → `trade_eligible=false` + `bbot_hot_add_warm_fail_closed`, bootstrap coins still trade
 7. **Abort**: any write under `/data/live`; NRestarts on production collector or live theta-k1 canary; live `send=true`.
 

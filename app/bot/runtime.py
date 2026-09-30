@@ -627,7 +627,12 @@ class BotRuntime:
         )
 
     async def drop_coin(self, coin: str) -> None:
-        """Orchestration-only hot-drop: abort would_send, cancel WS, clear state."""
+        """Orchestration-only hot-drop: abort would_send, cancel WS, clear state.
+
+        Cumulative ``hot_add_drop.csv`` re-polls (mtime change / restart) re-list
+        already-torn-down coins. If the coin is not in ``quotes`` it is not
+        currently managed — silent no-op (debug), not a Sentry-worthy error.
+        """
         supervisor = getattr(self, "_task_supervisor", None)
         if supervisor is None:
             raise RuntimeError("drop_coin requires an active task supervisor")
@@ -636,8 +641,9 @@ class BotRuntime:
             self.log.error("bbot_drop_coin_invalid | base_coin=-")
             return
         if coin not in self.quotes:
-            self.log.error(
-                "bbot_drop_coin_missing | base_coin=%s | reason=not_in_quotes",
+            # Already gone / never managed (cumulative drop re-poll). No Sentry.
+            self.log.debug(
+                "bbot_drop_coin_skip | base_coin=%s | reason=not_in_quotes",
                 coin,
             )
             return

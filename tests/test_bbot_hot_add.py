@@ -470,6 +470,145 @@ class FakeDeltaPollerTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("okx:AAA", names)
 
 
+class DropCoinIdempotentTests(unittest.IsolatedAsyncioTestCase):
+    """BotRuntime.drop_coin: cumulative re-drop must not ERROR/Sentry."""
+
+    async def test_double_drop_no_error_event(self) -> None:
+        import sys
+        import types
+
+        if "websockets" not in sys.modules:
+            sys.modules["websockets"] = types.ModuleType("websockets")
+        from app.bot.runtime import BotRuntime
+
+        coin = "COAI"
+        quotes: dict[str, Any] = {
+            coin: {"okx": empty_book(), "bybit": empty_book()},
+        }
+        cancelled: dict[str, bool] = {}
+        supervisor = TaskSupervisor()
+        supervisor.add(
+            _hang_until_cancelled(f"okx:{coin}", cancelled),
+            name=f"okx:{coin}",
+        )
+        supervisor.add(
+            _hang_until_cancelled(f"bybit:{coin}", cancelled),
+            name=f"bybit:{coin}",
+        )
+        await asyncio.sleep(0.02)
+
+        logger = logging.getLogger("test_bbot_drop_idempotent")
+        logger.handlers.clear()
+        logger.setLevel(logging.DEBUG)
+        logger.propagate = False
+        records: list[logging.LogRecord] = []
+
+        class _Capture(logging.Handler):
+            def emit(self, record: logging.LogRecord) -> None:
+                records.append(record)
+
+        handler = _Capture()
+        logger.addHandler(handler)
+        try:
+            rt = object.__new__(BotRuntime)
+            rt._task_supervisor = supervisor
+            rt.log = logger
+            rt.quotes = quotes
+            rt.theta_trade = None
+            rt._trade_eligible = {coin}
+            rt._hot_added_coins = {coin}
+            rt.floor_observer = None
+            rt.tw_p50_observer = None
+            rt.coins = ["AAA", coin]
+            rt._book_inflight = {}
+            rt._book_dirty = {}
+            rt._book_last_exchange = {}
+            rt._ma_cache = {}
+            rt.ma_windows = {}
+            rt.theta_screener = None
+
+            await BotRuntime.drop_coin(rt, coin)
+            self.assertNotIn(coin, quotes)
+            self.assertTrue(cancelled.get(f"okx:{coin}"))
+            self.assertTrue(cancelled.get(f"bybit:{coin}"))
+            info_msgs = [
+                r.getMessage()
+                for r in records
+                if r.levelno == logging.INFO
+            ]
+            self.assertTrue(
+                any("bbot_hot_add_dropped" in m and coin in m for m in info_msgs),
+                info_msgs,
+            )
+
+            records.clear()
+            # Cumulative drop CSV re-poll: same coin, already gone.
+            await BotRuntime.drop_coin(rt, coin)
+            await BotRuntime.drop_coin(rt, coin)
+
+            error_or_warn = [
+                r
+                for r in records
+                if r.levelno >= logging.WARNING
+            ]
+            self.assertEqual(
+                error_or_warn,
+                [],
+                [f"{r.levelname}:{r.getMessage()}" for r in error_or_warn],
+            )
+            self.assertFalse(
+                any("bbot_drop_coin_missing" in r.getMessage() for r in records)
+            )
+            debug_msgs = [
+                r.getMessage()
+                for r in records
+                if r.levelno == logging.DEBUG
+            ]
+            self.assertTrue(
+                any(
+                    "bbot_drop_coin_skip" in m and "not_in_quotes" in m
+                    for m in debug_msgs
+                ),
+                debug_msgs,
+            )
+        finally:
+            logger.removeHandler(handler)
+            supervisor.cancel_all()
+            await supervisor.drain()
+
+    async def test_empty_coin_still_errors(self) -> None:
+        import sys
+        import types
+
+        if "websockets" not in sys.modules:
+            sys.modules["websockets"] = types.ModuleType("websockets")
+        from app.bot.runtime import BotRuntime
+
+        logger = logging.getLogger("test_bbot_drop_invalid")
+        logger.handlers.clear()
+        logger.setLevel(logging.DEBUG)
+        logger.propagate = False
+        records: list[logging.LogRecord] = []
+
+        class _Capture(logging.Handler):
+            def emit(self, record: logging.LogRecord) -> None:
+                records.append(record)
+
+        handler = _Capture()
+        logger.addHandler(handler)
+        try:
+            rt = object.__new__(BotRuntime)
+            rt._task_supervisor = TaskSupervisor()
+            rt.log = logger
+            rt.quotes = {}
+            await BotRuntime.drop_coin(rt, "  ")
+            errors = [r for r in records if r.levelno >= logging.ERROR]
+            self.assertEqual(len(errors), 1)
+            self.assertIn("bbot_drop_coin_invalid", errors[0].getMessage())
+        finally:
+            logger.removeHandler(handler)
+
+
 class RuntimeWiringTests(unittest.TestCase):
     def test_runtime_imports_bbot_hot_add_not_spread(self) -> None:
         src = (REPO / "app" / "bot" / "runtime.py").read_text(encoding="utf-8")
