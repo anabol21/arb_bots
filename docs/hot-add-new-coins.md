@@ -272,17 +272,36 @@ indistinguishable from the current pool.
 
 ---
 
-## B1 bot seams (note only — no bot code in this patch)
+## B1 bot hot-add (`BBOT_HOT_ADD`)
 
-Later bot hot-add is a **separate** contour. Do not implement it here.
+Separate contour from D1. Bot process uses **only** `BBOT_*` env names — never
+`SPREAD_HOT_ADD_*`. Code: `app/bot/hot_add.py` + `BotRuntime.spawn_coin` /
+`drop_coin` in `app/bot/runtime.py`. Poller/delta helpers are shared
+(`run_hot_add_poller`, `universe_delta`); collector env helpers are not.
+
+| Env | Default | Meaning |
+|-----|---------|---------|
+| `BBOT_HOT_ADD` | unset/off | Master switch. Off → `asyncio.gather` pool unchanged. |
+| `BBOT_HOT_ADD_DELTA` | `{data_root}/hot_add_delta.csv` | Relative paths resolve under `BBOT_DATA_ROOT`. |
+| `BBOT_HOT_ADD_DROP` | `{data_root}/hot_add_drop.csv` | Drop snapshot (`base_coin`). Same mtime semantics as D. |
+| `BBOT_HOT_ADD_MAX_EXTRA` | `8` | Cap on coins beyond the import-time `BBOT_COINS` pool. |
+| `BBOT_HOT_ADD_POLL_SEC` | `30` | Poll interval. SIGHUP re-reads when flag is on. |
 
 | Seam | Rule |
 |------|------|
-| Meta | Same CSV + delta lot/tick columns. Fail-closed if lot/tick missing. |
-| Sockets | Bot spawns **its own** WS in `app/bot/ws_books.py`. Do not share D sockets or read `/data/live`. |
-| Cap | Hard cap. No auto-follow of every new listing. |
-| Isolation | Do not write D parquet/spool/bars. Do not restart D. |
-| Canary | Do **not** fan-out `spread-bbot-theta-k1-canary` onto new listings. |
+| Meta | Same delta columns as D0. Fail-closed if coin cannot resolve positive lot/tick (universe CSV hit with bad meta, or absent from universe **and** delta lot/tick incomplete). |
+| Sockets | Spawns `run_okx_books5` / `run_bybit_orderbook1` via `TaskSupervisor`. No D sockets, no `/data/live`. |
+| Cap | `BBOT_HOT_ADD_MAX_EXTRA` (bot-isolated). |
+| Isolation | Writes only under `BBOT_DATA_ROOT`. Do not restart D. Do not enable on theta-k1 canary by default. |
+| Canary | Template only — do **not** fan-out `spread-bbot-theta-k1-canary`. Optional dedicated unit later; not deployed in this patch. |
 
-Owner of that work: B Stub Runtime, after an explicit B1 task. Isolation
-contract remains [`b-bot-isolation.md`](b-bot-isolation.md).
+When off, bot behavior is indistinguishable from the pre-B1 gather path.
+
+Local proof:
+
+```bash
+python3 -m py_compile app/bot/hot_add.py app/bot/runtime.py
+python3 -m unittest tests/test_bbot_hot_add.py
+```
+
+Isolation contract remains [`b-bot-isolation.md`](b-bot-isolation.md).
