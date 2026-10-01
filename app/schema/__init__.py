@@ -1,5 +1,13 @@
 """Schema contracts for persisted spread events."""
 
+from app.schema.hl_l1 import (
+    HL_L1_BODY_COLS,
+    HL_L1_BOOK_COLS,
+    HL_L1_EXCLUDED_FROM_BODY,
+    HL_L1_SCHEMA_NAME,
+    HL_L1_TS_COLS,
+    hl_l1_body_is_exact,
+)
 from app.schema.lean_event import (
     BAR_INTERVAL_MS,
     LEAN_BAR_5M_BODY_COLS,
@@ -29,6 +37,12 @@ from app.schema.spread_event import (
 
 __all__ = [
     "BAR_INTERVAL_MS",
+    "HL_L1_BODY_COLS",
+    "HL_L1_BOOK_COLS",
+    "HL_L1_EXCLUDED_FROM_BODY",
+    "HL_L1_SCHEMA_NAME",
+    "HL_L1_TS_COLS",
+    "hl_l1_body_is_exact",
     "LEAN_BAR_5M_BODY_COLS",
     "LEAN_TICK_BODY_COLS",
     "LEAN_TICK_BOOK_COLS",

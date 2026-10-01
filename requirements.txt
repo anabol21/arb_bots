@@ -1,4 +1,4 @@
-websocket
+websocket-client
 json
 time
 datetime
