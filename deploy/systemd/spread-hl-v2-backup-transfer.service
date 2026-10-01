@@ -1,0 +1,30 @@
+# Isolated HL v2 backup. Remote MUST be spread-hl-v2 — never spread-compacted.
+# Own lock — never /run/spread-backup.lock.
+
+[Unit]
+Description=Spread HL v2 backup transfer (one-shot, isolated from D)
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=root
+WorkingDirectory=/root/spread_hl_v2
+Environment=BACKUP_COMPACTED_DIR=/data/compacted_hl_v2
+Environment=BACKUP_RCLONE_BINARY=/opt/rclone-1.74.4/rclone
+Environment=BACKUP_RCLONE_REMOTE=backup1tb
+Environment=BACKUP_RCLONE_PATH=spread-hl-v2
+Environment=BACKUP_SFTP_KEY_PATH=/root/.ssh/id_ed25519_uploader
+Environment=BACKUP_RCLONE_SFTP_CONCURRENCY=8
+Environment=BACKUP_RCLONE_SFTP_CHUNK_SIZE=128k
+Environment=BACKUP_TRANSFER_LOCK_PATH=/run/spread-hl-v2-backup.lock
+Environment=BACKUP_SENT_RETENTION_HOURS=4
+ExecStartPre=/usr/bin/mkdir -p /var/log/spread /data/compacted_hl_v2
+ExecStart=/root/venv/bin/python -m app.storage.backup_transfer \
+  --compacted-dir /data/compacted_hl_v2 \
+  --sent-retention-hours 4
+StandardOutput=append:/var/log/spread/hl-v2-backup-transfer.log
+StandardError=append:/var/log/spread/hl-v2-backup-transfer.log
+Nice=10
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7
+InaccessiblePaths=/data/live /data/spool /data/spool-next /data/bars /data/bars-next /data/compacted /data/gaps /data/gaps-next

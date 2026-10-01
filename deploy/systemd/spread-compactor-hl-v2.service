@@ -1,0 +1,24 @@
+# Isolated HL v2 tick compactor. Never point at /data/live or D locks.
+# Template only — enable after Mikhail OK.
+
+[Unit]
+Description=Spread HL v2 parquet compactor (one-shot, isolated)
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=root
+WorkingDirectory=/root/spread_hl_v2
+Environment=SPREAD_PARQUET_ROOT=/data/live_hl_v2
+Environment=SPREAD_SPOOL_ROOT=/data/spool_hl_v2
+Environment=ARROW_DEFAULT_MEMORY_POOL=system
+MemoryMax=1500M
+OOMPolicy=stop
+ExecStartPre=/usr/bin/mkdir -p /data/compacted_hl_v2 /var/log/spread
+ExecStart=/bin/sh -c 'rc=0; /usr/bin/flock -n /run/spread-compactor-hl-v2.lock /root/venv/bin/python -m app.storage.compactor --live /data/live_hl_v2 --compacted /data/compacted_hl_v2 --interval 300 --retention-hours 4 --max-windows 1 || rc=$?; exit "$rc"'
+StandardOutput=append:/var/log/spread/compactor-hl-v2.log
+StandardError=append:/var/log/spread/compactor-hl-v2.log
+Nice=10
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7
+InaccessiblePaths=/data/live /data/spool /data/spool-next /data/bars /data/bars-next /data/compacted /data/gaps /data/gaps-next
