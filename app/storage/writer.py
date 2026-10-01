@@ -20,6 +20,7 @@ import pandas as pd
 import pyarrow as pa
 import pyarrow.parquet as pq
 
+from app.schema.hl_v2_event import HL_V2_BODY_COLS, HL_V2_BOOK_COLS, HL_V2_TS_COLS
 from app.schema.lean_event import LEAN_BAR_5M_BODY_COLS, LEAN_TICK_BODY_COLS
 from app.schema.parquet_layout import PARTITION_DATE_COL
 from app.schema.spread_event import SPREAD_EVENT_BODY_COLS, lean_schema_enabled
@@ -54,8 +55,10 @@ def _tmp_owned_by_pid(path: Path, pid: int) -> bool:
         return False
     return parts[1] == str(pid)
 
-# Tick schemas: "v1" (canary default) | "lean". Bars: "bar_5m".
+# Tick schemas: "v1" (canary default) | "lean" | "hl_v2". Bars: "bar_5m".
+# "hl_v2" is selected only by the HL v2 contour constructor, never by env.
 SchemaMode = str
+_SCHEMA_MODES = {"v1", "lean", "bar_5m", "hl_v2"}
 
 _LEAN_TS_COLS: tuple[str, ...] = (
     "event_local_ts_ms",
@@ -332,6 +335,72 @@ def normalize_bar_records(records: list[dict[str, Any]]) -> NormalizedBatch:
     return _finalize_normalized(records, accepted, reasons, LEAN_BAR_5M_BODY_COLS)
 
 
+def normalize_hl_v2_records(records: list[dict[str, Any]]) -> NormalizedBatch:
+    """Bybit/OKX lean staff + HL L1 body. No spread columns.
+
+    Hive ``event_date`` is derived from ``event_local_ts_ms``, then dropped on write.
+    """
+    if not records:
+        return NormalizedBatch(pd.DataFrame(), [])
+
+    df = pd.DataFrame(records)
+    if df.empty:
+        return NormalizedBatch(pd.DataFrame(), [])
+
+    reasons: list[list[str]] = [[] for _ in records]
+    for col in (*HL_V2_TS_COLS, *HL_V2_BOOK_COLS):
+        if col not in df.columns:
+            df[col] = None
+        df[col] = pd.to_numeric(df[col], errors="coerce")
+
+    if "base_coin" not in df.columns:
+        df["base_coin"] = None
+    valid_base_coin = df["base_coin"].notna() & df["base_coin"].astype(str).str.strip().ne("")
+    for index in df.index[~valid_base_coin]:
+        reasons[int(index)].append("invalid_base_coin")
+    df["base_coin"] = df["base_coin"].astype(str).str.strip()
+
+    if "trigger" not in df.columns:
+        df["trigger"] = None
+    df["trigger"] = df["trigger"].astype(str)
+
+    if "event_local_ts_ms" not in df.columns or df["event_local_ts_ms"].isna().all():
+        df["event_local_ts_ms"] = df["okx_local_recv_ts_ms"]
+        mask_bybit = df["trigger"].eq("bybit")
+        df.loc[mask_bybit, "event_local_ts_ms"] = df.loc[
+            mask_bybit, "bybit_local_recv_ts_ms"
+        ]
+        mask_hl = df["trigger"].eq("hl")
+        df.loc[mask_hl, "event_local_ts_ms"] = df.loc[mask_hl, "hl_local_recv_ts_ms"]
+    else:
+        missing = df["event_local_ts_ms"].isna()
+        df.loc[missing, "event_local_ts_ms"] = df.loc[missing, "okx_local_recv_ts_ms"]
+        mask_bybit = missing & df["trigger"].eq("bybit")
+        df.loc[mask_bybit, "event_local_ts_ms"] = df.loc[
+            mask_bybit, "bybit_local_recv_ts_ms"
+        ]
+        mask_hl = missing & df["trigger"].eq("hl")
+        df.loc[mask_hl, "event_local_ts_ms"] = df.loc[mask_hl, "hl_local_recv_ts_ms"]
+
+    # Require complete three-venue L1 for publish (staff canary).
+    required_present = df[list(HL_V2_TS_COLS) + list(HL_V2_BOOK_COLS)].notna().all(axis=1)
+    for index in df.index[~required_present]:
+        reasons[int(index)].append("incomplete_hl_v2_staff")
+
+    event_dt = pd.to_datetime(df["event_local_ts_ms"], unit="ms", errors="coerce")
+    valid_ts = event_dt.notna()
+    for index in df.index[~valid_ts]:
+        reasons[int(index)].append("invalid_event_local_ts_ms")
+
+    accepted_mask = valid_base_coin & valid_ts & required_present
+    accepted = df.loc[accepted_mask].copy()
+    if not accepted.empty:
+        accepted["event_date"] = event_dt.loc[accepted_mask].dt.strftime("%Y-%m-%d")
+        accepted = _cast_int64_ms(accepted, HL_V2_TS_COLS)
+
+    return _finalize_normalized(records, accepted, reasons, HL_V2_BODY_COLS)
+
+
 def normalize_records(
     records: list[dict[str, Any]],
     *,
@@ -342,6 +411,7 @@ def normalize_records(
     ``schema_mode``:
     - ``None`` / omitted: env-driven tick mode (``v1`` default, ``lean`` if flagged)
     - ``v1`` / ``lean``: tick bodies
+    - ``hl_v2``: Bybit/OKX lean staff + HL L1 (HL v2 contour only)
     - ``bar_5m``: closed candle volume rows
     """
     mode = resolve_tick_schema_mode() if schema_mode is None else schema_mode
@@ -349,6 +419,8 @@ def normalize_records(
         return normalize_bar_records(records)
     if mode == "lean":
         return normalize_lean_tick_records(records)
+    if mode == "hl_v2":
+        return normalize_hl_v2_records(records)
     if mode == "v1":
         return normalize_v1_records(records)
     raise ValueError(f"unsupported schema_mode: {mode!r}")
@@ -357,7 +429,7 @@ def normalize_records(
 def _sort_column_for_mode(schema_mode: SchemaMode) -> str:
     if schema_mode == "bar_5m":
         return "bar_start_ts_ms"
-    if schema_mode == "lean":
+    if schema_mode in {"lean", "hl_v2"}:
         return "event_local_ts_ms"
     return "event_dt"
 
@@ -382,7 +454,7 @@ class ParquetPublisher:
             raise ValueError(f"parquet_root must be absolute, got: {parquet_root}")
         if max_queue < 1:
             raise ValueError("max_queue must be >= 1")
-        if schema_mode is not None and schema_mode not in {"v1", "lean", "bar_5m"}:
+        if schema_mode is not None and schema_mode not in _SCHEMA_MODES:
             raise ValueError(f"unsupported schema_mode: {schema_mode!r}")
 
         self.parquet_root = parquet_root
