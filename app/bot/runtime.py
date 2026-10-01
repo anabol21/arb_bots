@@ -57,6 +57,24 @@ from app.bot.ws_books import (
     run_bybit_orderbook1,
     run_okx_books5,
 )
+from app.bot.hot_add import (
+    BotHotAddController,
+    bbot_hot_add_delta_path,
+    bbot_hot_add_drop_path,
+    bbot_hot_add_enabled,
+    bbot_hot_add_max_extra,
+    bbot_hot_add_poll_sec,
+    run_hot_add_poller,
+)
+from app.bot.hot_add_warm import (
+    bbot_hot_add_warm_enabled,
+    drop_floor_coin_state,
+    drop_tw_p50_coin_state,
+    resolve_hot_add_history_root,
+    seed_tw_p50_from_slim_ticks,
+    warm_floor_from_history,
+)
+from app.utils.task_supervisor import TaskSupervisor
 from app.utils.tick_validity import TickValidityGate, book_l1_complete
 from app.utils.universe_csv import load_take_yes_base_coins, read_universe_dicts
 
@@ -411,6 +429,11 @@ class BotRuntime:
                         "~12h SMA-12 history; build via python -m app.bot.floor_warm",
                         warm_path,
                     )
+        # Bootstrap coins are trade-eligible; hot-added coins join only after
+        # a successful history warm (fail-closed otherwise).
+        self._trade_eligible: set[str] = {str(c).upper() for c in self.coins}
+        self._hot_added_coins: set[str] = set()
+        self._hot_add_history_root = resolve_hot_add_history_root(self.data_root)
 
     def _uses_market_manager(self) -> bool:
         if self.policy is not None:
@@ -450,7 +473,195 @@ class BotRuntime:
 
         return start_warm_private_for_bot_process(**overrides)
 
+    def _extend_coin_maps(self, coin: str) -> None:
+        """Register per-coin maps for a hot-added (or late) coin. Idempotent."""
+        coin = str(coin).strip().upper()
+        if coin not in self.coins:
+            self.coins.append(coin)
+        self._book_inflight.setdefault(coin, False)
+        self._book_dirty.setdefault(coin, False)
+        self._book_last_exchange.setdefault(coin, "okx")
+        self._ma_cache.setdefault(coin, (None, None))
+        if self.policy is not None and coin not in self.ma_windows:
+            CausalMaWindow = self.policy["CausalMaWindow"]
+            avg_sec = float(
+                (self.hyper or self.policy["DEFAULT_HYPER"]).get("avg_window_sec") or 2.0
+            )
+            self.ma_windows[coin] = CausalMaWindow(avg_window_sec=avg_sec)
+        if self.theta_screener is not None and coin not in self.theta_screener.coins:
+            self.theta_screener.coins.append(coin)
+
+    def _shrink_coin_maps(self, coin: str) -> None:
+        """Remove per-coin maps after a hot-drop. Keeps bootstrap order stable."""
+        coin = str(coin).strip().upper()
+        if coin in self.coins:
+            self.coins = [c for c in self.coins if c != coin]
+        self._book_inflight.pop(coin, None)
+        self._book_dirty.pop(coin, None)
+        self._book_last_exchange.pop(coin, None)
+        self._ma_cache.pop(coin, None)
+        self.ma_windows.pop(coin, None)
+        if self.theta_screener is not None:
+            self.theta_screener.coins = [
+                c for c in self.theta_screener.coins if c != coin
+            ]
+
+
+    def _warm_hot_added_coin(self, coin: str) -> None:
+        """Load ~12h history into floor (+ optional TW-p50 seed). Fail-closed."""
+        coin_u = str(coin).strip().upper()
+        if not bbot_hot_add_warm_enabled():
+            self.log.info(
+                "bbot_hot_add_warm_skipped | base_coin=%s | reason=warm_disabled",
+                coin_u,
+            )
+            return
+        if self.floor_observer is None:
+            self.log.error(
+                "bbot_hot_add_warm_fail_closed | base_coin=%s | reason=no_floor_observer",
+                coin_u,
+            )
+            return
+        history_root = self._hot_add_history_root
+        if history_root is None:
+            # Fall back to bot data_root floor journals from prior runs.
+            history_root = self.data_root
+        try:
+            result = warm_floor_from_history(
+                self.floor_observer,
+                coin_u,
+                history_root,
+                logger=self.log,
+            )
+        except Exception as exc:  # noqa: BLE001 — never kill the pool on warm
+            self.log.error(
+                "bbot_hot_add_warm_fail_closed | base_coin=%s | reason=warm_exception | "
+                "err=%s",
+                coin_u,
+                type(exc).__name__,
+            )
+            return
+        if result.ok:
+            self._trade_eligible.add(coin_u)
+            try:
+                n = seed_tw_p50_from_slim_ticks(
+                    self.tw_p50_observer, coin_u, history_root
+                )
+                if n:
+                    self.log.info(
+                        "bbot_hot_add_tw_p50_seeded | base_coin=%s | ticks=%s",
+                        coin_u,
+                        n,
+                    )
+            except Exception as exc:  # noqa: BLE001
+                self.log.warning(
+                    "bbot_hot_add_tw_p50_seed_failed | base_coin=%s | err=%s",
+                    coin_u,
+                    type(exc).__name__,
+                )
+        else:
+            self.log.error(
+                "bbot_hot_add_warm_fail_closed | %s",
+                result.as_log_fields(),
+            )
+
+    def _trade_coin_order(self) -> list[str]:
+        """Coins eligible for policy.decide / theta would_send opens."""
+        return [c for c in self.coins if c in self._trade_eligible]
+
+    def spawn_coin(self, row: dict[str, str]) -> None:
+        """Orchestration-only hot-add: init quotes, extend maps, spawn bot WS tasks.
+
+        Prefer TaskSupervisor. Does not call REST. Does not touch D paths.
+        After WS spawn, attempt ~12h history warm; only then mark trade-eligible.
+        """
+        supervisor = getattr(self, "_task_supervisor", None)
+        if supervisor is None:
+            raise RuntimeError("spawn_coin requires an active task supervisor")
+        coin = str(row.get("base_coin", "")).strip().upper()
+        okx_symbol = str(row.get("okx_symbol", "")).strip()
+        bybit_symbol = str(row.get("bybit_symbol", "")).strip()
+        if not coin or not okx_symbol or not bybit_symbol:
+            raise ValueError("spawn_coin requires base_coin, okx_symbol, bybit_symbol")
+        if coin in self.quotes:
+            raise RuntimeError(f"spawn_coin duplicate quotes slot: {coin}")
+        if coin not in self.universe:
+            raise RuntimeError(
+                f"spawn_coin refuse: {coin} missing from universe (fail-closed)"
+            )
+        self.quotes[coin] = {"okx": empty_book(), "bybit": empty_book()}
+        self._extend_coin_maps(coin)
+        supervisor.add(
+            run_okx_books5(
+                base_coin=coin,
+                okx_symbol=okx_symbol,
+                book_store=self.quotes[coin]["okx"],
+                on_book=self._on_book,
+                on_lifecycle=self._on_lifecycle,
+                stop_event=self.stop_event,
+            ),
+            name=f"okx:{coin}",
+        )
+        supervisor.add(
+            run_bybit_orderbook1(
+                base_coin=coin,
+                bybit_symbol=bybit_symbol,
+                book_store=self.quotes[coin]["bybit"],
+                on_book=self._on_book,
+                on_lifecycle=self._on_lifecycle,
+                stop_event=self.stop_event,
+            ),
+            name=f"bybit:{coin}",
+        )
+        self._hot_added_coins.add(coin)
+        # Fail-closed: not trade-eligible until history warm succeeds.
+        self._trade_eligible.discard(coin)
+        self._warm_hot_added_coin(coin)
+        self.log.info(
+            "bbot_hot_add_spawned | base_coin=%s | okx_symbol=%s | bybit_symbol=%s | "
+            "trade_eligible=%s",
+            coin,
+            okx_symbol,
+            bybit_symbol,
+            str(coin in self._trade_eligible).lower(),
+        )
+
+    async def drop_coin(self, coin: str) -> None:
+        """Orchestration-only hot-drop: abort would_send, cancel WS, clear state.
+
+        Cumulative ``hot_add_drop.csv`` re-polls (mtime change / restart) re-list
+        already-torn-down coins. If the coin is not in ``quotes`` it is not
+        currently managed — silent no-op (debug), not a Sentry-worthy error.
+        """
+        supervisor = getattr(self, "_task_supervisor", None)
+        if supervisor is None:
+            raise RuntimeError("drop_coin requires an active task supervisor")
+        coin = str(coin).strip().upper()
+        if not coin:
+            self.log.error("bbot_drop_coin_invalid | base_coin=-")
+            return
+        if coin not in self.quotes:
+            # Already gone / never managed (cumulative drop re-poll). No Sentry.
+            self.log.debug(
+                "bbot_drop_coin_skip | base_coin=%s | reason=not_in_quotes",
+                coin,
+            )
+            return
+        # Cancel would_send / clear K=1 if this coin holds the slot.
+        if self.theta_trade is not None:
+            self.theta_trade.abort_coin_if_held(coin, reason="hot_drop")
+        self._trade_eligible.discard(coin)
+        self._hot_added_coins.discard(coin)
+        drop_floor_coin_state(self.floor_observer, coin)
+        drop_tw_p50_coin_state(self.tw_p50_observer, coin)
+        cancelled = supervisor.cancel_named(f"okx:{coin}", f"bybit:{coin}")
+        await supervisor.drain_named(cancelled)
+        del self.quotes[coin]
+        self._shrink_coin_maps(coin)
+        self.log.info("bbot_hot_add_dropped | base_coin=%s", coin)
+
     def _meta(self, coin: str) -> InstrumentMeta:
+
         if coin not in self.universe:
             raise KeyError(f"{coin} missing from bybit_okx_universe.csv")
         return self.universe[coin]
@@ -907,7 +1118,7 @@ class BotRuntime:
             await self.theta_trade.on_theta_snapshots_async(
                 theta_snaps,
                 quotes=self.quotes,
-                coin_order=self.coins,
+                coin_order=self._trade_coin_order(),
             )
         except Exception as exc:  # noqa: BLE001 — never stall the public book path
             if not self._theta_trade_warned:
@@ -1248,20 +1459,41 @@ class BotRuntime:
     async def run(self) -> None:
         # Register signal handlers for graceful shutdown
         loop = asyncio.get_running_loop()
-        
-        def _signal_handler(signame: str) -> None:
+        hot_add_on = bbot_hot_add_enabled()
+        self._hot_add_reload = asyncio.Event()
+        self._task_supervisor: TaskSupervisor | None = None
+
+        def _shutdown(signame: str) -> None:
             self.log.info(f"bbot_signal_received | signal={signame}")
             # Save floor warm pickle immediately (synchronously) before stop_event.
             # WS tasks may not unwind to finally before systemd timeout.
             self._save_floor_warm_pickle()
             self.stop_event.set()
-        
-        for sig in (signal.SIGTERM, signal.SIGHUP):
+            supervisor = getattr(self, "_task_supervisor", None)
+            if supervisor is not None:
+                supervisor.cancel_all()
+
+        def _hot_add_reload_signal() -> None:
+            self.log.info("bbot_hot_add_reload_signal | signal=SIGHUP")
+            self._hot_add_reload.set()
+
+        try:
             loop.add_signal_handler(
-                sig,
-                lambda s=sig: _signal_handler(signal.Signals(s).name)
+                signal.SIGTERM, lambda: _shutdown(signal.SIGTERM.name)
             )
-        
+        except (NotImplementedError, AttributeError):
+            pass
+        # SIGHUP: reload delta/drop when hot-add is on; otherwise keep legacy stop.
+        try:
+            if hot_add_on:
+                loop.add_signal_handler(signal.SIGHUP, _hot_add_reload_signal)
+            else:
+                loop.add_signal_handler(
+                    signal.SIGHUP, lambda: _shutdown(signal.SIGHUP.name)
+                )
+        except (NotImplementedError, AttributeError):
+            pass
+
         thresh = None
         thresh_cs = None
         avg_sec = None
@@ -1287,7 +1519,8 @@ class BotRuntime:
             f"theta_trade={'on' if self.theta_trade_enabled else 'off'} | "
             f"theta_live_send="
             f"{'on' if getattr(self.theta_trade, 'live_send', False) else 'off'} | "
-            f"floor_warm={'loaded' if self._floor_warm_loaded else 'off'}"
+            f"floor_warm={'loaded' if self._floor_warm_loaded else 'off'} | "
+            f"hot_add={'on' if hot_add_on else 'off'}"
         )
         if self.mode == "policy" and self.policy is None:
             self.log.error(
@@ -1317,67 +1550,164 @@ class BotRuntime:
         else:
             self.log.info("private_warm_skipped | live_private_send=false")
 
-        tasks: list[asyncio.Task] = [asyncio.create_task(self._heartbeat())]
-        # Periodic floor warm pickle save (if floor observer is enabled)
+        delta_path = bbot_hot_add_delta_path(self.data_root)
+        drop_path = bbot_hot_add_drop_path(self.data_root)
+        hist = self._hot_add_history_root
+        self.log.info(
+            "bbot_hot_add | enabled=%s | delta=%s | drop=%s | max_extra=%s | "
+            "warm=%s | history_root=%s",
+            str(hot_add_on).lower(),
+            delta_path,
+            drop_path,
+            bbot_hot_add_max_extra() if hot_add_on else os.environ.get(
+                "BBOT_HOT_ADD_MAX_EXTRA", "8"
+            ),
+            str(bbot_hot_add_warm_enabled()).lower() if hot_add_on else "off",
+            hist if hist is not None else self.data_root,
+        )
+
+        if not hot_add_on:
+            # Legacy path unchanged when BBOT_HOT_ADD is off.
+            tasks: list[asyncio.Task] = [asyncio.create_task(self._heartbeat())]
+            if self.floor_observer is not None and (
+                self.profile in {"gear22_would_send", "gear22_live_canary"}
+                or self._floor_warm_loaded
+            ):
+                tasks.append(
+                    asyncio.create_task(
+                        self._floor_warm_periodic_save(), name="floor-warm-save"
+                    )
+                )
+            if self.tw_p50_enabled and self.tw_p50_observer is not None:
+                tasks.append(
+                    asyncio.create_task(self._tw_p50_emit_loop(), name="tw-p50-emit")
+                )
+            elif self.theta_enabled and self.theta_screener is not None:
+                tasks.append(
+                    asyncio.create_task(self._theta_emit_loop(), name="theta-emit")
+                )
+            for coin in self.coins:
+                meta = self._meta(coin)
+                tasks.append(
+                    asyncio.create_task(
+                        run_okx_books5(
+                            base_coin=coin,
+                            okx_symbol=meta.okx_symbol,
+                            book_store=self.quotes[coin]["okx"],
+                            on_book=self._on_book,
+                            on_lifecycle=self._on_lifecycle,
+                            stop_event=self.stop_event,
+                        ),
+                        name=f"okx-{coin}",
+                    )
+                )
+                tasks.append(
+                    asyncio.create_task(
+                        run_bybit_orderbook1(
+                            base_coin=coin,
+                            bybit_symbol=meta.bybit_symbol,
+                            book_store=self.quotes[coin]["bybit"],
+                            on_book=self._on_book,
+                            on_lifecycle=self._on_lifecycle,
+                            stop_event=self.stop_event,
+                        ),
+                        name=f"bybit-{coin}",
+                    )
+                )
+
+            self.log.info(
+                f"ws_tasks_started | n={len(tasks) - 1} | expect={2 * len(self.coins)}"
+            )
+            try:
+                await asyncio.gather(*tasks)
+            except asyncio.CancelledError:
+                self.stop_event.set()
+                raise
+            finally:
+                self._save_floor_warm_pickle()
+                from app.bot.private.ws_warm_session import clear_process_warm_session
+
+                clear_process_warm_session(stop=True)
+                self._private_warm = None
+            return
+
+        # Hot-add path: TaskSupervisor so late-added WS tasks are awaited/cancelled.
+        supervisor = TaskSupervisor()
+        self._task_supervisor = supervisor
+        initial_pair_count = len(self.coins)
+        supervisor.add(self._heartbeat(), name="heartbeat")
         if self.floor_observer is not None and (
             self.profile in {"gear22_would_send", "gear22_live_canary"}
             or self._floor_warm_loaded
         ):
-            tasks.append(
-                asyncio.create_task(
-                    self._floor_warm_periodic_save(), name="floor-warm-save"
-                )
-            )
+            supervisor.add(self._floor_warm_periodic_save(), name="floor-warm-save")
         if self.tw_p50_enabled and self.tw_p50_observer is not None:
-            tasks.append(
-                asyncio.create_task(self._tw_p50_emit_loop(), name="tw-p50-emit")
-            )
+            supervisor.add(self._tw_p50_emit_loop(), name="tw-p50-emit")
         elif self.theta_enabled and self.theta_screener is not None:
-            # Theta alone (TW off): still emit ~1 Hz from last RAM snapshots.
-            tasks.append(
-                asyncio.create_task(self._theta_emit_loop(), name="theta-emit")
-            )
-        for coin in self.coins:
+            supervisor.add(self._theta_emit_loop(), name="theta-emit")
+
+        for coin in list(self.coins):
             meta = self._meta(coin)
-            tasks.append(
-                asyncio.create_task(
-                    run_okx_books5(
-                        base_coin=coin,
-                        okx_symbol=meta.okx_symbol,
-                        book_store=self.quotes[coin]["okx"],
-                        on_book=self._on_book,
-                        on_lifecycle=self._on_lifecycle,
-                        stop_event=self.stop_event,
-                    ),
-                    name=f"okx-{coin}",
-                )
+            supervisor.add(
+                run_okx_books5(
+                    base_coin=coin,
+                    okx_symbol=meta.okx_symbol,
+                    book_store=self.quotes[coin]["okx"],
+                    on_book=self._on_book,
+                    on_lifecycle=self._on_lifecycle,
+                    stop_event=self.stop_event,
+                ),
+                name=f"okx:{coin}",
             )
-            tasks.append(
-                asyncio.create_task(
-                    run_bybit_orderbook1(
-                        base_coin=coin,
-                        bybit_symbol=meta.bybit_symbol,
-                        book_store=self.quotes[coin]["bybit"],
-                        on_book=self._on_book,
-                        on_lifecycle=self._on_lifecycle,
-                        stop_event=self.stop_event,
-                    ),
-                    name=f"bybit-{coin}",
-                )
+            supervisor.add(
+                run_bybit_orderbook1(
+                    base_coin=coin,
+                    bybit_symbol=meta.bybit_symbol,
+                    book_store=self.quotes[coin]["bybit"],
+                    on_book=self._on_book,
+                    on_lifecycle=self._on_lifecycle,
+                    stop_event=self.stop_event,
+                ),
+                name=f"bybit:{coin}",
             )
 
+        controller = BotHotAddController(
+            quotes=self.quotes,
+            universe=self.universe,
+            spawn=self.spawn_coin,
+            max_extra=bbot_hot_add_max_extra(),
+            initial_pair_count=initial_pair_count,
+            logger=self.log,
+        )
+        supervisor.add(
+            run_hot_add_poller(
+                controller,
+                delta_path,
+                interval_sec=bbot_hot_add_poll_sec(),
+                reload_event=self._hot_add_reload,
+                logger=self.log,
+                supervisor=supervisor,
+                drop_path=drop_path,
+                drop_fn=self.drop_coin,
+            ),
+            name="bbot-hot-add-poller",
+        )
+
         self.log.info(
-            f"ws_tasks_started | n={len(tasks) - 1} | expect={2 * len(self.coins)}"
+            "ws_tasks_started | supervisor=1 | bootstrap_coins=%s | expect_ws=%s",
+            initial_pair_count,
+            2 * initial_pair_count,
         )
         try:
-            await asyncio.gather(*tasks)
+            await supervisor.wait()
         except asyncio.CancelledError:
             self.stop_event.set()
+            supervisor.cancel_all()
             raise
         finally:
-            # Persist floor warm pickle for next start (B path only).
             self._save_floor_warm_pickle()
-            
+            await supervisor.drain()
+            self._task_supervisor = None
             from app.bot.private.ws_warm_session import clear_process_warm_session
 
             clear_process_warm_session(stop=True)
