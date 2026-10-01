@@ -1,0 +1,13 @@
+# Fail-closed disk guard for HL v2. Stops HL collector if free space or HL Σ exceed budget.
+# Does not touch prod collector-next.
+
+[Unit]
+Description=Spread HL v2 disk guard (one-shot)
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=root
+ExecStart=/bin/bash -c 'set -euo pipefail; FREE_G=$(df -BG /data | awk '\''NR==2{gsub(/G/,\"\",$4); print $4}'\''); HL_G=$(du -sg /data/live_hl_v2 /data/spool_hl_v2 /data/gaps_hl_v2 /data/compacted_hl_v2 2>/dev/null | awk '\''{s+=$1} END{print s+0}'\''); echo "{\"event\":\"hl_v2_disk_guard\",\"free_g\":$FREE_G,\"hl_sum_g\":$HL_G}"; if [ "$FREE_G" -lt 15 ] || [ "$HL_G" -ge 4 ]; then systemctl stop spread-collector-hl-v2.service || true; echo "{\"event\":\"hl_v2_disk_guard_stop\",\"reason\":\"budget\"}"; fi'
+StandardOutput=append:/var/log/spread/hl-v2-disk-guard.log
+StandardError=append:/var/log/spread/hl-v2-disk-guard.log
