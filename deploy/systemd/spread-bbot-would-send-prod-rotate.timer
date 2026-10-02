@@ -1,0 +1,10 @@
+[Unit]
+Description=Daily 10:00 MSK expand-only rotate for prod would_send (after 09:10 digest)
+
+[Timer]
+OnCalendar=*-*-* 10:00:00 Europe/Moscow
+Persistent=true
+Unit=spread-bbot-would-send-prod-rotate.service
+
+[Install]
+WantedBy=timers.target
