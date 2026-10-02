@@ -1,0 +1,13 @@
+# Install: cp deploy/scripts/bbot_would_send_prod_rotate.py /usr/local/sbin/ && chmod +x
+[Unit]
+Description=Rotate prod would_send expand-only extras from morning std-spread digest
+After=network-online.target spread-top10-volatile-spread.service
+
+[Service]
+Type=oneshot
+User=root
+Nice=10
+Environment=PYTHONPATH=/root/spread_bbot_would_send_prod
+ExecStart=/root/venv/bin/python /usr/local/sbin/bbot_would_send_prod_rotate.py
+StandardOutput=append:/var/log/spread/bbot-would-send-prod-rotate.log
+StandardError=append:/var/log/spread/bbot-would-send-prod-rotate.log
