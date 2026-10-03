@@ -7,14 +7,11 @@
 Симуляция гира 2.2, `would_send`, `send=false`. Живых ордеров нет.
 
 - Юнит `spread-bbot-would-send-prod`, данные `/data/bbot-would-send-prod`.
-- Код на VPS `a12d593`. В main уже hot-add (#64, `426d689`) и деплой-доки (#68, `3cd1845`). Работающий контур с этого tip main не перекатывался.
-- Ротация expand-only каждый день в 10:00 МСК по утреннему std-spread. Дропов нет.
-- Пул после ротации 03.10: 42 = база 29 + 13 экстра. Экстра: CT, AEON, OPN, ARX, RECALL, LQTY, SAND, MANA, ENJ, RESOLV, SENT, WOO, TRUTH. Утром добавлены SAND, MANA, ENJ, RESOLV, SENT, WOO, TRUTH. 2Z был в топ-10, но уже в базе.
-- Открыт SAND long с 03.10 12:59:55 МСК, `d0c91dee`, θ_1m≈0.507, spread_IN +0.678, floor +0.169, p50_1m +0.676. Рестарт со сбросом этой сделки предложен и не сделан.
-- Шов: рестарт прогревает hot-add экстра из устаревшей history, floor прыгает. Не починено.
+- SHA checkout на хосте `a12d593`, не tip main (в main #64 `426d689` и #68 `3cd1845`, контур не перекатывался).
+- Статус 03.10: крутится. Ротация expand-only в 10:00 МСК, дропов нет. Пул 42 = база 29 + 13 экстра (CT, AEON, OPN, ARX, RECALL, LQTY, SAND, MANA, ENJ, RESOLV, SENT, WOO, TRUTH; утром добавлены последние семь, 2Z уже в базе). Открыт SAND long с 12:59:55 МСК (`d0c91dee`). Канарейка theta-k1 остановлена. Рестарт со сбросом сделки не сделан.
 - Гейты: θ_open 0.50, p50_open 0.60, min_profit 0.20, fee 0.30, K=1.
-- Канарейка theta-k1 остановлена. Contour B этот юнит не трогает.
 - Следит Sentry (issue created) на открытиях.
+- Не трогать Contour B и `/data/live`. Шов рестарта: hot-add экстра прогревается из устаревшей history, floor прыгает.
 
 ## Ops / collector (голова)
 
