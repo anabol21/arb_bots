@@ -28,10 +28,9 @@
 
 Изолированный контур сбора Bybit/OKX + Hyperliquid. Не prod writer и не Contour B.
 
-- Юнит `spread-collector-hl-v2`, код `/root/spread_hl_v2`, данные `/data/live_hl_v2`. Бэкап `backup1tb:spread-hl-v2` из `/data/compacted_hl_v2`, не в prod `spread-compacted`.
-- Пул: Bybit 198, OKX 198, HL 88 (пересечение). CEX-пул не сужать.
-- Лимиты: MemoryMax 6G, disk-guard 15 GiB, CPUQuota 200%. Компактор каждые 2 мин, MemoryMax 2500M.
-- Запись: flush 100000 / 45 с (prod-scale). Tick skew/age 2000 мс. Один HL-сокет на все 88 монет. Реконнект HL = 100, Bybit/OKX остаются на 2.
-- Статус 03.10 ~14:52 МСК: зелёная после краткого обрыва HL WS (~12:10–13:56 МСК, сам поднялся). Часовой watch пишет только на red.
-- Host-local патчи (flush, tick gate, HL reconnect) ещё не в git. При scale-up перестраивать knobs до запуска, не оставлять flush 500/2с.
-- Prod `/data/live` и Contour B не трогать. NOW.md для следующих патчей — только после явного да.
+- Юнит `spread-collector-hl-v2`, код `/root/spread_hl_v2`, данные `/data/live_hl_v2`. Бэкап `backup1tb:spread-hl-v2` из `/data/compacted_hl_v2`.
+- SHA checkout на хосте `4a76890` (ветка `main_hl`, dirty: host-патчи flush, tick-gate, reconnect и universe), не tip main.
+- Статус 03.10: зелёная, heartbeat 198/198/88. Обрыв HL WS ~12:10–13:56 МСК сам поднялся.
+- Лимиты: MemoryMax 6G, disk-guard 15 GiB, CPUQuota 200%. Flush 100000/45 с, skew/age 2000 мс, компактор 2 мин / 2500M. Один HL-сокет на 88 монет. Реконнект HL = 100, Bybit/OKX остаются на 2.
+- Слежу я, часовой watch только на red.
+- Не трогать prod `/data/live` и Contour B. CEX-пул не сужать. При scale-up перестраивать knobs до запуска.
