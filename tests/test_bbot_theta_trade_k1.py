@@ -27,7 +27,9 @@ from app.bot.theta_trade_manager import (
     ThetaTradeJournalWriter,
     ThetaTradeManager,
     decide_theta_k1,
+    opposite_side,
     slip_spread,
+    spread_for_side,
     theta_trade_enabled,
 )
 
@@ -724,6 +726,128 @@ class FloorWarmTests(unittest.TestCase):
         payload = build_warm_state_from_floor_journal(tmp, coins=["SOL"])
         self.assertIn("SOL|long", payload["sides"])
         self.assertIn("SOL|long", payload["last_floors"])
+
+
+class PnlSpreadArithmeticTests(unittest.TestCase):
+    """Close PnL is open-side fill + opposite-side close fill (not subtract)."""
+
+    _OPEN_FILL = 0.30
+    _NOTIONAL = 100.0
+
+    def _seed_long(self, mgr: ThetaTradeManager) -> OpenPosition:
+        pos = OpenPosition(
+            trade_id="t-pnl",
+            base_coin="SOL",
+            side="long",
+            open_signal_ts_ms=1,
+            open_fill_ts_ms=71,
+            open_fill_spread=self._OPEN_FILL,
+            open_notional=self._NOTIONAL,
+            open_theta_1m=0.3,
+            fill_spread_pp=self._OPEN_FILL,
+        )
+        mgr.slot.position = pos
+        return pos
+
+    def _close_decision(self) -> ThetaDecision:
+        return ThetaDecision(
+            action="close",
+            base_coin="SOL",
+            side="long",
+            reason="close_min_profit",
+            potential_pp=0.1,
+        )
+
+    def _assert_add_not_subtract(self, row: dict, quotes: dict) -> None:
+        books = quotes["SOL"]
+        close_fill = spread_for_side(books["okx"], books["bybit"], opposite_side("long"))
+        self.assertIsNotNone(close_fill)
+        assert close_fill is not None
+        # Typical long unwind: opposite-side (short) fill is negative.
+        self.assertLess(close_fill, 0.0)
+        expected = self._OPEN_FILL + float(close_fill)
+        inflated = self._OPEN_FILL - float(close_fill)
+        self.assertAlmostEqual(row["open_fill_spread"], self._OPEN_FILL)
+        self.assertAlmostEqual(row["close_fill_spread"], close_fill)
+        self.assertAlmostEqual(row["pnl_spread"], expected)
+        self.assertNotAlmostEqual(row["pnl_spread"], inflated)
+        self.assertAlmostEqual(
+            row["pnl_usdt_approx"],
+            expected / 100.0 * self._NOTIONAL,
+        )
+
+    def test_sync_would_send_close_adds_fill_spreads(self) -> None:
+        tmp = Path(tempfile.mkdtemp())
+        mgr = ThetaTradeManager(
+            data_root=tmp,
+            config=ThetaTradeConfig(fill_delay_ms=70, notional_usdt=self._NOTIONAL),
+            sleep_fn=lambda _s: None,
+        )
+        self._seed_long(mgr)
+        quotes = {"SOL": _books()}
+        rows = mgr.execute_decision(
+            self._close_decision(),
+            snapshots=[
+                _snap("SOL", "long", 0.30, p50_1m=0.80, floor=0.50),
+                _snap("SOL", "short", 0.60, p50_1m=1.20, floor=0.60),
+            ],
+            quotes=quotes,
+            now_ms=2_000,
+        )
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["event"], "close")
+        self._assert_add_not_subtract(rows[0], quotes)
+
+    def test_live_send_close_adds_fill_spreads(self) -> None:
+        tmp = Path(tempfile.mkdtemp())
+        mgr = ThetaTradeManager(
+            data_root=tmp,
+            config=ThetaTradeConfig(fill_delay_ms=70, notional_usdt=self._NOTIONAL),
+            sleep_fn=lambda _s: None,
+            live_send=True,
+            place_fn=lambda **_kw: None,
+            meta_fn=lambda _coin: object(),
+        )
+        self._seed_long(mgr)
+        quotes = {"SOL": _books()}
+        rows = mgr.execute_decision(
+            self._close_decision(),
+            snapshots=[
+                _snap("SOL", "long", 0.30, p50_1m=0.80, floor=0.50),
+                _snap("SOL", "short", 0.60, p50_1m=1.20, floor=0.60),
+            ],
+            quotes=quotes,
+            now_ms=3_000,
+        )
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["event"], "close")
+        self._assert_add_not_subtract(rows[0], quotes)
+
+    def test_async_would_send_close_adds_fill_spreads(self) -> None:
+        import asyncio
+
+        tmp = Path(tempfile.mkdtemp())
+        mgr = ThetaTradeManager(
+            data_root=tmp,
+            config=ThetaTradeConfig(fill_delay_ms=70, notional_usdt=self._NOTIONAL),
+            sleep_fn=lambda _s: None,
+        )
+        self._seed_long(mgr)
+        quotes = {"SOL": _books()}
+        rows = asyncio.run(
+            mgr._execute_decision_async(  # noqa: SLF001
+                self._close_decision(),
+                snapshots=[
+                    _snap("SOL", "long", 0.30, p50_1m=0.80, floor=0.50),
+                    _snap("SOL", "short", 0.60, p50_1m=1.20, floor=0.60),
+                ],
+                quotes=quotes,
+                now_ms=4_000,
+            )
+        )
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["event"], "close")
+        self._assert_add_not_subtract(rows[0], quotes)
 
 
 class IsolationTests(unittest.TestCase):
