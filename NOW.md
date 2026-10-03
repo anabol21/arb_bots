@@ -15,3 +15,13 @@
 - Гейты: θ_open 0.50, p50_open 0.60, min_profit 0.20, fee 0.30, K=1.
 - Канарейка theta-k1 остановлена. Contour B этот юнит не трогает.
 - Следит Sentry (issue created) на открытиях.
+
+## Ops / collector (голова)
+
+Сервер, утренний снимок, скрипты юнитов. Живые ордера и would_send не веду.
+
+- Prod writer один: `spread-collector-next` → `/data/live`. Старый collector не поднимать.
+- Утро ~9:32 МСК: диск, техпроцессы, топ-10 volatile (OKX–Bybit, rolling 24ч).
+- Compact/backup прода и скрипты юнитов — эта зона. Чужие data root не чищу без явного OK.
+- HL v2 (пул, `/data/live_hl_v2`, бэкап `spread-hl-v2`) ведёт Старшой, не эта секция.
+- Эту секцию по утрам обновляю только после мержа в main. Патч на сервер сюда не пишу без явного «да».
