@@ -1,3 +1,5 @@
+> **HISTORY (рамка «только `main_hl`»).** Абзац ниже про ветку `main_hl` и запрет мержить HL в `main` — снимок до stitch 2026-10-01 (заметка в конце файла). Контент не удалять. Изоляция не изменилась: не писать в `/data/live`, не вливать entrypoint в `spread-collector-next` / `app/screaner_b_o.py`. Prod D на `main` остаётся Bybit/OKX → `/data/live`.
+
 # HL v2 canary (sharded l2Book)
 
 > **Integration branch: `main_hl`.** Hyperliquid / HL scaling work lives on long-lived `main_hl` only. Open HL PRs against `main_hl`. Do **not** merge HL work into `main` without an explicit decision. Prod-next on `main` stays Bybit/OKX → `/data/live`.
