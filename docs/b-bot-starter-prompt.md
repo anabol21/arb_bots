@@ -1,3 +1,5 @@
+> **HISTORY.** Стартовый промпт чата stub-бота (`/data/bbot`, без send), не текущий prod. Не удалять. Живой would_send prod — `spread-bbot-would-send-prod` ([`would-send-prod-status.md`](would-send-prod-status.md)): stub, без live orders. Живая отправка — только контур B за `VENUE=live` и `LIVE_ORDERS=1`. Канон: [`../architecture.md`](../architecture.md).
+
 # Стартовый промпт чата B-bot
 
 Скопировать в **новый** чат. Модель оркестратора: `gpt-5.6-terra-medium`.

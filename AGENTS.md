@@ -17,33 +17,24 @@ Agents must always distinguish these contexts explicitly when reasoning about bu
 
 ## Architecture context (required)
 Before non-trivial work, read:
-1. `architecture.md`
-2. Then the specific module files linked from Module Map / Critical Paths
+1. `architecture.md` (canon: contours, journals, live gates, glossary)
+2. `.cursor/rules/` — especially `00-project-focus.mdc`, `70-b-private.mdc` when the task touches B
+3. Then the specific module files linked from Module Map / Critical Paths
+
+`docs/architecture.md` is only a pointer to the root file. Do not maintain a second map there.
 
 When you change topology (new process, send path, journal layout, contour boundary):
 update `architecture.md` in the same change.
 Do not put secrets in docs.
 
 ## Current Priority
-Current repository priority is data-engineering reliability, not strategy expansion.
+The repository is three contours, not a storage-only project. Storage work is contour **D**. It is not the sole goal of the repo.
 
-Primary focus:
-- reliable persistence of spread data
-- runtime stability on VPS
-- correctness of storage behavior on mounted remote storage
-- observability of write/flush/save behavior
-- validation of alternative storage designs
-- reproducibility for later replay, backtest, and research
+- **D** — public collector and persistence (`app/screaner_b_o.py`, `/data/live`). Inside D, reliability still matters: VPS stability, write/flush/save observability, restart safety, reproducibility for later replay. The storage design inside D is not finally decided. The coded path is hybrid (local hive, spool on failure, compaction, rclone). Compare candidates only when that boundary is actually open (see `.cursor/rules/10-storage-scope.mdc`).
+- **M** — historical simulation only (`docs/strategy-gears.md`). Closing a gear is not live readiness and is not a D task.
+- **B** — glue. Contour B (queue → `ws.send`) is unlocked in `app/bot/private/**`. Live send stays fail-closed.
 
-The storage architecture is NOT considered finally decided.
-
-Agents may evaluate multiple persistence strategies, including:
-- direct writes to mounted storage
-- local staging plus background upload
-- hybrid or fallback-based approaches
-
-The goal is not to defend one preferred design.
-The goal is to identify the most reliable design under realistic runtime constraints.
+Do not widen a D persistence task into ingest, model search, or live send.
 
 ## Frozen Areas
 Unless the user explicitly unlocks them, treat these areas as frozen:
@@ -51,7 +42,7 @@ Unless the user explicitly unlocks them, treat these areas as frozen:
 - exchange parsing
 - spread calculation
 - signal/trading logic inside `app/screaner_b_o.py`
-- live order routing outside `app/bot/private/**` (B-private: testnet first)
+- live order routing outside `app/bot/private/**` (Contour B is unlocked there; testnet/demo first; live send only behind the env gates below)
 - unrelated strategy experimentation
 
 Do not modify frozen areas just because storage behavior is problematic.
@@ -95,26 +86,21 @@ Every storage-related task must explicitly name:
 If any of these are unclear, the task is under-specified and the agent should say so.
 
 ## Build, Test & Validation Commands
-Use fast, scoped, non-destructive commands first.
-
-Repository inspection:
-```bash
-cd /Users/mishatrubik/Desktop/spread && find . -maxdepth 4 -type f | sort
-```
+Use fast, scoped, non-destructive commands first. Run them from the repository root (whatever checkout you have). Do not assume a fixed desktop path.
 
 Python syntax check:
 ```bash
-cd /Users/mishatrubik/Desktop/spread && python3 -m py_compile app/screaner_b_o.py
+python3 -m py_compile app/screaner_b_o.py
 ```
 
 Mount validation:
 ```bash
-cd /Users/mishatrubik/Desktop/spread && python3 validation/check_mount.py
+python3 validation/check_mount.py
 ```
 
 Lifecycle validation:
 ```bash
-cd /Users/mishatrubik/Desktop/spread && python3 validation/check_file_lifecycle.py
+python3 validation/check_file_lifecycle.py
 ```
 
 Use these as starting points. Add more targeted commands only when required by the task.
@@ -134,11 +120,13 @@ Use these as starting points. Add more targeted commands only when required by t
 - Keep path handling explicit and centralized when possible
 
 ## Development tracks (lines of work, not necessarily git branches)
-1. **Data collection / storage reliability** — VPS, mount, persistence (`app/screaner_b_o.py`). Current reliability priority.
-2. **Model** — build and validate the strategy on **simulated historical runs** only (`model.ipynb`, gear ladder in `docs/strategy-gears.md`: **1.0** closed → **1.5** regime screener → **2** multi-coin fixed model **closed (contour; 2.2 out of scope)** → **2.2** **closed** as observation contour — 1 Hz dummy replay in `research/gear22_backtest/`, frozen knobs, `spread_last` fill not `Trade_Lat`; not 1.0 simulator gate, not size, not search, not live-ready → **2.5** size policy (blocked until explicit unlock) → **3** parameter search on anomaly episodes). Validation remains **backtest / historical simulation**, not live trading. An async live trading bot is **out of scope** for the model track.
-3. **Glue** — architecture joining collection, model, and trades. Spec: `docs/b-v0-block-diagram.md`. Track 3 may implement a **live VPS stub bot** in `app/bot/**` (not `private/`) that must not interfere with the D collector. **B-private** is unlocked (2026-08-18) in `app/bot/private/**`: testnet/demo first, live orders after an explicit live gate. Private APIs stay out of the collector. Starters: `docs/b-bot-starter-prompt.md`, `docs/b-private-starter-prompt.md`.
+Same D / M / B split as `architecture.md` §3. Not three competing goals, and not "storage is the whole repo".
 
-Strategy documentation does not replace the storage-reliability priority. Live-bot integration belongs to track 3; gear 1.0 closure was simulator-only.
+1. **D — collection / storage** — VPS, persistence (`app/screaner_b_o.py`). Reliability priority **of this contour only**.
+2. **M — model** — simulated historical runs only (`model.ipynb`, `docs/strategy-gears.md`: **1.0** closed → **1.5** regime screener → **2** multi-coin fixed model **closed (contour; 2.2 out of scope)** → **2.2** **closed** as observation — 1 Hz dummy replay in `research/gear22_backtest/`, frozen knobs, `spread_last` not `Trade_Lat`; not the 1.0 simulator gate, not size, not search, not live-ready → **2.5** size policy blocked until explicit unlock → **3** parameter search on anomaly episodes). An async live bot is **out of scope** for M.
+3. **B — glue** — joins collection, model, and trades. Spec: `docs/b-v0-block-diagram.md`. Stub `would_send` lives in `app/bot/**` (not `private/`) and must not touch D trees. **Contour B is unlocked** in `app/bot/private/**` (2026-08-18): testnet/demo first; live `ws.send` only with `BBOT_BROKER=private_live` and `VENUE=live` and `LIVE_ORDERS=1`. Private APIs stay out of the collector. Prod would_send ops: `docs/would-send-prod-status.md`. `docs/b-bot-starter-prompt.md` is a HISTORY stub-chat prompt, not the current prod unit.
+
+Gear closure in M is simulator-only. It does not replace D reliability work and it does not authorize live send.
 
 ## Architectural Decision Discipline
 For storage architecture tasks, do not jump directly to implementation.
@@ -179,7 +167,30 @@ Do not:
 - silently swallow exceptions in persistence paths
 - make destructive operational assumptions about VPS or storage
 
+## Glossary (short)
+Full table: `architecture.md` §11. Rules: `.cursor/rules/`.
+
+| Term | Meaning here |
+|------|----------------|
+| D | Public collector contour (`screaner_b_o.py`, `/data/live`) |
+| M | Historical model and gears. Not a VPS order process |
+| B / B-private | `app/bot/**` / `app/bot/private/**` |
+| Contour B | Default live send path: queue → `ws.send` |
+| would_send | Journaled intent. Stub rows keep `send=false` |
+| live send | Fail-closed. Needs `VENUE=live` and `LIVE_ORDERS=1` (and `BBOT_BROKER=private_live`) |
+| paper | Not a coded process mode. Do not invent one |
+
 ## Safety & Guardrails
+Live send is not the default. Do not flip a stub or would_send unit into a sender. Do not set `VENUE=live` or `LIVE_ORDERS=1` unless the task is an explicit live-send step on Contour B. Missing either flag must fail closed. GREEN would_send is not live permission. No secrets in git, docs, chat, or logs. Risk cap on live ≈ 100 USD per exchange.
+
+Do not stop, restart, or disable these units without an explicit ask (templates exist in `deploy/systemd/`):
+
+- `spread-collector-next.service` — live D writer
+- `spread-bbot-would-send-prod.service` — prod would_send stub
+- `spread-bbot-gear22-live-canary.service` — gear 2.2 live canary
+
+Do not enable `spread-collector.service` over the next writer.
+
 Never do without explicit approval:
 - delete or bulk-move datasets
 - truncate runtime logs
