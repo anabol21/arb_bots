@@ -17,11 +17,12 @@
 
 Сервер, утренний снимок, скрипты юнитов. Живые ордера и would_send не веду.
 
-- Prod writer один: `spread-collector-next` → `/data/live`. Старый collector не поднимать.
-- Утро ~9:32 МСК: диск, техпроцессы, топ-10 volatile (OKX–Bybit, rolling 24ч).
-- Compact/backup прода и скрипты юнитов — эта зона. Чужие data root не чищу без явного OK.
-- HL v2 (пул, `/data/live_hl_v2`, бэкап `spread-hl-v2`) ведёт Старшой, не эта секция.
-- Эту секцию по утрам обновляю только после мержа в main. Патч на сервер сюда не пишу без явного «да».
+- Юнит `spread-collector-next`, код `/root/spread_staging`, данные `/data/live`.
+- SHA нет: `/root/spread_staging` не git-checkout, крутится задеплоенное дерево.
+- Статус 03.10: active с 22.09 14:07 МСК, NRestarts=0. Утро ~9:32 МСК: диск, техпроцессы, топ-10 volatile (OKX–Bybit, rolling 24ч). Таймеры compact/backup/top10 active.
+- Лимиты: skew/age 2000 мс, HOT_ADD max_extra=8, bars off. Диск 32/79G, свободно ~44G.
+- Слежу я, утренний снимок. Sentry ops отдельно, не эта секция.
+- Не поднимать старый collector. Чужие data root не чищу без явного OK. Патч в NOW.md — только после явного «да».
 
 ## HL v2 (Старшой)
 
