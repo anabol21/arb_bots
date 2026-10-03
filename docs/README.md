@@ -36,6 +36,7 @@
 | [`hot-add-new-coins.md`](hot-add-new-coins.md) | HOT_ADD |
 | [`prod-unit-snippets.md`](prod-unit-snippets.md) | Фрагменты юнитов |
 | [`local-lean-collector.md`](local-lean-collector.md) | Локальный lean, не prod |
+| [`NOW.md`](NOW.md) | Утренний снимок, ожидающий заполнения головой |
 
 Живая отправка только при `VENUE=live` и `LIVE_ORDERS=1` (и `BBOT_BROKER=private_live`). Без явной просьбы не останавливать `spread-collector-next`, `spread-bbot-would-send-prod`, `spread-bbot-gear22-live-canary`.
 
