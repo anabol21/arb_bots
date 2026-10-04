@@ -1,5 +1,8 @@
 # B-private — цель и дорожная карта
 
+> Ветка адаптера закрыта 2026-08-20. Это не текущий вектор проекта. План — [`roadmap.md`](../roadmap.md), снимок хоста — [`NOW.md`](../NOW.md).
+
+
 Трек: склейка / исполнение. Не stub и не collector.  
 Unlock: [`b-private-unlock.md`](b-private-unlock.md). Чат: [`b-private-starter-prompt.md`](b-private-starter-prompt.md).  
 **Статус для оркестраторов:** [`b-private-status.md`](b-private-status.md) (2026-08-20).

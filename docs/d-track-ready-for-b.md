@@ -88,4 +88,4 @@
 - `canary` 15–16.08: [`ws-reconnect-v2-valid-ticks-canary-20260815-result.md`](ws-reconnect-v2-valid-ticks-canary-20260815-result.md)
 - Retention `.state` 25–27.08: [`compactor-state-retention-20260825.md`](compactor-state-retention-20260825.md)
 - Контракт хранения: [`storage-contract.md`](storage-contract.md)
-- Дорожная карта: [`program-roadmap.md`](program-roadmap.md)
+- Текущий план: [`../roadmap.md`](../roadmap.md). Журнал GD того среза: [`program-roadmap.md`](program-roadmap.md).

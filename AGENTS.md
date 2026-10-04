@@ -113,7 +113,7 @@ Use these as starting points. Add more targeted commands only when required by t
   - `app/utils/`
 - Validation logic belongs in `validation/`
 - Documentation and operational instructions belong in `docs/`
-- Strategy gear roadmap: `docs/strategy-gears.md`
+- Historical model-gear ladder: `docs/strategy-gears.md`. Current project vector: `roadmap.md`. Host snapshot: `NOW.md`
 - Research and offline analysis belong in `research/`
 - Keep runtime code and offline research code separate
 - Prefer structured logs over ad-hoc print debugging
@@ -123,7 +123,7 @@ Use these as starting points. Add more targeted commands only when required by t
 Same D / M / B split as `architecture.md` §3. Not three competing goals, and not "storage is the whole repo".
 
 1. **D — collection / storage** — VPS, persistence (`app/screaner_b_o.py`). Reliability priority **of this contour only**.
-2. **M — model** — simulated historical runs only (`model.ipynb`, `docs/strategy-gears.md`: **1.0** closed → **1.5** regime screener → **2** multi-coin fixed model **closed (contour; 2.2 out of scope)** → **2.2** **closed** as observation — 1 Hz dummy replay in `research/gear22_backtest/`, frozen knobs, `spread_last` not `Trade_Lat`; not the 1.0 simulator gate, not size, not search, not live-ready → **2.5** size policy blocked until explicit unlock → **3** parameter search on anomaly episodes). An async live bot is **out of scope** for M.
+2. **M — model** — simulated historical runs only. Closed history in `docs/strategy-gears.md`: **1.0** → **1.5** → **2** (contour; 2.2 out of scope) → **2.2** observation (1 Hz dummy replay in `research/gear22_backtest/`, frozen knobs, `spread_last` not `Trade_Lat`). That close is not the current plan. Forward patches (would_send canary, 2.2 bot contour, 2.3, 2.4, 2.5, 2.7, 3) are `roadmap.md`. An async live bot stays **out of scope** for M.
 3. **B — glue** — joins collection, model, and trades. Spec: `docs/b-v0-block-diagram.md`. Stub `would_send` lives in `app/bot/**` (not `private/`) and must not touch D trees. **Contour B is unlocked** in `app/bot/private/**` (2026-08-18): testnet/demo first; live `ws.send` only with `BBOT_BROKER=private_live` and `VENUE=live` and `LIVE_ORDERS=1`. Private APIs stay out of the collector. Prod would_send ops: `docs/would-send-prod-status.md`. `docs/b-bot-starter-prompt.md` is a HISTORY stub-chat prompt, not the current prod unit.
 
 Gear closure in M is simulator-only. It does not replace D reliability work and it does not authorize live send.

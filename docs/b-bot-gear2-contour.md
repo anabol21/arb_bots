@@ -1,5 +1,8 @@
 # Контур Gear 2 would_send (Track 3)
 
+> Снимок эксперимента GREEN 2026-08-30. «Следующий шаг — не гиры 2.5/3» относится к тому контуру, не к текущему плану. Вектор сейчас — [`roadmap.md`](../roadmap.md), снимок хоста — [`NOW.md`](../NOW.md).
+
+
 Трек **склейка / B-bot**. Не D, не frozen close гира 2, не alpha и не PnL.
 
 Этот live-data эксперимент собирает dual-leg журнал `would_send=true`, `send=false`

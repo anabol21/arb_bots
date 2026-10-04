@@ -11,7 +11,9 @@
 | [`../architecture.md`](../architecture.md) | Топология D/M/B, журналы, гейты live send, глоссарий |
 | [`../README.md`](../README.md) | Вход: три контура и что не смешивать |
 | [`../AGENTS.md`](../AGENTS.md) | Политика агентов, live safety, что не останавливать |
-| [`strategy-gears.md`](strategy-gears.md) | Лестница гиров M (симулятор, не бот) |
+| [`../roadmap.md`](../roadmap.md) | План развития: источник правды по вектору |
+| [`../NOW.md`](../NOW.md) | Снимок хоста: источник правды по текущему состоянию |
+| [`strategy-gears.md`](strategy-gears.md) | Историческая лестница гиров M до наблюдения 2.2, не текущий план |
 | [`storage-contract.md`](storage-contract.md) | Контракт хранения D |
 | [`b-v0-block-diagram.md`](b-v0-block-diagram.md) | Черновик блок-схемы склейки |
 | [`data-format-model.md`](data-format-model.md) | Запрос полей со стороны модели, не спецификация сборщика |
@@ -36,7 +38,7 @@
 | [`hot-add-new-coins.md`](hot-add-new-coins.md) | HOT_ADD |
 | [`prod-unit-snippets.md`](prod-unit-snippets.md) | Фрагменты юнитов |
 | [`local-lean-collector.md`](local-lean-collector.md) | Локальный lean, не prod |
-| [`NOW.md`](NOW.md) | Утренний снимок, ожидающий заполнения головой |
+| [`NOW.md`](NOW.md) | Указатель на корневой [`../NOW.md`](../NOW.md). Снимок живёт там, не в этой заглушке |
 
 Живая отправка только при `VENUE=live` и `LIVE_ORDERS=1` (и `BBOT_BROKER=private_live`). Без явной просьбы не останавливать `spread-collector-next`, `spread-bbot-would-send-prod`, `spread-bbot-gear22-live-canary`.
 
@@ -46,7 +48,7 @@
 
 Отдельно помечены баннером **HISTORY** (текст сохранён, сверху предупреждение):
 
-- [`program-roadmap.md`](program-roadmap.md) — журнал GD; §5–§6 устарели как «текущая работа»
+- [`program-roadmap.md`](program-roadmap.md) — журнал GD; текущий план — корневой [`../roadmap.md`](../roadmap.md), не §5–§6
 - [`b-bot-starter-prompt.md`](b-bot-starter-prompt.md) — промпт stub-чата, не prod would_send
 - [`b-private-secrets-manifest.md`](b-private-secrets-manifest.md) — этап 1 без send; значений ключей нет и не добавлять
 - [`hl-v2-canary.md`](hl-v2-canary.md) — рамка «только `main_hl`» до stitch 2026-10-01

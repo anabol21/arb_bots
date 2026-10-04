@@ -270,7 +270,7 @@ Journals for live: theta_trades `send` flag; private `events.jsonl` (`bbot.priva
 
 ### D. Offline model (not a VPS process)
 
-`model.ipynb` / `research/gear22_backtest/`: read parquet; `policy.decide`; dummy 1 Hz replay; fill = `spread_last`, not `Trade_Lat`. Gear 2.2 observation is **closed**. Gear 2.5 blocked until unlock. Not live-ready.
+`model.ipynb` / `research/gear22_backtest/`: read parquet; `policy.decide`; dummy 1 Hz replay; fill = `spread_last`, not `Trade_Lat`. Gear 2.2 observation is **closed** and is not live-ready. The forward plan is `roadmap.md`, not a block on later patches. Host snapshot: `NOW.md`.
 
 ---
 
@@ -440,7 +440,7 @@ Local fallback if `/data/bbot` not writable: `<repo>/output/bbot`.
 | live | `VENUE=live`. Orders only with `LIVE_ORDERS=1`. |
 | lean | Tick parquet without precomputed spread columns |
 | hive | `base_coin=*/event_date=*` directory layout |
-| Gear 1.0 / 1.5 / 2 / 2.2 | Model-track maturity; 2.2 = observation contour, not live-ready |
+| Gear 1.0 / 1.5 / 2 / 2.2 | Closed model-track history; 2.2 observation is not live-ready. Current patch plan: `roadmap.md` |
 | K_live | Max concurrent open slot (coded 1) |
 | Trade_Lat | Stub fill delay from signal tick (gear1 HYPER 100 ms); live fills are venue ACKs |
 | take=yes | Universe CSV live pair screen |
