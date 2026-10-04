@@ -1,6 +1,6 @@
 # NOW
 
-Снимок на 2026-10-03. Каждая секция — зона своего агента, чужие секции не переписывать.
+Снимок на 2026-10-04 ~09:42 МСК. Каждая секция — зона своего агента, чужие секции не переписывать.
 
 ## would_send (стратег)
 
@@ -15,13 +15,15 @@
 
 ## Ops / collector (голова)
 
-Сервер, утренний снимок, скрипты юнитов. Живые ордера и would_send не веду.
+Сервер, утренний снимок, скрипты юнитов. Живые ордера и would_send не веду. Архитектура: `docs/`.
 
+- Вектор: держать D зелёным (collector/compact/backup); параллельно крутятся would_send-prod (стратег) и HL v2 (Старшой). Contour B live canary inactive — не заброс B. 2.5/3 / полный пул / bars on / live без команды — не трогаем.
 - Юнит `spread-collector-next`, код `/root/spread_staging`, данные `/data/live`.
 - SHA нет: `/root/spread_staging` не git-checkout, крутится задеплоенное дерево.
-- Статус 03.10: active с 22.09 14:07 МСК, NRestarts=0. Утро ~9:32 МСК: диск, техпроцессы, топ-10 volatile (OKX–Bybit, rolling 24ч). Таймеры compact/backup/top10 active.
-- Лимиты: skew/age 2000 мс, HOT_ADD max_extra=8, bars off. Диск 32/79G, свободно ~44G.
-- Слежу я, утренний снимок. Sentry ops отдельно, не эта секция.
+- Статус 04.10 ~09:42 МСК: active с 22.09 14:07 МСК, NRestarts=0, MemoryCurrent ~1.5G (MemoryMax infinity), pairs=198, collect_bars=false, failures=0, unrecovered=0. Топ-10 volatile (OKX–Bybit, rolling 24ч) отработал 04.10 09:10–09:15 МСК. Таймеры compact/backup/discovery/ops-metrics/top10 active.
+- Соседи на хосте (не веду): `spread-bbot-would-send-prod` active с 02.10 14:38 МСК, MemoryMax 2G / ~229M, CPUQuota 100%, SHA `a12d593`, пул 42, position=None после close SAND; `spread-collector-hl-v2` active с 03.10 14:11 МСК, MemoryMax 6G / ~831M, CPUQuota 200%, heartbeat bybit/okx/hl 198/198/88. `spread-bbot-gear22-live-canary` и `theta-k1` inactive.
+- Лимиты collector: skew/age 2000 мс, HOT_ADD max_extra=8, bars off. Диск 32/79G, свободно ~45G (`/data/live` 1.7G, `live_hl_v2` ~0.6G, `bbot-would-send-prod` 6.3G, `compacted` 3.6G).
+- Слежу я (голова), утренний дайджест ~9:32 МСК. @бот — Contour B (молчит), @стратег — would_send, @Старшой — HL. Sentry ops отдельно, не эта секция.
 - Не поднимать старый collector. Чужие data root не чищу без явного OK. Патч в NOW.md — только после явного «да».
 
 ## HL v2 (Старшой)
