@@ -382,6 +382,32 @@ def size_check(
     }
 
 
+def journal_close_pnl_spread(
+    open_spread: Optional[float],
+    close_spread: Optional[float],
+    fee_round_trip_pp: float,
+) -> Optional[float]:
+    """Gear 2.2 recorded close profit in percentage points.
+
+    ``close_spread`` is already the opposite-side (unwind) fill: short when
+    the open was long. Policy ``potential_pp`` is
+
+        fill_spread_pp + spread_last_opposite − fee_round_trip_pp
+
+    with frozen ``fee_round_trip_pp`` of 0.30. Subtracting the close spread
+    (``open − close``) flips a negative close into a phantom gain, so the
+    journal uses the same sum:
+
+        pnl_spread = open_fill_spread + close_fill_spread − fee_round_trip_pp
+    """
+    opened = _finite(open_spread)
+    closed = _finite(close_spread)
+    fee = _finite(fee_round_trip_pp)
+    if opened is None or closed is None or fee is None:
+        return None
+    return float(opened) + float(closed) - float(fee)
+
+
 def spread_for_side(okx: Mapping[str, Any], bybit: Mapping[str, Any], side: str) -> Optional[float]:
     """Edge % for long/short using the same formula as live WS spreads."""
     try:
@@ -794,6 +820,13 @@ class ThetaTradeManager:
         self.slot = SlotState(k=int(self.config.slot_k))
         self._skip_log_budget = 0
 
+    def _fee_round_trip_pp(self) -> float:
+        """Same round-trip fee ``potential_pp`` subtracts (frozen default 0.30)."""
+        params = self.config.policy_params
+        if params is None:
+            return float(DEFAULT_OBSERVE_PARAMS.fee_round_trip_pp)
+        return float(params.fee_round_trip_pp)
+
     def abort_coin_if_held(self, coin: str, *, reason: str = "hot_drop") -> bool:
         """Clear K=1 slot when it holds/pends ``coin`` (hot-drop tear-down).
 
@@ -1132,10 +1165,11 @@ class ThetaTradeManager:
                     okx_f, bybit_f, opposite_side(pos.side)
                 )
                 open_spread = pos.open_fill_spread
-                # would_send PnL proxy: open edge − close edge (pct points).
-                pnl_spread = None
-                if open_spread is not None and close_spread is not None:
-                    pnl_spread = float(open_spread) - float(close_spread)
+                # Gear 2.2: open + opposite close − fee. close_spread is
+                # already the unwind side; open − close flips a negative close.
+                pnl_spread = journal_close_pnl_spread(
+                    open_spread, close_spread, self._fee_round_trip_pp()
+                )
                 pnl_fields = {
                     "open_fill_spread": open_spread,
                     "close_fill_spread": close_spread,
@@ -1343,9 +1377,10 @@ class ThetaTradeManager:
                 pos = self.slot.position
                 close_spread = spread_for_side(okx_f, bybit_f, opposite_side(side))
                 open_spread = pos.open_fill_spread if pos is not None else None
-                pnl_spread = None
-                if open_spread is not None and close_spread is not None:
-                    pnl_spread = float(open_spread) - float(close_spread)
+                # Same formula as would_send (open + opposite close − fee).
+                pnl_spread = journal_close_pnl_spread(
+                    open_spread, close_spread, self._fee_round_trip_pp()
+                )
                 pnl_fields = {
                     "open_fill_spread": open_spread,
                     "close_fill_spread": close_spread,
@@ -1610,9 +1645,10 @@ class ThetaTradeManager:
                     okx_f, bybit_f, opposite_side(pos.side)
                 )
                 open_spread = pos.open_fill_spread
-                pnl_spread = None
-                if open_spread is not None and close_spread is not None:
-                    pnl_spread = float(open_spread) - float(close_spread)
+                # Same formula as the sync would_send close (open + opposite − fee).
+                pnl_spread = journal_close_pnl_spread(
+                    open_spread, close_spread, self._fee_round_trip_pp()
+                )
                 pnl_fields = {
                     "open_fill_spread": open_spread,
                     "close_fill_spread": close_spread,
