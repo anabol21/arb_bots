@@ -24,7 +24,7 @@
 - Соседи на хосте (не веду): `spread-bbot-would-send-prod` active с 02.10 14:38 МСК, MemoryMax 2G / ~229M, CPUQuota 100%, SHA `a12d593`, пул 42, position=None после close SAND; `spread-collector-hl-v2` active с 03.10 14:11 МСК, MemoryMax 6G / ~831M, CPUQuota 200%, heartbeat bybit/okx/hl 198/198/88. `spread-bbot-gear22-live-canary` и `theta-k1` inactive.
 - Лимиты collector: skew/age 2000 мс, HOT_ADD max_extra=8, bars off. Диск 32/79G, свободно ~45G (`/data/live` 1.7G, `live_hl_v2` ~0.6G, `bbot-would-send-prod` 6.3G, `compacted` 3.6G).
 - Слежу я (голова), утренний дайджест ~9:32 МСК. @бот — Contour B (молчит), @стратег — would_send, @Старшой — HL. Sentry ops отдельно, не эта секция.
-- Не поднимать старый collector. Чужие data root не чищу без явного OK. Патч в NOW.md — только после явного «да».
+- Не поднимать старый collector. Чужие data root не чищу без явного OK. Утренний ops-снимок NOW.md коммичу сразу в main. Прочий патч в NOW.md и на сервер — только после явного «да».
 
 ## HL v2 (Старшой)
 
