@@ -257,3 +257,55 @@ def shared_from_meta(
         okx_min_notional=_opt("okx_min_notional"),
         bybit_min_notional=_opt("bybit_min_notional_value"),
     )
+
+
+def exact_close_from_meta(
+    *,
+    meta: object,
+    okx_px: Decimal,
+    bybit_px: Decimal,
+    okx_sz: object,
+    bybit_qty: object,
+) -> SharedCoinQty:
+    """Validate the original filled leg quantities for a reduce-only close.
+
+    Close quantity is carried from terminal open fills. It is never rounded or
+    resized to a current-price notional target; current lot, step, and ctVal
+    metadata must still match the saved quantities exactly.
+    """
+    ct_raw = getattr(meta, "okx_ct_val", _MISSING)
+    if ct_raw is _MISSING:
+        ct_raw = getattr(meta, "ct_val", _MISSING)
+    if ct_raw is _MISSING or ct_raw is None or ct_raw == "":
+        raise CoinQtyError("qty_mismatch")
+    ct_val = _as_decimal(ct_raw, field="ct_val")
+    lot = _as_decimal(getattr(meta, "okx_lot_size", None), field="okx_lot_size")
+    min_sz = _as_decimal(
+        getattr(meta, "okx_min_size", None) or lot, field="okx_min_size"
+    )
+    step = _as_decimal(getattr(meta, "bybit_qty_step", None), field="bybit_qty_step")
+    min_qty = _as_decimal(
+        getattr(meta, "bybit_min_order_qty", None) or step,
+        field="bybit_min_order_qty",
+    )
+    saved_okx_sz = _as_decimal(okx_sz, field="okx_filled_qty")
+    saved_bybit_qty = _as_decimal(bybit_qty, field="bybit_filled_qty")
+    if (
+        _snap(saved_okx_sz, symbol="OKX", step=lot, min_qty=min_sz) != saved_okx_sz
+        or _snap(saved_bybit_qty, symbol="BYBIT", step=step, min_qty=min_qty)
+        != saved_bybit_qty
+        or saved_okx_sz * ct_val != saved_bybit_qty
+        or okx_px <= 0
+        or bybit_px <= 0
+    ):
+        raise CoinQtyError("qty_mismatch")
+    coin_qty = saved_okx_sz * ct_val
+    return SharedCoinQty(
+        coin_qty=coin_qty,
+        okx_sz=saved_okx_sz,
+        bybit_qty=saved_bybit_qty,
+        okx_notional=coin_qty * okx_px,
+        bybit_notional=coin_qty * bybit_px,
+        okx_px=okx_px,
+        bybit_px=bybit_px,
+    )

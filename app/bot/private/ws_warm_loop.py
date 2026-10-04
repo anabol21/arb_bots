@@ -76,6 +76,42 @@ def _decode_ws_message(message: Any) -> str:
     return str(message)
 
 
+def _record_owner_wire(
+    sock: "LoopOwnedSocket",
+    text: str,
+    *,
+    capture_stage: str,
+    wall_ms: int,
+    mono_ns: int,
+) -> None:
+    """Capture at the sole websocket reader, without exposing frame contents in logs."""
+    transcript = getattr(sock, "_wire_transcript", None)
+    runtime = sock.runtime
+    if transcript is None or runtime is None:
+        return
+    try:
+        transcript.record_io(
+            direction="in",
+            venue=sock.exchange,
+            socket=sock.channel,
+            text=text,
+            wall_ms=wall_ms,
+            mono_ns=mono_ns,
+            reconnect_generation=int(runtime.reconnect_generation),
+            run_id=str(transcript.run_id),
+            capture_stage=capture_stage,
+        )
+    except Exception as exc:  # noqa: BLE001 — capture loss is observed and halts the campaign
+        transcript.mark_unhealthy(type(exc).__name__)
+        LOG.error(
+            "warm_wire_capture_failed exchange=%s channel=%s gen=%s err=%s",
+            sock.exchange,
+            sock.channel,
+            runtime.reconnect_generation,
+            type(exc).__name__,
+        )
+
+
 def is_loop_owned_socket(sock: Any) -> bool:
     return isinstance(sock, LoopOwnedSocket) or bool(
         getattr(sock, "loop_owned", False)
@@ -559,8 +595,21 @@ class PrivateWarmLoop:
             if self._stop_requested() or sock._permanent_close:  # noqa: SLF001
                 return
             text = _decode_ws_message(message)
-            sock.last_recv_mono_ns = time.monotonic_ns()
+            arrival_mono_ns = time.monotonic_ns()
+            arrival_wall_ms = int(time.time() * 1000)
+            sock.last_recv_mono_ns = arrival_mono_ns
             runtime = sock.runtime
+            private_order = sock.channel == "private" and _is_private_order_push(
+                sock.exchange, text
+            )
+            if sock.channel == "trade" or private_order:
+                _record_owner_wire(
+                    sock,
+                    text,
+                    capture_stage="socket_arrival",
+                    wall_ms=arrival_wall_ms,
+                    mono_ns=arrival_mono_ns,
+                )
             if runtime is not None:
                 if sock.channel == "trade":
                     runtime.note_trade_activity()

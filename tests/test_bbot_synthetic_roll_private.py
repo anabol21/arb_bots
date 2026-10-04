@@ -20,6 +20,8 @@ from app.bot.private.order_sign import LiveCredentials
 from app.bot.private.okx_inst_id import lookup_okx_inst_id_code, prefetch_okx_inst_id_codes
 from app.bot.private.order_preflight import LiveHttpMetadataProvider
 from app.bot.private.place_send import (
+    _fill_px,
+    _is_matching_fill,
     drain_trade_fill,
     place_live,
     read_warm_trade_frame,
@@ -53,6 +55,53 @@ def _meta(**overrides):
     )
     raw.update(overrides)
     return SimpleNamespace(**raw)
+
+
+def _report_order_body(
+    venue: str,
+    sent: list[str],
+    *,
+    price: object = "1.5",
+    qty: object | None = None,
+    state: str = "filled",
+    extra: dict | None = None,
+) -> str:
+    """Synthetic field-level fixture shaped from the authentic B0 report.
+
+    The report gives statuses and values, not raw JSON. IDs here are stable test
+    placeholders derived from the outgoing frame so matching stays realistic.
+    """
+    bybit_args = json.loads(sent[-2])["args"][0]
+    okx_args = json.loads(sent[-1])["args"][0]
+    if venue == "okx":
+        row = {
+            "clOrdId": okx_args["clOrdId"],
+            "ordId": "OKX_ORDER_1",
+            "state": state,
+            "accFillSz": str(qty if qty is not None else okx_args["sz"]),
+            "avgPx": str(price),
+        }
+        if extra:
+            row.update(extra)
+        body = {"arg": {"channel": "orders", "instId": "XRP-USDT-SWAP"}, "data": [row]}
+    else:
+        status = {
+            "filled": "Filled",
+            "cancelled": "Cancelled",
+            "canceled": "Cancelled",
+            "partiallyfilledcanceled": "PartiallyFilledCanceled",
+        }.get(state.lower(), state)
+        row = {
+            "orderLinkId": bybit_args["orderLinkId"],
+            "orderId": "BYBIT_ORDER_1",
+            "orderStatus": status,
+            "cumExecQty": str(qty if qty is not None else bybit_args["qty"]),
+            "avgPrice": str(price),
+        }
+        if extra:
+            row.update(extra)
+        body = {"topic": "order", "data": [row]}
+    return json.dumps(body)
 
 
 class _Ws:
@@ -219,9 +268,9 @@ class LegAndSendTests(unittest.TestCase):
         set_exchange_coins("bybit", ["BTC"], True)
 
         def recv(venue: str) -> str:
-            if venue == "okx":
-                return json.dumps({"data": [{"fillPx": "2.01"}]})
-            return json.dumps({"data": [{"avgPx": "1.99"}]})
+            return _report_order_body(
+                venue, self.ws.sent, price="2.01" if venue == "okx" else "1.99"
+            )
 
         result = place_live(
             data_root=self.root,
@@ -253,8 +302,8 @@ class LegAndSendTests(unittest.TestCase):
 
         def recv(venue: str) -> str:
             if venue == "okx":
-                return json.dumps({"fillPx": "2.0"})
-            return json.dumps({"state": "live"})
+                return _report_order_body(venue, self.ws.sent, price="2.0")
+            return _report_order_body(venue, self.ws.sent, state="live")
 
         result = place_live(
             data_root=self.root,
@@ -272,7 +321,7 @@ class LegAndSendTests(unittest.TestCase):
         self.assertEqual(len(self.ws.sent), 2)
         self.assertFalse(result.completed)
         self.assertTrue(result.keep_pending)
-        self.assertEqual(result.abort, "partial_fill")
+        self.assertEqual(result.abort, "asymmetric_fill")
         day = "2023-11-14"
         rows = _read(theta_trades_jsonl_path(self.root, day))
         statuses = [r.get("status") for r in rows]
@@ -280,14 +329,141 @@ class LegAndSendTests(unittest.TestCase):
         self.assertNotIn("open", statuses)
         self.assertNotIn("closed", statuses)
 
+    def test_terminal_rows_must_report_exact_cumulative_quantity(self) -> None:
+        set_exchange_coins("okx", ["BTC"], True)
+        set_exchange_coins("bybit", ["BTC"], True)
+
+        def recv(venue: str) -> str:
+            return _report_order_body(venue, self.ws.sent, qty="4")
+
+        result = place_live(
+            data_root=self.root,
+            spread_side="open_long",
+            base_coin="BTC",
+            signal_ts_ms=1_700_000_000_000,
+            okx_book=_book(2),
+            bybit_book=_book(2),
+            meta=_meta(),
+            sender=self.sender,
+            credentials=_creds(),
+            leverage_one=True,
+            inst_id_code=101,
+            recv_fn=recv,
+        )
+        self.assertFalse(result.completed)
+        self.assertTrue(result.keep_pending)
+        self.assertEqual(result.abort, "fill_qty_mismatch")
+        rows = _read(theta_trades_jsonl_path(self.root, "2023-11-14"))
+        self.assertEqual(
+            [r.get("local_validation") for r in rows if r.get("venue") in {"okx", "bybit"}],
+            ["fill_qty_mismatch", "fill_qty_mismatch"],
+        )
+        self.assertNotIn("open", [r.get("status") for r in rows])
+
+    def test_zero_average_price_does_not_complete(self) -> None:
+        set_exchange_coins("okx", ["BTC"], True)
+        set_exchange_coins("bybit", ["BTC"], True)
+
+        def recv(venue: str) -> str:
+            return _report_order_body(venue, self.ws.sent, price="0")
+
+        result = place_live(
+            data_root=self.root,
+            spread_side="open_long",
+            base_coin="BTC",
+            signal_ts_ms=1_700_000_000_000,
+            okx_book=_book(2),
+            bybit_book=_book(2),
+            meta=_meta(),
+            sender=self.sender,
+            credentials=_creds(),
+            leverage_one=True,
+            inst_id_code=101,
+            recv_fn=recv,
+        )
+        self.assertFalse(result.completed)
+        self.assertTrue(result.keep_pending)
+        self.assertEqual(result.abort, "invalid_fill_price")
+        rows = _read(theta_trades_jsonl_path(self.root, "2023-11-14"))
+        self.assertEqual(
+            [r.get("local_validation") for r in rows if r.get("venue") in {"okx", "bybit"}],
+            ["invalid_fill_price", "invalid_fill_price"],
+        )
+        self.assertNotIn("open", [r.get("status") for r in rows])
+
+    def test_partial_cancelled_terminal_row_keeps_trade_pending(self) -> None:
+        set_exchange_coins("okx", ["BTC"], True)
+        set_exchange_coins("bybit", ["BTC"], True)
+
+        def recv(venue: str) -> str:
+            if venue == "bybit":
+                return _report_order_body(
+                    venue,
+                    self.ws.sent,
+                    qty="3.4",
+                    state="partiallyfilledcanceled",
+                )
+            return _report_order_body(venue, self.ws.sent)
+
+        result = place_live(
+            data_root=self.root,
+            spread_side="open_long",
+            base_coin="BTC",
+            signal_ts_ms=1_700_000_000_000,
+            okx_book=_book(2),
+            bybit_book=_book(2),
+            meta=_meta(),
+            sender=self.sender,
+            credentials=_creds(),
+            leverage_one=True,
+            inst_id_code=101,
+            recv_fn=recv,
+        )
+        self.assertFalse(result.completed)
+        self.assertTrue(result.keep_pending)
+        self.assertEqual(result.abort, "asymmetric_fill")
+        rows = _read(theta_trades_jsonl_path(self.root, "2023-11-14"))
+        bybit_row = next(r for r in rows if r.get("venue") == "bybit")
+        self.assertEqual(bybit_row["venue_status"], "partiallyfilledcanceled")
+        self.assertEqual(bybit_row["venue_reason"], "order_partiallyfilledcanceled")
+        self.assertNotIn("open", [r.get("status") for r in rows])
+
+    def test_terminal_average_prices_are_used_instead_of_last_fill_px(self) -> None:
+        set_exchange_coins("okx", ["BTC"], True)
+        set_exchange_coins("bybit", ["BTC"], True)
+
+        def recv(venue: str) -> str:
+            avg = "2.1" if venue == "okx" else "2.2"
+            return _report_order_body(
+                venue, self.ws.sent, price=avg, extra={"fillPx": "99.0"}
+            )
+
+        result = place_live(
+            data_root=self.root,
+            spread_side="open_long",
+            base_coin="BTC",
+            signal_ts_ms=1_700_000_000_000,
+            okx_book=_book(2),
+            bybit_book=_book(2),
+            meta=_meta(),
+            sender=self.sender,
+            credentials=_creds(),
+            leverage_one=True,
+            inst_id_code=101,
+            recv_fn=recv,
+        )
+        self.assertTrue(result.completed)
+        self.assertEqual(result.okx_fill_px, "2.1")
+        self.assertEqual(result.bybit_fill_px, "2.2")
+
     def test_close_reduce_only_and_chrono(self) -> None:
         set_exchange_coins("okx", ["ETH"], True)
         set_exchange_coins("bybit", ["ETH"], True)
 
         def recv(venue: str) -> str:
-            if venue == "okx":
-                return json.dumps({"avgPx": "2.02"})
-            return json.dumps({"fillPx": "2.03"})
+            return _report_order_body(
+                venue, self.ws.sent, price="2.02" if venue == "okx" else "2.03"
+            )
 
         result = place_live(
             data_root=self.root,
@@ -298,6 +474,7 @@ class LegAndSendTests(unittest.TestCase):
             bybit_book=_book(2),
             meta=_meta(base_coin="ETH", okx_symbol="ETH-USDT-SWAP", bybit_symbol="ETHUSDT"),
             close_of="open_long",
+            close_qty={"okx_filled_qty": "5", "bybit_filled_qty": "5"},
             sender=self.sender,
             credentials=_creds(),
             leverage_one=True, inst_id_code=101,
@@ -365,9 +542,9 @@ class LiveCycleTests(unittest.TestCase):
 
     def test_injected_sender_open_then_close_returns_flat(self) -> None:
         def recv(venue: str) -> str:
-            if venue == "okx":
-                return json.dumps({"fillPx": "2.1"})
-            return json.dumps({"avgPx": "2.2"})
+            return _report_order_body(
+                venue, self.ws.sent, price="2.1" if venue == "okx" else "2.2"
+            )
 
         def place(**kwargs):
             return place_live(
@@ -475,7 +652,14 @@ class FillWaitTests(unittest.TestCase):
         fill = json.dumps(
             {
                 "arg": {"channel": "orders", "instId": "BTC-USDT-SWAP"},
-                "data": [{"clOrdId": cl, "fillPx": "2.5"}],
+                "data": [
+                    {
+                        "clOrdId": cl,
+                        "state": "filled",
+                        "accFillSz": "5",
+                        "avgPx": "2.5",
+                    }
+                ],
             }
         )
         sock = _QueueSock([fill])
@@ -484,6 +668,7 @@ class FillWaitTests(unittest.TestCase):
             lambda timeout_sec: read_warm_trade_frame(runtime, timeout_sec),
             exchange="okx",
             timeout_sec=1.0,
+            order_ids={cl},
         )
         self.assertEqual(waited.ack_body, ack)
         self.assertEqual(waited.fill_body, fill)
@@ -491,6 +676,222 @@ class FillWaitTests(unittest.TestCase):
         self.assertIsInstance(waited.fill_wall_ms, int)
         self.assertEqual(sock.calls, 1)
         self.assertFalse(hasattr(sock, "recv"))
+
+    def test_okx_zero_and_partial_updates_wait_for_terminal_fill(self) -> None:
+        cl = "o50db25403a434bb999725beda0d6a5"
+        def update(state: str, qty: str, price: str) -> str:
+            return json.dumps(
+                {
+                    "arg": {"channel": "orders", "instId": "XRP-USDT-SWAP"},
+                    "data": [
+                        {
+                            "clOrdId": cl,
+                            "ordId": "OKX_ORDER_1",
+                            "state": state,
+                            "accFillSz": qty,
+                            "avgPx": price,
+                        }
+                    ],
+                }
+            )
+
+        frames = [
+            update("live", "0", "0"),
+            update("partially_filled", "3.4", "2.2"),
+            update("filled", "5", "2.2"),
+        ]
+        calls = 0
+
+        def read(_timeout: float) -> str:
+            nonlocal calls
+            calls += 1
+            return frames.pop(0)
+
+        waited = drain_trade_fill(
+            read, exchange="okx", timeout_sec=1.0, order_ids={cl}
+        )
+        self.assertEqual(calls, 3)
+        self.assertEqual(waited.terminal_state, "filled")
+        self.assertIn('"accFillSz": "5"', waited.fill_body or "")
+
+    def test_bybit_execution_fragments_do_not_finish_the_order_wait(self) -> None:
+        link = "b50db25403a434bb999725beda0d6a5d0"
+        def execution(exec_id: str, qty: str) -> str:
+            return json.dumps(
+                {
+                    "topic": "execution",
+                    "data": [
+                        {
+                            "orderLinkId": link,
+                            "orderId": "BYBIT_ORDER_1",
+                            "execId": exec_id,
+                            "execQty": qty,
+                            "execPrice": "2.2",
+                        }
+                    ],
+                }
+            )
+
+        final = json.dumps(
+            {
+                "topic": "order",
+                "data": [
+                    {
+                        "orderLinkId": link,
+                        "orderId": "BYBIT_ORDER_1",
+                        "orderStatus": "Filled",
+                        "cumExecQty": "5",
+                        "avgPrice": "2.2",
+                    }
+                ],
+            }
+        )
+        frames = [execution("BYBIT_EXEC_1", "3.4"), execution("BYBIT_EXEC_2", "1.6"), final]
+        waited = drain_trade_fill(
+            lambda _timeout: frames.pop(0),
+            exchange="bybit",
+            timeout_sec=1.0,
+            order_ids={link},
+        )
+        self.assertEqual(waited.fill_body, final)
+        self.assertEqual(waited.terminal_state, "filled")
+
+    def test_foreign_ack_and_stale_order_are_ignored(self) -> None:
+        current = "b50db25403a434bb999725beda0d6a5d0"
+        prior = "b50db25403a434bb999725beda0d6a5c9"
+        old_ack = json.dumps(
+            {
+                "op": "order.create",
+                "retCode": 0,
+                "data": {"orderId": "OLD_ORDER", "orderLinkId": prior},
+            }
+        )
+        old_fill = json.dumps(
+            {
+                "topic": "order",
+                "data": [
+                    {
+                        "orderId": "OLD_ORDER",
+                        "orderLinkId": prior,
+                        "orderStatus": "Filled",
+                        "cumExecQty": "5",
+                        "avgPrice": "9.9",
+                    }
+                ],
+            }
+        )
+        current_fill = json.dumps(
+            {
+                "topic": "order",
+                "data": [
+                    {
+                        "orderId": "CURRENT_ORDER",
+                        "orderLinkId": current,
+                        "orderStatus": "Filled",
+                        "cumExecQty": "5",
+                        "avgPrice": "2.2",
+                    }
+                ],
+            }
+        )
+        frames = [old_ack, old_fill, current_fill]
+        waited = drain_trade_fill(
+            lambda _timeout: frames.pop(0),
+            exchange="bybit",
+            timeout_sec=1.0,
+            order_ids={current},
+        )
+        self.assertIsNone(waited.ack_body)
+        self.assertEqual(waited.fill_body, current_fill)
+
+    def test_req_id_only_stale_reject_does_not_reject_current_order(self) -> None:
+        current = "b50db25403a434bb999725beda0d6a5d0"
+        prior = "b50db25403a434bb999725beda0d6a5c9"
+        old_reject = json.dumps(
+            {"reqId": prior, "op": "order.create", "retCode": 10001, "retMsg": "old"}
+        )
+        current_ack = json.dumps(
+            {"reqId": current, "op": "order.create", "retCode": 0}
+        )
+        current_fill = json.dumps(
+            {
+                "topic": "order",
+                "data": [
+                    {
+                        "orderLinkId": current,
+                        "orderId": "CURRENT_ORDER",
+                        "orderStatus": "Filled",
+                        "cumExecQty": "5",
+                        "avgPrice": "2.2",
+                    }
+                ],
+            }
+        )
+        frames = [old_reject, current_ack, current_fill]
+        waited = drain_trade_fill(
+            lambda _timeout: frames.pop(0),
+            exchange="bybit",
+            timeout_sec=1.0,
+            order_ids={current},
+        )
+        self.assertEqual(waited.ack_body, current_ack)
+        self.assertEqual(waited.verdict, "accept")
+        self.assertEqual(waited.fill_body, current_fill)
+
+    def test_ack_ids_seed_matching_when_no_initial_ids_are_supplied(self) -> None:
+        link = "b50db25403a434bb999725beda0d6a5d0"
+        ack = json.dumps(
+            {
+                "op": "order.create",
+                "retCode": 0,
+                "data": {"orderId": "CURRENT_ORDER", "orderLinkId": link},
+            }
+        )
+        fill = json.dumps(
+            {
+                "topic": "order",
+                "data": [
+                    {
+                        "orderId": "CURRENT_ORDER",
+                        "orderLinkId": link,
+                        "orderStatus": "Filled",
+                        "cumExecQty": "5",
+                        "avgPrice": "2.2",
+                    }
+                ],
+            }
+        )
+        frames = [ack, fill]
+        waited = drain_trade_fill(
+            lambda _timeout: frames.pop(0), exchange="bybit", timeout_sec=1.0
+        )
+        self.assertEqual(waited.ack_body, ack)
+        self.assertEqual(waited.verdict, "accept")
+        self.assertEqual(waited.fill_body, fill)
+
+    def test_fill_price_must_be_finite_and_positive(self) -> None:
+        for value in ("0", "-1", "NaN", "Infinity", "not-a-price"):
+            with self.subTest(value=value):
+                self.assertIsNone(_fill_px(json.dumps({"avgPx": value}), "okx"))
+        self.assertEqual(_fill_px('{"avgPx":"2.25"}', "okx"), "2.25")
+
+    def test_terminal_match_uses_cumulative_average_not_last_execution_price(self) -> None:
+        body = json.dumps(
+            {
+                "arg": {"channel": "orders", "instId": "XRP-USDT-SWAP"},
+                "data": [
+                    {
+                        "clOrdId": "attempt-id",
+                        "state": "filled",
+                        "accFillSz": "5",
+                        "avgPx": "2.25",
+                        "fillPx": "2.50",
+                    }
+                ],
+            }
+        )
+        self.assertTrue(_is_matching_fill("okx", body, {"attempt-id"}))
+        self.assertFalse(_is_matching_fill("okx", body, {"other-attempt"}))
 
     def test_reject_is_returned_before_a_later_fill(self) -> None:
         reject = json.dumps(
@@ -509,68 +910,114 @@ class FillWaitTests(unittest.TestCase):
         self.assertEqual(sock.calls, 0)
 
     def test_orders_push_after_ack_completes_with_that_fill_px(self) -> None:
-        okx_cl = "o50db25403a434bb999725beda0d6a5"
-        okx_ord = "998877"
-        bybit_link = "b50db25403a434bb999725beda0d6a5d0"
-        okx_ack = json.dumps(
-            {
-                "id": "1",
-                "op": "order",
-                "code": "0",
-                "data": [{"sCode": "0", "clOrdId": okx_cl, "ordId": okx_ord}],
-            }
-        )
-        other = json.dumps(
-            {
-                "arg": {"channel": "orders", "instId": "ETH-USDT-SWAP"},
-                "data": [{"clOrdId": "someone-else", "ordId": "1", "fillPx": "9.9"}],
-            }
-        )
-        okx_fill = json.dumps(
-            {
-                "arg": {
-                    "channel": "orders",
-                    "instType": "SWAP",
-                    "instId": "BTC-USDT-SWAP",
-                },
-                "data": [
-                    {
-                        "clOrdId": okx_cl,
-                        "ordId": okx_ord,
-                        "fillPx": "2.1",
-                        "avgPx": "2.1",
-                        "accFillSz": "5",
-                        "state": "filled",
-                    }
-                ],
-            }
-        )
-        bybit_ack = json.dumps(
-            {
-                "op": "order.create",
-                "retCode": 0,
-                "retMsg": "OK",
-                "data": {"orderId": "77", "orderLinkId": bybit_link},
-            }
-        )
-        bybit_fill = json.dumps(
-            {
-                "topic": "execution",
-                "data": [
-                    {
-                        "orderId": "77",
-                        "orderLinkId": bybit_link,
-                        "execPrice": "2.2",
-                    }
-                ],
-            }
-        )
-        queues = {
-            "okx": ["pong", okx_ack, other, okx_fill],
-            "bybit": [json.dumps({"op": "pong"}), bybit_ack, bybit_fill],
-        }
+        queues: dict[str, list[str]] = {}
+        captured: dict[str, str] = {}
 
         def recv(venue: str) -> object:
+            if not queues:
+                bybit_args = json.loads(self.ws.sent[0])["args"][0]
+                okx_args = json.loads(self.ws.sent[1])["args"][0]
+                okx_cl = okx_args["clOrdId"]
+                bybit_link = bybit_args["orderLinkId"]
+                okx_ord = "998877"
+                okx_ack = json.dumps(
+                    {
+                        "id": "1",
+                        "op": "order",
+                        "code": "0",
+                        "data": [{"sCode": "0", "clOrdId": okx_cl, "ordId": okx_ord}],
+                    }
+                )
+                other = json.dumps(
+                    {
+                        "arg": {"channel": "orders", "instId": "ETH-USDT-SWAP"},
+                        "data": [{"clOrdId": "someone-else", "ordId": "1", "fillPx": "9.9"}],
+                    }
+                )
+                okx_fill = json.dumps(
+                    {
+                        "arg": {
+                            "channel": "orders",
+                            "instType": "SWAP",
+                            "instId": "BTC-USDT-SWAP",
+                        },
+                        "data": [
+                            {
+                                "clOrdId": okx_cl,
+                                "ordId": okx_ord,
+                                "fillPx": "2.1",
+                                "avgPx": "2.1",
+                                "accFillSz": okx_args["sz"],
+                                "state": "filled",
+                            }
+                        ],
+                    }
+                )
+                bybit_ack = json.dumps(
+                    {
+                        "op": "order.create",
+                        "retCode": 0,
+                        "retMsg": "OK",
+                        "data": {"orderId": "77", "orderLinkId": bybit_link},
+                    }
+                )
+                bybit_execution_1 = json.dumps(
+                    {
+                        "topic": "execution",
+                        "data": [
+                            {
+                                "orderId": "77",
+                                "orderLinkId": bybit_link,
+                                "execQty": "3.4",
+                                "execPrice": "2.2",
+                                "execId": "BYBIT_EXEC_1",
+                                "execTime": "1700000000030",
+                            }
+                        ],
+                    }
+                )
+                bybit_execution_2 = json.dumps(
+                    {
+                        "topic": "execution",
+                        "data": [
+                            {
+                                "orderId": "77",
+                                "orderLinkId": bybit_link,
+                                "execQty": "1.6",
+                                "execPrice": "2.2",
+                                "execId": "BYBIT_EXEC_2",
+                                "execTime": "1700000000031",
+                            }
+                        ],
+                    }
+                )
+                bybit_fill = json.dumps(
+                    {
+                        "topic": "order",
+                        "data": [
+                            {
+                                "orderId": "77",
+                                "orderLinkId": bybit_link,
+                                "orderStatus": "Filled",
+                                "cumExecQty": bybit_args["qty"],
+                                "avgPrice": "2.2",
+                            }
+                        ],
+                    }
+                )
+                queues.update(
+                    {
+                        "okx": ["pong", okx_ack, other, okx_fill],
+                        "bybit": [
+                            json.dumps({"op": "pong"}),
+                            bybit_ack,
+                            bybit_execution_1,
+                            bybit_execution_2,
+                            bybit_fill,
+                        ],
+                    }
+                )
+                captured.update(okx_ack=okx_ack, okx_fill=okx_fill)
             frames = queues[venue]
 
             def read(_timeout: float) -> str:
@@ -578,7 +1025,16 @@ class FillWaitTests(unittest.TestCase):
                     raise TimeoutError("empty")
                 return frames.pop(0)
 
-            return drain_trade_fill(read, exchange=venue, timeout_sec=1.0)
+            sent_args = json.loads(
+                self.ws.sent[0 if venue == "bybit" else 1]
+            )["args"][0]
+            attempt_id = sent_args["orderLinkId" if venue == "bybit" else "clOrdId"]
+            return drain_trade_fill(
+                read,
+                exchange=venue,
+                timeout_sec=1.0,
+                order_ids={attempt_id},
+            )
 
         signal_ts = 1_700_000_000_000
         result = place_live(
@@ -594,6 +1050,8 @@ class FillWaitTests(unittest.TestCase):
             leverage_one=True, inst_id_code=101,
             recv_fn=recv,
         )
+        okx_ack = captured["okx_ack"]
+        okx_fill = captured["okx_fill"]
         self.assertTrue(result.completed)
         self.assertIsNone(result.abort)
         self.assertEqual(result.okx_fill_px, "2.1")
@@ -615,7 +1073,7 @@ class FillWaitTests(unittest.TestCase):
         self.assertIsInstance(okx_fill_row["wall_ms"], int)
         self.assertGreaterEqual(result.fill_ts_ms, okx_fill_row["wall_ms"])
 
-    def test_accepted_without_fill_px_is_not_partial_fill(self) -> None:
+    def test_accepted_ack_without_terminal_fill_stays_pending(self) -> None:
         okx_body = json.dumps({"op": "order", "code": "0", "data": [{"sCode": "0"}]})
         bybit_body = json.dumps({"retCode": 0, "retMsg": "OK", "op": "order.create"})
 
@@ -637,11 +1095,10 @@ class FillWaitTests(unittest.TestCase):
             leverage_one=True, inst_id_code=101,
             recv_fn=recv,
         )
-        self.assertIsNone(result.abort)
+        self.assertEqual(result.abort, "fill_timeout")
         self.assertFalse(result.completed)
         self.assertTrue(result.keep_pending)
-        self.assertEqual(result.status, "accepted")
-        self.assertNotEqual(result.abort, "partial_fill")
+        self.assertIsNone(result.status)
         rows = _read(theta_trades_jsonl_path(self.root, "2023-11-14"))
         statuses = [r.get("status") for r in rows]
         self.assertIn("pending", statuses)
@@ -757,9 +1214,7 @@ class InstIdCodeTests(unittest.TestCase):
         clear_all()
 
     def _recv(self, venue: str) -> str:
-        if venue == "okx":
-            return json.dumps({"fillPx": "2"})
-        return json.dumps({"avgPx": "2"})
+        return _report_order_body(venue, self.ws.sent, price="2")
 
     def test_instruments_lookup_reads_inst_id_code(self) -> None:
         seen: list[str] = []
@@ -829,6 +1284,7 @@ class InstIdCodeTests(unittest.TestCase):
             fetch_fn=fetch,
         )
         self.assertEqual(hits, ["SOL-USDT-SWAP", "XRP-USDT-SWAP"])
+
         self.assertEqual(lookup_okx_inst_id_code(codes, "BTC-USDT-SWAP"), 1)
 
         for symbol, coin, code in (
@@ -859,6 +1315,78 @@ class InstIdCodeTests(unittest.TestCase):
             self.assertIsInstance(okx_frame["args"][0]["instIdCode"], int)
         self.assertEqual(hits, ["SOL-USDT-SWAP", "XRP-USDT-SWAP"])
 
+class ManagerCloseQtyTests(unittest.TestCase):
+    def setUp(self) -> None:
+        clear_all()
+        self.root = Path(tempfile.mkdtemp()) / "bbot"
+        self.root.mkdir()
+        self.ws = _Ws()
+        self.sender = _Sender(self.ws)
+        set_exchange_coins("okx", ["BTC"], True)
+        set_exchange_coins("bybit", ["BTC"], True)
+
+    def tearDown(self) -> None:
+        clear_all()
+
+    def test_manager_closes_exact_open_fills_after_price_change(self) -> None:
+        meta = _meta()
+        close_prices: list[str] = []
+
+        def place(**kwargs):
+            price = "2" if kwargs["spread_side"] == "open_long" else "4"
+            close_prices.append(price)
+            return place_live(
+                data_root=self.root,
+                sender=self.sender,
+                credentials=_creds(),
+                inst_id_code=101,
+                leverage_one=True,
+                recv_fn=lambda venue: _report_order_body(
+                    venue,
+                    self.ws.sent,
+                    price=price,
+                ),
+                **kwargs,
+            )
+
+        choices = [
+            SimpleNamespace(action="open", coin="BTC", side="long"),
+            SimpleNamespace(action="close", coin="BTC", side="long"),
+        ]
+        manager = ThetaTradeManager(
+            data_root=self.root,
+            config=ThetaTradeConfig(notional_usdt=10.0),
+            live_send=False,
+            place_fn=place,
+            meta_fn=lambda _coin: meta,
+            decide_fn=lambda **_kwargs: choices.pop(0),
+        )
+        open_quotes = {
+            "BTC": {"okx": _book(2, 1000), "bybit": _book(2, 1000)}
+        }
+        manager.on_theta_snapshots([], quotes=open_quotes, now_ms=1_700_000_000_000)
+        position = manager.slot.position
+        self.assertIsNotNone(position)
+        self.assertEqual(position.okx_filled_qty, "5")
+        self.assertEqual(position.bybit_filled_qty, "5")
+        self.assertEqual(position.coin_filled_qty, "5")
+
+        close_quotes = {
+            "BTC": {"okx": _book(4, 1000), "bybit": _book(4, 1000)}
+        }
+        manager.on_theta_snapshots([], quotes=close_quotes, now_ms=1_700_000_010_000)
+        self.assertIsNone(manager.slot.position)
+        self.assertEqual(close_prices, ["2", "4"])
+
+        bybit_frames = [json.loads(self.ws.sent[i]) for i in (0, 2)]
+        okx_frames = [json.loads(self.ws.sent[i]) for i in (1, 3)]
+        self.assertEqual([frame["args"][0]["qty"] for frame in bybit_frames], ["5", "5"])
+        self.assertEqual([frame["args"][0]["sz"] for frame in okx_frames], ["5", "5"])
+        self.assertFalse(bybit_frames[0]["args"][0].get("reduceOnly", False))
+        self.assertTrue(bybit_frames[1]["args"][0]["reduceOnly"])
+        self.assertFalse(okx_frames[0]["args"][0].get("reduceOnly", False))
+        self.assertTrue(okx_frames[1]["args"][0]["reduceOnly"])
+
 
 class ClOrdIdTests(unittest.TestCase):
     def setUp(self) -> None:
@@ -876,9 +1404,7 @@ class ClOrdIdTests(unittest.TestCase):
 
     def _place(self, intent_id: str):
         def recv(venue: str) -> str:
-            if venue == "okx":
-                return json.dumps({"fillPx": "2"})
-            return json.dumps({"avgPx": "2"})
+            return _report_order_body(venue, self.ws.sent, price="2")
 
         return place_live(
             data_root=self.root,
@@ -1000,9 +1526,7 @@ class XrpContractSizeTests(unittest.TestCase):
         self.assertIsNone(err)
 
         def recv(venue: str) -> str:
-            if venue == "okx":
-                return json.dumps({"fillPx": "1.52"})
-            return json.dumps({"avgPx": "1.52"})
+            return _report_order_body(venue, self.ws.sent, price="1.52")
 
         result = place_live(
             data_root=self.root,

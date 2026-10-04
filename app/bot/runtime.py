@@ -503,6 +503,9 @@ class BotRuntime:
             return False
         if not session.is_ready():
             raise RuntimeError("synthetic live session is not ready")
+        wire = getattr(session, "wire", None)
+        if wire is None or not getattr(wire, "healthy", False):
+            raise RuntimeError("synthetic live wire capture is not ready")
 
         # Import the place path after the private session has completed startup.
         importlib.import_module("app.bot.private.place_send")
@@ -583,6 +586,7 @@ class BotRuntime:
         from app.bot.private.send_legs import _attempt_ids
         session = self._private_warm
         if session is None:
+            self._synthetic_roll_halt_reason = "private_channel_down"
             return PlaceSendResult(abort="private_channel_down")
         from app.bot.private.okx_ct_val import bind_okx_ct_val
         from app.bot.private.okx_inst_id import lookup_okx_inst_id_code
@@ -614,6 +618,10 @@ class BotRuntime:
         ):
             self._synthetic_roll_halt_reason = "synthetic_sender_not_ready"
             return PlaceSendResult(abort="synthetic_sender_not_ready")
+        wire = getattr(session, "wire", None)
+        if wire is None or not getattr(wire, "healthy", False):
+            self._synthetic_roll_halt_reason = "wire_capture_unavailable"
+            return PlaceSendResult(abort="wire_capture_unavailable")
         deadline = time.monotonic() + SYNTHETIC_FILL_WAIT_SEC
 
         def _runtime_for(venue: str) -> Any:
@@ -634,7 +642,7 @@ class BotRuntime:
                 lambda timeout_sec: read_warm_trade_frame(runtime, timeout_sec),
                 exchange=str(getattr(runtime, "exchange", venue)),
                 timeout_sec=remaining,
-                order_ids={bybit_id, okx_id},
+                order_ids={bybit_id if venue == "bybit" else okx_id},
             )
 
         # Holds place-inflight so reconnect does not drop the sockets and a
@@ -649,12 +657,14 @@ class BotRuntime:
                 leverage_one=True,
                 **kwargs,
             )
-        if getattr(result, "keep_pending", False):
+        if wire is None or not getattr(wire, "healthy", False):
+            self._synthetic_roll_halt_reason = "wire_capture_failed"
+        elif not getattr(result, "completed", False):
             abort = getattr(result, "abort", None)
-            if abort is None and getattr(result, "status", None) == "accepted":
-                self._synthetic_roll_halt_reason = "accepted_no_fill"
-            elif abort not in (None, "partial_fill"):
-                self._synthetic_roll_halt_reason = str(abort)
+            status = getattr(result, "status", None)
+            self._synthetic_roll_halt_reason = str(
+                abort or status or "incomplete_place"
+            )
         return result
 
     def _prefetch_okx_inst_id_codes(self) -> None:
@@ -870,6 +880,15 @@ class BotRuntime:
         self.gate.note_book_update(base_coin, exchange, complete_l1=complete)
         okx = self.quotes[base_coin]["okx"]
         bybit = self.quotes[base_coin]["bybit"]
+        # Keep WS parsing in raw contract units; attach the startup-cached
+        # multiplier only at the private manager's runtime context boundary.
+        if self.theta_trade is not None and self.profile == "synthetic_roll":
+            okx["_private_size_gate"] = True
+            try:
+                symbol = self._meta(base_coin).okx_symbol
+                okx["ct_val"] = self._okx_ct_vals.get(symbol)
+            except (KeyError, TypeError, AttributeError):
+                okx["ct_val"] = None
         if not books_ready(okx, bybit):
             return
 

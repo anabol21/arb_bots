@@ -343,13 +343,28 @@ def size_check(
     event: str,
     notional_usdt: float,
     book_depth: int = 1,
+    okx_ct_val: Any = None,
+    required_okx_contracts: Any = None,
+    required_bybit_qty: Any = None,
 ) -> dict[str, Any]:
     """Notional must fit available size on both chosen legs."""
     spread_side = spread_side_for(side, event=event)
     okx_leg, bybit_leg = legs_for_spread_side(spread_side)
     okx_px = signal_price_for_leg(dict(okx), okx_leg)
     bybit_px = signal_price_for_leg(dict(bybit), bybit_leg)
-    okx_sz = available_leg_size(okx, okx_leg, depth=book_depth)
+    okx_contracts = available_leg_size(okx, okx_leg, depth=book_depth)
+    private_size_gate = bool(okx.get("_private_size_gate")) or okx_ct_val is not None
+    try:
+        ct_val = float(okx_ct_val if okx_ct_val is not None else okx.get("ct_val"))
+        if not math.isfinite(ct_val) or ct_val <= 0:
+            ct_val = None
+    except (TypeError, ValueError):
+        ct_val = None
+    okx_sz = (
+        float(okx_contracts) * ct_val
+        if okx_contracts is not None and ct_val is not None
+        else (None if private_size_gate else okx_contracts)
+    )
     bybit_sz = available_leg_size(bybit, bybit_leg, depth=book_depth)
     planned_okx = (
         float(notional_usdt) / float(okx_px)
@@ -361,6 +376,15 @@ def size_check(
         if _finite(bybit_px) and float(bybit_px) > 0
         else None
     )
+    if required_okx_contracts is not None:
+        required_contracts = _finite(required_okx_contracts)
+        planned_okx = (
+            required_contracts * ct_val
+            if required_contracts is not None and ct_val is not None
+            else None
+        )
+    if required_bybit_qty is not None:
+        planned_bybit = _finite(required_bybit_qty)
     okx_ok = (
         planned_okx is not None
         and okx_sz is not None
@@ -381,6 +405,8 @@ def size_check(
         "okx_price": _finite(okx_px),
         "bybit_price": _finite(bybit_px),
         "okx_available_size": okx_sz,
+        "okx_available_contracts": okx_contracts,
+        "okx_ct_val": ct_val if private_size_gate else None,
         "bybit_available_size": bybit_sz,
         "okx_planned_qty": planned_okx,
         "bybit_planned_qty": planned_bybit,
@@ -482,6 +508,9 @@ class OpenPosition:
     open_notional: float
     open_theta_1m: Optional[float]
     fill_spread_pp: Optional[float] = None
+    okx_filled_qty: Optional[str] = None
+    bybit_filled_qty: Optional[str] = None
+    coin_filled_qty: Optional[str] = None
 
 
 @dataclass
@@ -541,12 +570,14 @@ def coerce_external_decision(raw: Any) -> ThetaDecision:
     )
 
 
-def _read_place_result(result: Any) -> tuple[Optional[str], bool, bool, Optional[int]]:
-    """Normalize place_fn return into abort, completed, keep_pending, fill_ts_ms."""
+def _read_place_result(
+    result: Any,
+) -> tuple[Optional[str], bool, bool, Optional[int], Optional[str], Optional[str]]:
+    """Normalize place result, including quantities from terminal fills."""
     if result is None:
-        return None, True, False, None
+        return None, True, False, None, None, None
     if isinstance(result, str):
-        return result, False, False, None
+        return result, False, False, None, None, None
     abort = getattr(result, "abort", None)
     if abort is not None:
         abort = str(abort)
@@ -554,7 +585,16 @@ def _read_place_result(result: Any) -> tuple[Optional[str], bool, bool, Optional
     keep_pending = bool(getattr(result, "keep_pending", False))
     fill_ts = getattr(result, "fill_ts_ms", None)
     fill_i = int(fill_ts) if fill_ts is not None else None
-    return abort, completed, keep_pending, fill_i
+    okx_qty = getattr(result, "okx_filled_qty", None)
+    bybit_qty = getattr(result, "bybit_filled_qty", None)
+    return (
+        abort,
+        completed,
+        keep_pending,
+        fill_i,
+        str(okx_qty) if okx_qty is not None else None,
+        str(bybit_qty) if bybit_qty is not None else None,
+    )
 
 
 def insufficient_size_event(
@@ -645,6 +685,8 @@ def decide_theta_k1(
                 event="close",
                 notional_usdt=notional_usdt,
                 book_depth=book_depth,
+                required_okx_contracts=pos.okx_filled_qty,
+                required_bybit_qty=pos.bybit_filled_qty,
             )
             pot_pp = potential_profit_pp(feat, state, params.fee_round_trip_pp)
             own = by_key.get((pos.base_coin, pos.side))
@@ -835,6 +877,19 @@ def restore_synthetic_slot(
         open_fill_spread=None,
         open_notional=float(notional_usdt),
         open_theta_1m=None,
+        okx_filled_qty=(
+            str(last_row["okx_filled_qty"])
+            if last_row.get("okx_filled_qty") is not None
+            else None
+        ),
+        bybit_filled_qty=(
+            str(last_row["bybit_filled_qty"])
+            if last_row.get("bybit_filled_qty") is not None
+            else None
+        ),
+        coin_filled_qty=(
+            str(last_row["coin_qty"]) if last_row.get("coin_qty") is not None else None
+        ),
     )
     return position, False, coin, side
 
@@ -1624,6 +1679,7 @@ class ThetaTradeManager:
             side = decision.side
             spread_side = spread_side_for(side, event="open")
             close_of: Optional[str] = None
+            close_qty: Optional[dict[str, str]] = None
         else:
             pos = self.slot.position
             if pos is None:
@@ -1634,6 +1690,12 @@ class ThetaTradeManager:
             side = pos.side
             spread_side = "close"
             close_of = "open_long" if side == "long" else "open_short"
+            close_qty = None
+            if pos.okx_filled_qty is not None and pos.bybit_filled_qty is not None:
+                close_qty = {
+                    "okx_filled_qty": pos.okx_filled_qty,
+                    "bybit_filled_qty": pos.bybit_filled_qty,
+                }
 
         meta = None
         if self._meta_fn is not None:
@@ -1664,10 +1726,18 @@ class ThetaTradeManager:
                 bybit_book=dict(bybit_s),
                 meta=meta,
                 close_of=close_of,
+                close_qty=close_qty,
                 extra=extra,
                 intent_id=intent_id,
             )
-            _abort, completed, keep_pending, fill_ts = _read_place_result(result)
+            (
+                _abort,
+                completed,
+                keep_pending,
+                fill_ts,
+                okx_filled_qty,
+                bybit_filled_qty,
+            ) = _read_place_result(result)
             if completed and decision.action == "open":
                 fill_ts_i = int(fill_ts if fill_ts is not None else time.time() * 1000)
                 fill_spread = spread_for_side(okx_s, bybit_s, side)
@@ -1681,6 +1751,13 @@ class ThetaTradeManager:
                     open_notional=float(self.config.notional_usdt),
                     open_theta_1m=decision.theta_1m,
                     fill_spread_pp=fill_spread,
+                    okx_filled_qty=okx_filled_qty,
+                    bybit_filled_qty=bybit_filled_qty,
+                    coin_filled_qty=(
+                        str(getattr(result, "coin_qty", None))
+                        if getattr(result, "coin_qty", None) is not None
+                        else None
+                    ),
                 )
             elif completed and decision.action == "close":
                 self.slot.position = None
@@ -1937,4 +2014,3 @@ class ThetaTradeManager:
             return [row]
         finally:
             self.slot.pending = False
-

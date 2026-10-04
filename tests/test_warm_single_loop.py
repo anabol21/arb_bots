@@ -368,6 +368,59 @@ class SingleLoopWarmTests(unittest.TestCase):
             self.assertTrue(
                 is_loop_owned_socket(session.bybit_runtime.private_socket)
             )
+            self.assertIs(
+                getattr(session.okx_runtime.private_socket, "_wire_transcript", None),
+                session.wire,
+            )
+            self.assertTrue(session.wire.healthy)
+            from app.bot.private.wire_transcript import scan_all_wire_events
+
+            intent_id = "capture-owner-intent"
+            client_order_id = "o_capture_owner_000000000000000000000000000000"
+            session.wire.bind_place_correlation(
+                req_id=client_order_id,
+                intent_id=intent_id,
+                venue="okx",
+                phase="open",
+            )
+            owner_loop = warm_loop.loop
+            okx_priv = cms["ws://okx/private"][0]
+            self.assertIsNotNone(owner_loop)
+            self.assertIsNotNone(okx_priv._q)
+            owner_loop.call_soon_threadsafe(
+                okx_priv._q.put_nowait,
+                json.dumps(
+                    {
+                        "arg": {"channel": "orders", "instId": "SOL-USDT-SWAP"},
+                        "data": [
+                            {
+                                "clOrdId": client_order_id,
+                                "state": "filled",
+                                "accFillSz": "0.1",
+                                "avgPx": "120.88",
+                                "fillTime": "1700000001000",
+                            }
+                        ],
+                    }
+                ),
+            )
+            deadline = time.monotonic() + 2.0
+            owner_events = []
+            while time.monotonic() < deadline:
+                owner_events = [
+                    event
+                    for event in scan_all_wire_events(Path(env["BBOT_PRIVATE_DATA_ROOT"]))
+                    if event.get("capture_stage") == "socket_arrival"
+                    and event.get("intent_id") == intent_id
+                ]
+                if owner_events:
+                    break
+                time.sleep(0.02)
+            self.assertEqual(len(owner_events), 1)
+            self.assertEqual(owner_events[0]["venue"], "okx")
+            self.assertEqual(owner_events[0]["socket"], "private")
+            self.assertEqual(owner_events[0]["phase"], "open")
+            self.assertIsNotNone(owner_events[0].get("reconnect_generation"))
             self.assertTrue(kwargs_seen)
             for kw in kwargs_seen:
                 self.assertIsNone(kw.get("ping_interval"))

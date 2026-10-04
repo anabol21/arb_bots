@@ -457,6 +457,64 @@ class _ListLog:
 
 
 class RollHaltTests(unittest.TestCase):
+    def test_incomplete_live_place_halts_even_without_keep_pending(self) -> None:
+        from contextlib import nullcontext
+        from unittest.mock import patch
+
+        from app.bot.private.place_send import PlaceSendResult
+        from app.bot.runtime import BotRuntime
+
+        meta = _meta("BTC")
+
+        class Sender:
+            def is_ready(self) -> bool:
+                return True
+
+        class Session:
+            bybit_credentials = object()
+            bybit_runtime = SimpleNamespace(exchange="bybit")
+            okx_runtime = SimpleNamespace(exchange="okx")
+
+            def place_io_section(self):
+                return nullcontext()
+
+        session = Session()
+        host = SimpleNamespace(
+            _private_warm=session,
+            _okx_ct_vals={},
+            _okx_inst_id_codes={},
+            _leverage_one={
+                ("okx", meta.okx_symbol): "1",
+                ("bybit", meta.bybit_symbol): "1",
+            },
+            _synthetic_sender=Sender(),
+            _synthetic_sender_session=session,
+            _synthetic_roll_halt_reason=None,
+            data_root=Path(tempfile.mkdtemp()) / "bbot",
+        )
+        incomplete = PlaceSendResult(
+            abort="partial_fill", completed=False, keep_pending=False
+        )
+        with (
+            patch(
+                "app.bot.private.okx_ct_val.bind_okx_ct_val",
+                return_value=(meta, None),
+            ),
+            patch("app.bot.private.okx_inst_id.lookup_okx_inst_id_code", return_value=101),
+            patch("app.bot.private.place_send.place_live", return_value=incomplete),
+        ):
+            result = BotRuntime._synthetic_live_place(
+                host,
+                spread_side="open_long",
+                base_coin="BTC",
+                signal_ts_ms=1_700_000_000_000,
+                okx_book=_book(),
+                bybit_book=_book(),
+                meta=meta,
+            )
+        self.assertIs(result, incomplete)
+        self.assertEqual(host._synthetic_roll_halt_reason, "partial_fill")
+
     def test_partial_fill_stops_the_roll_loop(self) -> None:
         import asyncio
         from unittest.mock import patch

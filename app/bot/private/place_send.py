@@ -17,11 +17,13 @@ signal books. No sockets.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import time
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any, Callable, Mapping, Optional
 
@@ -29,11 +31,12 @@ from app.bot.paths import theta_trades_jsonl_path
 from app.bot.private.coin_qty import (
     CoinQtyError,
     dec_str,
+    exact_close_from_meta,
     reference_px,
     shared_from_meta,
 )
 from app.bot.private.order_sign import LiveCredentials
-from app.bot.private.send_legs import send_long, send_short
+from app.bot.private.send_legs import _attempt_ids, send_long, send_short
 from app.bot.private.step_chrono import StepChrono
 from app.bot.stub_broker import legs_for_spread_side, reverse_sides
 
@@ -43,6 +46,7 @@ ReadFrameFn = Callable[[float], str]
 
 # Shared bound for both venues. One ack/ping must not end the wait.
 SYNTHETIC_FILL_WAIT_SEC = 5.0
+_WIRE_LOG = logging.getLogger("bbot.private.wire")
 
 
 @dataclass
@@ -59,6 +63,8 @@ class PlaceSendResult:
     base_coin: Optional[str] = None
     side: Optional[str] = None
     intent_id: Optional[str] = None
+    okx_filled_qty: Optional[str] = None
+    bybit_filled_qty: Optional[str] = None
 
 
 def _sides(spread_side: str, close_of: Optional[str]) -> tuple[str, str, str, bool]:
@@ -98,8 +104,22 @@ _PARSED_KEYS = (
     "fillPx",
     "avgPx",
     "accFillSz",
+    "state",
+    "orderStatus",
+    "cumExecQty",
+    "execQty",
+    "fillSz",
     "execPrice",
     "avgPrice",
+    "execTime",
+    "fillTime",
+    "updatedTime",
+    "uTime",
+    "orderId",
+    "ordId",
+    "orderLinkId",
+    "clOrdId",
+    "execId",
     "code",
     "sCode",
     "retCode",
@@ -155,8 +175,79 @@ def _fill_px(body: Optional[str], exchange: str = "okx") -> Optional[str]:
     for key in keys:
         val = fields.get(key)
         if val not in (None, ""):
-            return str(val)
+            try:
+                px = Decimal(str(val))
+            except (InvalidOperation, TypeError, ValueError):
+                continue
+            if px.is_finite() and px > 0:
+                return str(val)
     return None
+
+
+def _matching_order_row(
+    exchange: str, body: Optional[str], known_ids: set[str]
+) -> Optional[dict[str, Any]]:
+    """Return the one order row matching this attempt, never fields from siblings."""
+    data = _parse_json_obj(body)
+    if data is None:
+        return None
+    venue = str(exchange).strip().lower()
+    if venue == "bybit":
+        if not str(data.get("topic") or "").startswith("order"):
+            return None
+    else:
+        arg = data.get("arg")
+        if not isinstance(arg, dict) or str(arg.get("channel") or "") != "orders":
+            return None
+    rows = data.get("data")
+    if isinstance(rows, dict):
+        rows = [rows]
+    if not isinstance(rows, list):
+        return None
+    targets = {str(item) for item in known_ids if str(item)}
+    if not targets:
+        return None
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        ids = {
+            str(row[key])
+            for key in _ORDER_ID_KEYS
+            if row.get(key) not in (None, "")
+        }
+        if ids & targets:
+            return row
+    return None
+
+
+def _order_status(exchange: str, row: Mapping[str, Any]) -> str:
+    key = "orderStatus" if str(exchange).strip().lower() == "bybit" else "state"
+    return str(row.get(key) or "").strip().lower().replace("_", "").replace(" ", "")
+
+
+_TERMINAL_ORDER_STATES = {
+    "filled",
+    "cancelled",
+    "canceled",
+    "partiallyfilledcanceled",
+    "rejected",
+    "deactivated",
+    "expired",
+}
+
+
+def _row_fill_px(row: Mapping[str, Any], exchange: str) -> Optional[str]:
+    # Terminal order rows must carry cumulative average price, not the last
+    # execution fragment's price.
+    key = "avgPrice" if str(exchange).strip().lower() == "bybit" else "avgPx"
+    value = row.get(key)
+    if value in (None, ""):
+        return None
+    try:
+        px = Decimal(str(value))
+    except (InvalidOperation, TypeError, ValueError):
+        return None
+    return str(value) if px.is_finite() and px > 0 else None
 
 
 def _frame_order_ids(body: Optional[str]) -> set[str]:
@@ -177,6 +268,19 @@ def _frame_order_ids(body: Optional[str]) -> set[str]:
                 walk(item)
 
     walk(data)
+    return found
+
+
+def _frame_ack_ids(body: Optional[str]) -> set[str]:
+    """Return current-request and client/order identifiers from one ACK."""
+    data = _parse_json_obj(body)
+    if data is None:
+        return set()
+    found = _frame_order_ids(body)
+    for key in ("reqId", "id"):
+        value = data.get(key)
+        if value not in (None, ""):
+            found.add(str(value))
     return found
 
 
@@ -223,22 +327,22 @@ def classify_order_answer(exchange: str, body: Optional[str]) -> Optional[str]:
 
 
 def _is_matching_fill(exchange: str, body: str, known_ids: set[str]) -> bool:
-    """Later private push for this order, with a fill price. Not the place ack."""
+    """A matching terminal Filled order row with a finite positive price."""
     if classify_order_answer(exchange, body) is not None:
         return False
-    if not _fill_px(body, exchange):
-        return False
-    if not known_ids:
-        return False
-    return bool(_frame_order_ids(body) & known_ids)
+    row = _matching_order_row(exchange, body, known_ids)
+    return bool(row and _order_status(exchange, row) == "filled" and _row_fill_px(row, exchange))
 
 
 @dataclass
 class VenueWaitResult:
-    """Place ack plus the later fill push, if it arrived before the bound."""
+    """Place ack plus a matching terminal order update, if observed in time."""
 
     ack_body: Optional[str] = None
+    # Kept under the established field name; this is now a terminal order row,
+    # not any message that happens to contain a price.
     fill_body: Optional[str] = None
+    terminal_state: Optional[str] = None
     verdict: Optional[str] = None
     ack_wall_ms: Optional[int] = None
     fill_wall_ms: Optional[int] = None
@@ -251,15 +355,14 @@ def drain_trade_fill(
     timeout_sec: float = SYNTHETIC_FILL_WAIT_SEC,
     order_ids: Optional[set[str]] = None,
 ) -> VenueWaitResult:
-    """Read the place ack, then the matching orders/execution push.
+    """Read the place ack and matching terminal private order update.
 
     ``read_frame(timeout_sec)`` raises ``TimeoutError`` when no frame is ready.
     Ping/pong is skipped. An accept is recorded and does not finish the wait.
-    The fill is a later frame with ``fillPx``/``avgPx`` (Bybit ``execPrice`` or
-    ``avgPrice``) whose ``clOrdId`` or ``ordId`` matches the ack or ``order_ids``.
-    A reject stops immediately. No ack before the deadline leaves both bodies
-    empty so the caller keeps ``partial_fill``. An accept with no fill push
-    leaves ``fill_body`` empty.
+    Only an OKX ``state=filled`` or Bybit ``orderStatus=Filled`` update for this
+    attempt ends the successful wait. Execution fragments and working/partial
+    order states continue until terminal state or timeout. A private terminal
+    order update may arrive before the trade ACK and is authoritative by itself.
     """
     from app.bot.private.ws_private import is_ws_noise_frame
 
@@ -281,6 +384,12 @@ def drain_trade_fill(
             continue
         now_ms = int(time.time() * 1000)
         verdict = classify_order_answer(venue, raw)
+        if verdict in {"accept", "reject"}:
+            ack_ids = _frame_ack_ids(raw)
+            if known and ack_ids and not (ack_ids & known):
+                # A late response from an earlier action must not contribute
+                # order IDs or acceptance to this attempt.
+                continue
         if verdict == "reject":
             result.ack_body = raw
             result.verdict = "reject"
@@ -290,15 +399,17 @@ def drain_trade_fill(
             result.ack_body = raw
             result.verdict = "accept"
             result.ack_wall_ms = now_ms
-            known |= _frame_order_ids(raw)
-            if result.fill_body and _is_matching_fill(venue, result.fill_body, known):
-                return result
+            known |= ack_ids
             continue
-        if _is_matching_fill(venue, raw, known):
+        row = _matching_order_row(venue, raw, known)
+        if row is None:
+            continue
+        state = _order_status(venue, row)
+        if state in _TERMINAL_ORDER_STATES:
             result.fill_body = raw
+            result.terminal_state = state
             result.fill_wall_ms = now_ms
-            if result.verdict == "accept":
-                return result
+            return result
     return result
 
 
@@ -314,7 +425,44 @@ def read_warm_trade_frame(runtime: Any, timeout_sec: float) -> str:
     if callable(pop):
         stashed = pop()
         if stashed:
-            return str(stashed)
+            raw = str(stashed)
+            private_order = False
+            try:
+                from app.bot.private.ws_warm_loop import _is_private_order_push
+
+                private_order = _is_private_order_push(
+                    str(getattr(runtime, "exchange", "")), raw
+                )
+            except Exception:  # noqa: BLE001 — capture classification is best-effort
+                pass
+            socket = (
+                getattr(runtime, "private_socket", None)
+                if private_order
+                else getattr(runtime, "trade_socket", None)
+            )
+            transcript = getattr(socket, "_wire_transcript", None)
+            if transcript is not None:
+                try:
+                    transcript.record_io(
+                        direction="in",
+                        venue=str(getattr(runtime, "exchange", "")),
+                        socket="private" if private_order else "trade",
+                        text=raw,
+                        wall_ms=int(time.time() * 1000),
+                        mono_ns=time.monotonic_ns(),
+                        reconnect_generation=int(
+                            getattr(runtime, "reconnect_generation", 0)
+                        ),
+                        run_id=str(transcript.run_id),
+                        capture_stage="manager_consume",
+                    )
+                except Exception as exc:  # noqa: BLE001 — transcript marks capture failed
+                    transcript.mark_unhealthy(type(exc).__name__)
+                    _WIRE_LOG.error(
+                        "wire_manager_consume_record_failed err=%s",
+                        type(exc).__name__,
+                    )
+            return raw
     sock = getattr(runtime, "trade_socket", None)
     if sock is None:
         raise TimeoutError("trade socket missing")
@@ -330,16 +478,37 @@ def _frames_from_recv(
         if raw.ack_body:
             out.append((venue, raw.ack_body, raw.ack_wall_ms, "ack", raw.verdict))
         if raw.fill_body:
-            out.append((venue, raw.fill_body, raw.fill_wall_ms, "fill", None))
+            out.append((venue, raw.fill_body, raw.fill_wall_ms, "order", None))
         return out
     if not isinstance(raw, str) or not raw:
         return []
     verdict = classify_order_answer(venue, raw)
     if verdict is not None:
         return [(venue, raw, int(time.time() * 1000), "ack", verdict)]
-    if _fill_px(raw, venue):
-        return [(venue, raw, int(time.time() * 1000), "fill", None)]
+    parsed = _parse_json_obj(raw)
+    if parsed is not None:
+        is_order = (
+            str(parsed.get("topic") or "").startswith("order")
+            if str(venue).strip().lower() == "bybit"
+            else isinstance(parsed.get("arg"), dict)
+            and str(parsed["arg"].get("channel") or "") == "orders"
+        )
+        if is_order:
+            return [(venue, raw, int(time.time() * 1000), "order", None)]
     return [(venue, raw, None, "other", None)]
+
+
+def _qty_matches(value: object, expected: Decimal) -> bool:
+    try:
+        actual = Decimal(str(value))
+    except (InvalidOperation, TypeError, ValueError):
+        return False
+    return actual.is_finite() and expected.is_finite() and actual == expected
+
+
+def _row_fill_qty(row: Mapping[str, Any], exchange: str) -> object:
+    key = "cumExecQty" if str(exchange).strip().lower() == "bybit" else "accFillSz"
+    return row.get(key)
 
 
 def _book_body(venue: str, px: object) -> str:
@@ -368,6 +537,7 @@ def _place(
     recv_fn: Optional[RecvFn] = None,
     wait_fn: Optional[WaitFn] = None,
     leverage_one: bool = False,
+    close_qty: Optional[Mapping[str, object]] = None,
 ) -> PlaceSendResult:
     del extra  # manager passes the live-canary extra dict; this path does not use it
     iid = str(intent_id or uuid.uuid4())
@@ -393,7 +563,21 @@ def _place(
     try:
         okx_px = reference_px(okx_book, okx_side)
         bybit_px = reference_px(bybit_book, bybit_side)
-        sized = shared_from_meta(meta=meta, okx_px=okx_px, bybit_px=bybit_px)
+        if reduce_only:
+            if not isinstance(close_qty, Mapping) or not {
+                "okx_filled_qty",
+                "bybit_filled_qty",
+            }.issubset(close_qty):
+                raise CoinQtyError("close_qty_unavailable")
+            sized = exact_close_from_meta(
+                meta=meta,
+                okx_px=okx_px,
+                bybit_px=bybit_px,
+                okx_sz=close_qty["okx_filled_qty"],
+                bybit_qty=close_qty["bybit_filled_qty"],
+            )
+        else:
+            sized = shared_from_meta(meta=meta, okx_px=okx_px, bybit_px=bybit_px)
     except CoinQtyError as exc:
         chrono.exit("preprocess")
         return _abort(exc.code)
@@ -486,6 +670,15 @@ def _place(
     verdicts: dict[str, Optional[str]] = {}
     fill_px: dict[str, Optional[str]] = {}
     fill_wall: dict[str, Optional[int]] = {}
+    fill_qty: dict[str, Optional[str]] = {"okx": None, "bybit": None}
+    leg_errors: dict[str, str] = {}
+    bybit_order_id, okx_order_id, _dual_id = _attempt_ids(iid)
+    known_ids = {"okx": {okx_order_id}, "bybit": {bybit_order_id}}
+    for venue, body, _wall_ms, kind, _verdict in seen:
+        if kind == "ack":
+            ack_ids = _frame_order_ids(body)
+            if ack_ids & known_ids[venue]:
+                known_ids[venue].update(ack_ids)
     for venue, body, wall_ms, kind, verdict in seen:
         chrono.venue_message(venue, wall_ms=wall_ms)
         row: dict[str, Any] = {
@@ -500,8 +693,14 @@ def _place(
         if wall_ms is not None:
             row["wall_ms"] = int(wall_ms)
         parsed = _parse_json_obj(body)
+        matched_order = (
+            _matching_order_row(venue, body, known_ids[venue])
+            if kind == "order"
+            else None
+        )
         if parsed is not None:
-            fields = _present_fields(parsed)
+            field_source = matched_order if kind == "order" else parsed
+            fields = _present_fields(field_source) if field_source is not None else {}
             if fields:
                 row["fields"] = fields
         if verdict is None and kind == "ack":
@@ -509,11 +708,39 @@ def _place(
         if verdict is not None:
             row["venue_verdict"] = verdict
             verdicts[venue] = verdict
-        if kind == "fill":
+        if kind == "order" and matched_order is not None:
+            state = _order_status(venue, matched_order)
+            row["venue_status"] = state or "unknown"
+            if state in _TERMINAL_ORDER_STATES and state != "filled":
+                reason = f"order_{state}" if state else "order_state_unknown"
+                row["venue_verdict"] = "reject" if state == "rejected" else "incomplete"
+                row["venue_reason"] = reason
+                verdicts[venue] = row["venue_verdict"]
+                leg_errors[venue] = "partial_fill" if "partial" in state else reason
+            elif state == "filled":
+                expected_qty = sized.okx_sz if venue == "okx" else sized.bybit_qty
+                actual_qty = _row_fill_qty(matched_order, venue)
+                if not _qty_matches(actual_qty, expected_qty):
+                    row["local_validation"] = "fill_qty_mismatch"
+                    leg_errors[venue] = "fill_qty_mismatch"
+                else:
+                    px = _row_fill_px(matched_order, venue)
+                    if px is None:
+                        row["local_validation"] = "invalid_fill_price"
+                        leg_errors[venue] = "invalid_fill_price"
+                    else:
+                        fill_px[venue] = px
+                        fill_wall[venue] = wall_ms
+                        fill_qty[venue] = str(actual_qty)
+        elif kind == "fill" and transport == "local":
+            # Local simulation uses signal-book prices and has no venue qty row.
             px = _fill_px(body, venue)
             if px:
                 fill_px[venue] = px
                 fill_wall[venue] = wall_ms
+                fill_qty[venue] = dec_str(
+                    sized.okx_sz if venue == "okx" else sized.bybit_qty
+                )
         venue_rows.append(row)
     if venue_rows:
         _append_trade_rows(data_root, venue_rows)
@@ -525,24 +752,14 @@ def _place(
     bybit_verdict = verdicts.get("bybit")
     if okx_verdict == "reject" or bybit_verdict == "reject":
         both_reject = okx_verdict == "reject" and bybit_verdict == "reject"
-        return _abort("venue_reject", keep_pending=not both_reject)
+        reason = "asymmetric_fill" if okx_fill or bybit_fill else "venue_reject"
+        return _abort(reason, keep_pending=not (both_reject and not (okx_fill or bybit_fill)))
+    if leg_errors:
+        reason = "asymmetric_fill" if okx_fill or bybit_fill else next(iter(leg_errors.values()))
+        return _abort(reason, keep_pending=True)
     if not (okx_fill and bybit_fill):
-        if okx_verdict == "accept" or bybit_verdict == "accept":
-            chrono.abort("accepted_no_fill")
-            chrono.flush()
-            return PlaceSendResult(
-                abort=None,
-                completed=False,
-                keep_pending=True,
-                status="accepted",
-                okx_fill_px=okx_fill,
-                bybit_fill_px=bybit_fill,
-                coin_qty=coin_qty,
-                base_coin=coin,
-                side=pos_side,
-                intent_id=iid,
-            )
-        return _abort("partial_fill", keep_pending=True)
+        reason = "asymmetric_fill" if okx_fill or bybit_fill else "fill_timeout"
+        return _abort(reason, keep_pending=True)
 
     walls = [w for w in (fill_wall.get("okx"), fill_wall.get("bybit")) if w is not None]
     fill_ts = max(walls) if walls else int(time.time() * 1000)
@@ -558,6 +775,8 @@ def _place(
         "base_coin": coin,
         "side": pos_side,
         "coin_qty": coin_qty,
+        "okx_filled_qty": fill_qty["okx"],
+        "bybit_filled_qty": fill_qty["bybit"],
         "okx_fill_px": okx_fill,
         "bybit_fill_px": bybit_fill,
         "latency_ms": latency,
@@ -582,6 +801,8 @@ def _place(
         base_coin=coin,
         side=pos_side,
         intent_id=iid,
+        okx_filled_qty=fill_qty["okx"],
+        bybit_filled_qty=fill_qty["bybit"],
     )
 
 
@@ -597,6 +818,7 @@ def place_local(
     close_of: Optional[str] = None,
     extra: Optional[dict[str, Any]] = None,
     intent_id: Optional[str] = None,
+    close_qty: Optional[Mapping[str, object]] = None,
     **_ignored: Any,
 ) -> PlaceSendResult:
     """No-network sender. Fills are the signal-book ask (buy) or bid (sell)."""
@@ -612,6 +834,7 @@ def place_local(
         close_of=close_of,
         extra=extra,
         intent_id=intent_id,
+        close_qty=close_qty,
     )
 
 
@@ -633,6 +856,7 @@ def place_live(
     extra: Optional[dict[str, Any]] = None,
     intent_id: Optional[str] = None,
     leverage_one: bool = False,
+    close_qty: Optional[Mapping[str, object]] = None,
     **_ignored: Any,
 ) -> PlaceSendResult:
     """Production live place. ``sender`` is injected in tests (no exchange sockets)."""
@@ -654,4 +878,5 @@ def place_live(
         recv_fn=recv_fn,
         wait_fn=wait_fn,
         leverage_one=leverage_one,
+        close_qty=close_qty,
     )

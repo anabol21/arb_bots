@@ -169,6 +169,25 @@ def extract_req_id(obj: Optional[Mapping[str, Any]]) -> Optional[str]:
     return None
 
 
+def _extract_client_order_ids(obj: Any) -> list[str]:
+    found: list[str] = []
+
+    def _walk(node: Any) -> None:
+        if isinstance(node, Mapping):
+            for key, value in node.items():
+                if _norm_key(key) in {"clordid", "orderlinkid"}:
+                    if value not in (None, ""):
+                        found.append(str(value))
+                else:
+                    _walk(value)
+        elif isinstance(node, list):
+            for item in node:
+                _walk(item)
+
+    _walk(obj)
+    return found
+
+
 def extract_venue_ts_ms(obj: Any) -> Optional[int]:
     """Best venue timestamp (ms) in a parsed frame.
 
@@ -296,6 +315,8 @@ class WireTranscript:
         self._write_lock = threading.Lock()
         self._corr: dict[str, dict[str, Any]] = {}
         self._corr_lock = threading.Lock()
+        self._failure_reason: Optional[str] = None
+        self._failure_lock = threading.Lock()
         self._handles: dict[str, Any] = {}
         self._queue: queue.Queue[Optional[dict[str, Any]]] = queue.Queue()
         self._stop = threading.Event()
@@ -350,6 +371,20 @@ class WireTranscript:
         with self._corr_lock:
             return dict(self._corr.get(str(req_id), {}))
 
+    @property
+    def healthy(self) -> bool:
+        with self._failure_lock:
+            return self._failure_reason is None and not self._stop.is_set()
+
+    def mark_unhealthy(self, reason: object) -> None:
+        """Fail closed when a capture hook cannot preserve its event."""
+        safe = "".join(
+            ch for ch in str(reason) if ch.isalnum() or ch in "._-"
+        )[:64] or "capture_failed"
+        with self._failure_lock:
+            if self._failure_reason is None:
+                self._failure_reason = safe
+
     def record_io(
         self,
         *,
@@ -361,6 +396,36 @@ class WireTranscript:
         mono_ns: Optional[int] = None,
         reconnect_generation: Optional[int] = None,
         run_id: Optional[str] = None,
+        capture_stage: Optional[str] = None,
+    ) -> dict[str, Any]:
+        try:
+            return self._record_io(
+                direction=direction,
+                venue=venue,
+                socket=socket,
+                text=text,
+                wall_ms=wall_ms,
+                mono_ns=mono_ns,
+                reconnect_generation=reconnect_generation,
+                run_id=run_id,
+                capture_stage=capture_stage,
+            )
+        except Exception as exc:  # noqa: BLE001 — a missing event invalidates proof
+            self.mark_unhealthy(type(exc).__name__)
+            raise
+
+    def _record_io(
+        self,
+        *,
+        direction: str,
+        venue: str,
+        socket: str,
+        text: str,
+        wall_ms: Optional[int] = None,
+        mono_ns: Optional[int] = None,
+        reconnect_generation: Optional[int] = None,
+        run_id: Optional[str] = None,
+        capture_stage: Optional[str] = None,
     ) -> dict[str, Any]:
         """Stamp and enqueue one send/recv. Safe to call after I/O succeeds."""
         if direction not in DIRS:
@@ -382,6 +447,11 @@ class WireTranscript:
         req_id = extract_req_id(parsed)
         venue_ts = extract_venue_ts_ms(parsed)
         corr = self.lookup_correlation(req_id)
+        if not corr and parsed is not None:
+            for linked_id in _extract_client_order_ids(parsed):
+                corr = self.lookup_correlation(linked_id)
+                if corr:
+                    break
         payload: Any
         if kind == "json" and parsed is not None:
             payload = redact_payload(parsed, op=op)
@@ -405,6 +475,8 @@ class WireTranscript:
         }
         if reconnect_generation is not None:
             event["reconnect_generation"] = int(reconnect_generation)
+        if capture_stage:
+            event["capture_stage"] = str(capture_stage)
         if venue_ts is not None:
             event["venue_ts_ms"] = venue_ts
         if direction == "in" and venue_ts is not None:
@@ -478,6 +550,7 @@ class WireTranscript:
                 fh = self._handles.get(date)
                 if fh is None:
                     if not self.data_root.exists():
+                        self.mark_unhealthy("data_root_missing")
                         return
                     path = wire_jsonl_path(self.data_root, date)
                     if _is_under_denied(path):
@@ -488,9 +561,8 @@ class WireTranscript:
                     self._handles[date] = fh
                 fh.write(line + "\n")
                 fh.flush()
-            except OSError:
-                if self._stop.is_set() or not self.data_root.exists():
-                    return
+            except Exception as exc:  # noqa: BLE001 — missing wire proof is fatal to an experiment
+                self.mark_unhealthy(type(exc).__name__)
                 raise
 
     def flush(self, timeout_sec: float = 2.0) -> None:
@@ -566,7 +638,9 @@ class WireTranscriptSocket:
         except Exception:  # noqa: BLE001
             return None
 
-    def _safe_record(self, direction: str, text: str) -> None:
+    def _safe_record(
+        self, direction: str, text: str, *, capture_stage: Optional[str] = None
+    ) -> None:
         try:
             wall_ms = int(time.time() * 1000)
             mono_ns = time.monotonic_ns()
@@ -579,9 +653,14 @@ class WireTranscriptSocket:
                 mono_ns=mono_ns,
                 reconnect_generation=self._generation(),
                 run_id=self._run_id,
+                capture_stage=(
+                    capture_stage
+                    or ("application_consume" if direction == "in" else "send_complete")
+                ),
             )
         except Exception:  # noqa: BLE001 — never fail the live I/O path
-            _WIRE_LOG.exception("wire_transcript_record_failed")
+            self._transcript.mark_unhealthy("socket_capture_failed")
+            _WIRE_LOG.error("wire_transcript_record_failed")
 
     def __getattr__(self, name: str) -> Any:
         return getattr(self._inner, name)
