@@ -70,7 +70,7 @@ slip_spread = signal_spread − fill_spread
 
 ### PnL (close only, would_send)
 
-- `pnl_spread ≈ open_fill_spread − close_fill_spread` (pct points).
+- `pnl_spread = open_fill_spread + close_fill_spread − fee_round_trip_pp` (pct points). `close_fill_spread` is already the opposite-side spread; frozen fee is 0.30. Do not use `open − close` (that flips a negative close).
 - `pnl_usdt_approx ≈ pnl_spread/100 * notional` (proxy only; not venue PnL).
 
 ## Schema `bbot.theta_trade.v1`

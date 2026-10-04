@@ -102,7 +102,7 @@ Returns `None` if data is incomplete (fail-closed).
 - `policy_id = "gear22_frozen_v1"`
 - `reason = "close_min_profit"` (unified policy close)
 - `potential_pp` — policy's live dual-leg unwind PnL estimate (pp)
-- Existing `pnl_spread` — manager's proxy: `open_fill_spread - close_fill_spread`
+- Existing `pnl_spread` — same gear-2.2 fill definition as `potential_pp`: `open_fill_spread + close_fill_spread - fee_round_trip_pp` (`close_fill_spread` is the opposite side; frozen fee 0.30)
 
 Both measures are would_send approximations (1 Hz `spread_last` fills, not Trade_Lat).
 

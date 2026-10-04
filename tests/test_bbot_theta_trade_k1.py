@@ -27,6 +27,7 @@ from app.bot.theta_trade_manager import (
     ThetaTradeJournalWriter,
     ThetaTradeManager,
     decide_theta_k1,
+    journal_close_pnl_spread,
     slip_spread,
     theta_trade_enabled,
 )
@@ -782,3 +783,138 @@ class RuntimeWireTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class JournalClosePnlSignTests(unittest.TestCase):
+    """SAND long d0c91dee-316e-4080-9246-4abbe77d1180 close 2026-10-04.
+
+    close_fill_spread is already the opposite (short) spread. open − close
+    flipped that sign to +0.8501; gear 2.2 records open + close − 0.30.
+    """
+
+    SAND_OPEN = 0.6779661016949238
+    SAND_CLOSE = -0.1721626274665675
+    SAND_PNL = 0.20580347422835626
+    SAND_WRONG = 0.8501287291614913
+
+    def test_formula_locks_negative_close_sign(self) -> None:
+        got = journal_close_pnl_spread(self.SAND_OPEN, self.SAND_CLOSE, 0.30)
+        self.assertEqual(got, self.SAND_PNL)
+        self.assertNotEqual(got, self.SAND_WRONG)
+        self.assertAlmostEqual(got, 0.2058034742283563, places=15)
+        # A positive opposite close is added, not subtracted.
+        self.assertAlmostEqual(journal_close_pnl_spread(0.50, 0.20, 0.30), 0.40)
+        self.assertIsNone(journal_close_pnl_spread(None, self.SAND_CLOSE, 0.30))
+        self.assertIsNone(journal_close_pnl_spread(self.SAND_OPEN, None, 0.30))
+
+    def _held(self) -> OpenPosition:
+        return OpenPosition(
+            trade_id="d0c91dee-316e-4080-9246-4abbe77d1180",
+            base_coin="SAND",
+            side="long",
+            open_signal_ts_ms=1,
+            open_fill_ts_ms=71,
+            open_fill_spread=self.SAND_OPEN,
+            open_notional=100.0,
+            open_theta_1m=0.3,
+            fill_spread_pp=self.SAND_OPEN,
+        )
+
+    def _decision(self) -> ThetaDecision:
+        return ThetaDecision(
+            action="close",
+            base_coin="SAND",
+            side="long",
+            reason="close_min_profit",
+            size_info={"size_ok": True},
+            potential_pp=self.SAND_PNL,
+        )
+
+    def _mgr(self, *, live: bool = False) -> ThetaTradeManager:
+        tmp = Path(tempfile.mkdtemp())
+        kwargs = {}
+        if live:
+            kwargs = {
+                "live_send": True,
+                "place_fn": lambda **_kwargs: None,
+                "meta_fn": lambda _coin: {"ok": True},
+            }
+        mgr = ThetaTradeManager(
+            data_root=tmp,
+            config=ThetaTradeConfig(
+                fill_delay_ms=0,
+                notional_usdt=100.0,
+                policy_params=_close_params(),
+            ),
+            sleep_fn=lambda _seconds: None,
+            **kwargs,
+        )
+        mgr.slot.position = self._held()
+        return mgr
+
+    def _assert_sand_row(self, row: dict) -> None:
+        self.assertEqual(row["event"], "close")
+        self.assertEqual(row["trade_id"], "d0c91dee-316e-4080-9246-4abbe77d1180")
+        self.assertEqual(row["open_fill_spread"], self.SAND_OPEN)
+        self.assertEqual(row["close_fill_spread"], self.SAND_CLOSE)
+        self.assertEqual(row["pnl_spread"], self.SAND_PNL)
+        self.assertNotEqual(row["pnl_spread"], self.SAND_WRONG)
+        self.assertEqual(row["potential_pp"], self.SAND_PNL)
+        self.assertAlmostEqual(row["pnl_usdt_approx"], self.SAND_PNL)
+        self.assertTrue(row["would_send"])
+
+    def test_would_send_close_journals_sand_pnl(self) -> None:
+        mgr = self._mgr()
+        with patch(
+            "app.bot.theta_trade_manager.spread_for_side",
+            return_value=self.SAND_CLOSE,
+        ):
+            rows = mgr.execute_decision(
+                self._decision(),
+                snapshots=[],
+                quotes={"SAND": _books()},
+                now_ms=4_000,
+            )
+        self.assertEqual(len(rows), 1)
+        self._assert_sand_row(rows[0])
+        self.assertFalse(rows[0]["send"])
+        self.assertIsNone(mgr.slot.position)
+
+    def test_live_send_close_uses_the_same_pnl_write(self) -> None:
+        mgr = self._mgr(live=True)
+        with patch(
+            "app.bot.theta_trade_manager.spread_for_side",
+            return_value=self.SAND_CLOSE,
+        ):
+            rows = mgr.execute_decision(
+                self._decision(),
+                snapshots=[],
+                quotes={"SAND": _books()},
+                now_ms=5_000,
+            )
+        self.assertEqual(len(rows), 1)
+        self._assert_sand_row(rows[0])
+        self.assertTrue(rows[0]["send"])
+        self.assertIsNone(mgr.slot.position)
+
+    def test_async_would_send_close_journals_sand_pnl(self) -> None:
+        mgr = self._mgr()
+
+        async def _run():
+            with patch(
+                "app.bot.theta_trade_manager.spread_for_side",
+                return_value=self.SAND_CLOSE,
+            ):
+                return await mgr._execute_decision_async(
+                    self._decision(),
+                    snapshots=[],
+                    quotes={"SAND": _books()},
+                    now_ms=6_000,
+                )
+
+        rows = asyncio.run(_run())
+        self.assertEqual(len(rows), 1)
+        self._assert_sand_row(rows[0])
+        self.assertFalse(rows[0]["send"])
+        self.assertIsNone(mgr.slot.position)
+
