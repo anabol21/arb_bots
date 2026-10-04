@@ -160,6 +160,57 @@ class LoopOwnedSocket:
             fut.cancel()
             raise TimeoutError("loop-owned send timeout") from exc
 
+    def send_text_timed(
+        self,
+        text: str,
+        *,
+        on_send_start: Optional[Callable[[int], None]] = None,
+        on_send_return: Optional[Callable[[int], None]] = None,
+    ) -> None:
+        """Send as usual while exposing owner-loop monotonic boundaries.
+
+        Hooks are optional and best-effort. Hook failures never change send
+        success, timeout, or exception behavior. ``send_text`` remains the
+        unchanged compatibility API for existing callers.
+        """
+        if not isinstance(text, str):
+            raise TypeError("send_text requires str")
+        ws = self._ws
+        loop = self._owner.loop
+        if ws is None or loop is None or not self._connected:
+            raise RuntimeError("loop-owned socket not connected")
+        try:
+            running = asyncio.get_running_loop()
+        except RuntimeError:
+            running = None
+        if running is loop:
+            raise RuntimeError(
+                "LoopOwnedSocket.send_text_timed cannot wait on the owner loop; "
+                "use asend() from listen/heartbeat tasks"
+            )
+
+        def _stamp(hook: Optional[Callable[[int], None]]) -> None:
+            if hook is None:
+                return
+            try:
+                hook(time.monotonic_ns())
+            except Exception:  # noqa: BLE001 — instrumentation cannot affect I/O
+                pass
+
+        async def _send_on_owner_loop() -> None:
+            _stamp(on_send_start)
+            try:
+                await ws.send(text)
+            finally:
+                _stamp(on_send_return)
+
+        fut = asyncio.run_coroutine_threadsafe(_send_on_owner_loop(), loop)
+        try:
+            fut.result(timeout=_SEND_TIMEOUT_SEC)
+        except concurrent.futures.TimeoutError as exc:
+            fut.cancel()
+            raise TimeoutError("loop-owned send timeout") from exc
+
     async def asend(self, text: str) -> None:
         """Owner-loop send (heartbeat / OKX pong). Does not wait for recv."""
         if not isinstance(text, str):

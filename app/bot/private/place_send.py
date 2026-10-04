@@ -414,6 +414,7 @@ def _place(
 
     chrono.enter("ws_send")
     send_abort: Optional[str] = None
+    send_result = None
     try:
         if transport == "live":
             common = dict(
@@ -435,8 +436,11 @@ def _place(
             else:
                 sent = send_short(**common)
             send_abort = sent.abort
+            send_result = sent.send_result
     finally:
         chrono.exit("ws_send")
+    if send_result is not None:
+        chrono.send_timing(send_result.timings, phase=phase)
     chrono.flush()
     if send_abort:
         return _abort(send_abort)

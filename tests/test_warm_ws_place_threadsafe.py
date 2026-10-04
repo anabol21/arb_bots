@@ -17,6 +17,7 @@ import threading
 import time
 import unittest
 from pathlib import Path
+from typing import Optional
 
 
 class WebsocketsClientSocketThreadSafeTests(unittest.TestCase):
@@ -987,6 +988,70 @@ class WarmPostHandshakeHeartbeatTests(unittest.TestCase):
             self.assertIn("pong", trade.outbox)
             self.assertEqual(before.count("pong"), 0)
             session.stop()
+
+
+class LoopOwnedSocketTimingTests(unittest.TestCase):
+    def test_timed_send_marks_owner_loop_without_changing_payload_api(self) -> None:
+        from types import SimpleNamespace
+
+        from app.bot.private.ws_warm_loop import LoopOwnedSocket
+
+        loop = asyncio.new_event_loop()
+        loop_ready = threading.Event()
+        loop_thread_id: list[int] = []
+
+        def _run_loop() -> None:
+            asyncio.set_event_loop(loop)
+            loop_thread_id.append(threading.get_ident())
+            loop_ready.set()
+            loop.run_forever()
+
+        thread = threading.Thread(target=_run_loop, name="timed-send-owner", daemon=True)
+        thread.start()
+        self.assertTrue(loop_ready.wait(timeout=2.0))
+
+        class _Ws:
+            def __init__(self) -> None:
+                self.sent: list[str] = []
+                self.send_thread_id: Optional[int] = None
+                self.send_enter_ns: Optional[int] = None
+                self.send_return_ns: Optional[int] = None
+
+            async def send(self, text: str) -> None:
+                self.sent.append(text)
+                self.send_thread_id = threading.get_ident()
+                self.send_enter_ns = time.monotonic_ns()
+                await asyncio.sleep(0)
+                self.send_return_ns = time.monotonic_ns()
+
+        ws = _Ws()
+        sock = LoopOwnedSocket(
+            url="wss://example.invalid",
+            exchange="bybit",
+            channel="trade",
+            owner=SimpleNamespace(loop=loop),
+        )
+        sock.attach_ws(ws)
+        stamps: dict[str, int] = {}
+        try:
+            # The existing API still sends the same text through the same loop.
+            sock.send_text("existing-api")
+            sock.send_text_timed(
+                "timed-api",
+                on_send_start=lambda stamp: stamps.__setitem__("start", stamp),
+                on_send_return=lambda stamp: stamps.__setitem__("return", stamp),
+            )
+        finally:
+            loop.call_soon_threadsafe(loop.stop)
+            thread.join(timeout=2.0)
+            loop.close()
+
+        self.assertFalse(thread.is_alive())
+        self.assertEqual(ws.sent, ["existing-api", "timed-api"])
+        self.assertEqual(ws.send_thread_id, loop_thread_id[0])
+        self.assertLessEqual(stamps["start"], ws.send_enter_ns)
+        self.assertLessEqual(ws.send_return_ns, stamps["return"])
+        self.assertLessEqual(stamps["start"], stamps["return"])
 
 
 if __name__ == "__main__":

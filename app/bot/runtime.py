@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import importlib
 import logging
 import os
 import random
@@ -338,6 +339,9 @@ class BotRuntime:
             c: (None, None) for c in self.coins
         }
         self._private_warm: Any = None
+        self._synthetic_sender: Any = None
+        self._synthetic_sender_session: Any = None
+        self._synthetic_live_send_enabled = False
         self._l1_ring_warned = False
         # Gear 2.2 floor observer (5m bar metrics). Off critical decide/send path.
         self.floor_enabled = floor_watch_enabled(self.profile)
@@ -393,6 +397,7 @@ class BotRuntime:
                 seed_raw = str(os.environ.get("BBOT_SYNTHETIC_SEED") or "").strip()
                 rng = random.Random(int(seed_raw)) if seed_raw else random.Random()
                 gates_on = synthetic_live_gates(os.environ)
+                self._synthetic_live_send_enabled = gates_on
                 # gear22_would_send / gear22_live_canary keep their own place_fn.
                 self.theta_trade = ThetaTradeManager(
                     data_root=self.data_root,
@@ -487,6 +492,73 @@ class BotRuntime:
 
         return start_warm_private_for_bot_process(**overrides)
 
+    def _prepare_synthetic_live_sender(self) -> bool:
+        """Load the live place modules and ready both queues before signals."""
+        session = self._private_warm
+        if (
+            self.profile != "synthetic_roll"
+            or not getattr(self, "_synthetic_live_send_enabled", False)
+            or session is None
+        ):
+            return False
+        if not session.is_ready():
+            raise RuntimeError("synthetic live session is not ready")
+
+        # Import the place path after the private session has completed startup.
+        importlib.import_module("app.bot.private.place_send")
+        importlib.import_module("app.bot.private.send_legs")
+        from app.bot.private.ws_trivial_dual_leg import (
+            TrivialDualSender,
+            warm_trade_send_fn,
+        )
+
+        sender = getattr(self, "_synthetic_sender", None)
+        if (
+            sender is not None
+            and getattr(self, "_synthetic_sender_session", None) is session
+            and sender.is_ready()
+        ):
+            depths = sender.queue_depths()
+        else:
+            if sender is not None:
+                sender.close()
+            sender = TrivialDualSender(send_fn=warm_trade_send_fn(session))
+            self._synthetic_sender = sender
+            self._synthetic_sender_session = session
+            depths = sender.queue_depths()
+
+        if not sender.is_ready() or depths != {"bybit": 0, "okx": 0}:
+            self._synthetic_sender = None
+            self._synthetic_sender_session = None
+            sender.close()
+            raise RuntimeError("synthetic live sender queues not ready and empty")
+
+        self.log.info(
+            "synthetic_sender_ready | run_id=%s | handshake_count=%s | "
+            "bybit_queue_depth=%s | okx_queue_depth=%s | frames_enqueued=0",
+            session.run_id,
+            session._handshake_count,  # noqa: SLF001
+            depths["bybit"],
+            depths["okx"],
+        )
+        return True
+
+    def _stop_synthetic_private_send(self) -> None:
+        """Close the profile sender before stopping the shared warm session."""
+        sender = getattr(self, "_synthetic_sender", None)
+        self._synthetic_sender = None
+        self._synthetic_sender_session = None
+        try:
+            if sender is not None:
+                sender.close()
+        finally:
+            try:
+                from app.bot.private.ws_warm_session import clear_process_warm_session
+
+                clear_process_warm_session(stop=True)
+            finally:
+                self._private_warm = None
+
     def _synthetic_local_place(self, **kwargs: Any) -> Any:
         """No sockets. Same journal and chrono as the live place path."""
         from app.bot.private.okx_ct_val import bind_okx_ct_val
@@ -509,11 +581,6 @@ class BotRuntime:
             read_warm_trade_frame,
         )
         from app.bot.private.send_legs import _attempt_ids
-        from app.bot.private.ws_trivial_dual_leg import (
-            TrivialDualSender,
-            warm_trade_send_fn,
-        )
-
         session = self._private_warm
         if session is None:
             return PlaceSendResult(abort="private_channel_down")
@@ -540,9 +607,13 @@ class BotRuntime:
         kwargs = dict(kwargs)
         kwargs["meta"] = bound
         sender = getattr(self, "_synthetic_sender", None)
-        if sender is None:
-            sender = TrivialDualSender(send_fn=warm_trade_send_fn(session))
-            self._synthetic_sender = sender
+        if (
+            sender is None
+            or getattr(self, "_synthetic_sender_session", None) is not session
+            or not sender.is_ready()
+        ):
+            self._synthetic_roll_halt_reason = "synthetic_sender_not_ready"
+            return PlaceSendResult(abort="synthetic_sender_not_ready")
         deadline = time.monotonic() + SYNTHETIC_FILL_WAIT_SEC
 
         def _runtime_for(venue: str) -> Any:
@@ -1555,34 +1626,46 @@ class BotRuntime:
                 "policy_missing | continuing WS-only; will not open intents"
             )
 
-        # Private WS: process-lifetime like public L1 when live private send is on.
+        # Private WS and synthetic send path must be ready before signal tasks.
         try:
             self._private_warm = self.start_private_warm_if_live_send(
                 stop_event=self.stop_event,
                 coins=self.coins,
             )
+            if self._private_warm is not None:
+                self.log.info(
+                    "private_warm_started | run_id=%s | ready=%s | handshake_count=%s | keepalive=%s",
+                    self._private_warm.run_id,
+                    self._private_warm.is_ready(),
+                    self._private_warm._handshake_count,  # noqa: SLF001
+                    self._private_warm.keepalive_running,
+                )
+                if self.profile == "synthetic_roll":
+                    self._prefetch_okx_ct_vals()
+                    self._prefetch_okx_inst_id_codes()
+                    self._set_leverage_one()
+            else:
+                self.log.info("private_warm_skipped | live_private_send=false")
+                if self.profile == "synthetic_roll":
+                    self._prefetch_okx_ct_vals()
+
+            if self._synthetic_live_send_enabled:
+                if self._private_warm is None:
+                    raise RuntimeError("synthetic live gates require a ready private session")
+                self._prepare_synthetic_live_sender()
         except Exception as exc:
             self.log.error(
-                "private_warm_failed | err=%s | refusing cold signal loop",
+                "private_or_synthetic_warm_failed | err=%s | refusing signal loop",
                 type(exc).__name__,
             )
+            try:
+                self._stop_synthetic_private_send()
+            except Exception as cleanup_exc:
+                self.log.error(
+                    "private_warm_cleanup_failed | err=%s",
+                    type(cleanup_exc).__name__,
+                )
             raise
-        if self._private_warm is not None:
-            self.log.info(
-                "private_warm_started | run_id=%s | ready=%s | handshake_count=%s | keepalive=%s",
-                self._private_warm.run_id,
-                self._private_warm.is_ready(),
-                self._private_warm._handshake_count,  # noqa: SLF001
-                self._private_warm.keepalive_running,
-            )
-            if self.profile == "synthetic_roll":
-                self._prefetch_okx_ct_vals()
-                self._prefetch_okx_inst_id_codes()
-                self._set_leverage_one()
-        else:
-            self.log.info("private_warm_skipped | live_private_send=false")
-            if self.profile == "synthetic_roll":
-                self._prefetch_okx_ct_vals()
 
         tasks: list[asyncio.Task] = [asyncio.create_task(self._heartbeat())]
         # Periodic floor warm pickle save (if floor observer is enabled)
@@ -1648,11 +1731,7 @@ class BotRuntime:
         finally:
             # Persist floor warm pickle for next start (B path only).
             self._save_floor_warm_pickle()
-            
-            from app.bot.private.ws_warm_session import clear_process_warm_session
-
-            clear_process_warm_session(stop=True)
-            self._private_warm = None
+            self._stop_synthetic_private_send()
 
 
 def main() -> int:

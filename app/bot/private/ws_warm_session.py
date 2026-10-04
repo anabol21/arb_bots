@@ -936,6 +936,42 @@ class WarmConnector:
         if callable(note):
             note()
 
+    def send_trade_timed(
+        self,
+        venue: str,
+        text: str,
+        *,
+        on_send_start: Optional[Callable[[int], None]] = None,
+        on_send_return: Optional[Callable[[int], None]] = None,
+    ) -> None:
+        """Use an optional socket timing API without changing send semantics.
+
+        Production ``LoopOwnedSocket`` stamps from its owner loop around
+        ``ws.send``. Other existing socket adapters retain their original
+        ``send_text`` behavior and leave those owner-loop markers absent.
+        """
+        key = str(venue).strip().lower()
+        if key not in {"bybit", "okx"}:
+            raise ValueError(f"send_trade venue must be bybit|okx, got {venue!r}")
+        runtime = (
+            self.session.bybit_runtime if key == "bybit" else self.session.okx_runtime
+        )
+        sock = runtime.trade_socket
+        if sock is None:
+            raise RuntimeError("trade socket missing")
+        timed_send = getattr(sock, "send_text_timed", None)
+        if callable(timed_send):
+            timed_send(
+                text,
+                on_send_start=on_send_start,
+                on_send_return=on_send_return,
+            )
+        else:
+            sock.send_text(text)
+        note = getattr(runtime, "note_trade_activity", None)
+        if callable(note):
+            note()
+
     def recv_trade(self, venue: str, *, timeout_sec: Optional[float] = None) -> str:
         key = str(venue).strip().lower()
         if key not in {"bybit", "okx"}:

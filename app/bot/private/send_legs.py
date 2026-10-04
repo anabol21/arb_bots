@@ -16,6 +16,7 @@ from app.bot.private.order_metadata import parse_inst_id_code
 from app.bot.private.order_sign import LiveCredentials
 from app.bot.private.private_leg_up import leg_up
 from app.bot.private.ws_trivial_dual_leg import (
+    TrivialSendResult,
     build_signed_place_text,
     send_signed_dual,
 )
@@ -27,6 +28,7 @@ LegUpFn = Callable[[str, str], bool]
 class SendLegsResult:
     abort: Optional[str]
     sent: int
+    send_result: Optional[TrivialSendResult] = None
 
 
 _OKX_CL_ORD_ID = re.compile(r"^[A-Za-z0-9]{1,32}$")
@@ -112,7 +114,7 @@ def _send_pair(
     cl_ord_id = _frame_cl_ord_id(okx_text)
     if _OKX_CL_ORD_ID.fullmatch(cl_ord_id) is None:
         return SendLegsResult(abort="okx_cl_ord_id_illegal", sent=0)
-    send_signed_dual(
+    send_result = send_signed_dual(
         sender=sender,
         bybit_text=bybit_text,
         okx_text=okx_text,
@@ -123,7 +125,7 @@ def _send_pair(
         dual_leg_id=dual_id,
         signal_ts_ms=int(signal_ts_ms),
     )
-    return SendLegsResult(abort=None, sent=2)
+    return SendLegsResult(abort=None, sent=2, send_result=send_result)
 
 
 def send_long(

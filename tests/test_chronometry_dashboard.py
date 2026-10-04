@@ -89,7 +89,7 @@ def _fixture_ticks() -> list[L1Tick]:
     return ticks
 
 
-def _artifact(**overrides: object) -> dict:
+def _artifact(*, send_result: object = None, **overrides: object) -> dict:
     signal_ts = 1_000_000
     snap = capture_signal_book(
         {"bid_price": 9.94, "ask_price": 9.96, "bid_size": 10, "ask_size": 10},
@@ -159,6 +159,7 @@ def _artifact(**overrides: object) -> dict:
         signal_ts_ms=signal_ts,
         data_root=Path("/tmp/unused-chronometry"),
         signal_book=snap,
+        send_result=send_result,
         wire_events=wire,
         ticks=_fixture_ticks(),
         lookback_ms=30_000,
@@ -229,6 +230,28 @@ class DashboardGeneratorTests(unittest.TestCase):
             self.assertEqual(loaded["schema_version"], "bbot.canary.chronometry.v1")
             page = paths["html"].read_text(encoding="utf-8")
             self.assertIn("Contour B chronometry", page)
+
+    def test_post_send_artifact_carries_monotonic_send_boundaries(self) -> None:
+        timing = {
+            "bybit": {
+                "queue_enqueued_ns": 10,
+                "dequeued_ns": 20,
+                "callback_started_ns": 30,
+                "callback_returned_ns": 40,
+                "owner_ws_send_started_ns": 31,
+                "owner_ws_send_returned_ns": 39,
+            },
+            "okx": {
+                "queue_enqueued_ns": 11,
+                "dequeued_ns": 21,
+                "callback_started_ns": 32,
+                "callback_returned_ns": 41,
+                "owner_ws_send_started_ns": None,
+                "owner_ws_send_returned_ns": None,
+            },
+        }
+        art = _artifact(send_result=type("SendResult", (), {"timings": timing})())
+        self.assertEqual(art["send_timing_monotonic_ns"], timing)
 
     def test_close_of_long_uses_short_formula(self) -> None:
         self.assertEqual(spread_kind_for_side("close", open_spread_side="open_long"), "short")

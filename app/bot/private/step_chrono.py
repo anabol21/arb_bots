@@ -11,7 +11,7 @@ import os
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Mapping, Optional
 
 from app.bot.paths import theta_step_chrono_jsonl_path
 
@@ -25,6 +25,15 @@ DURATION_BLOCKS = (
     "wait_fill",
     "fill_done",
     "abort",
+)
+
+_SEND_TIMING_FIELDS = (
+    "queue_enqueued_ns",
+    "dequeued_ns",
+    "callback_started_ns",
+    "callback_returned_ns",
+    "owner_ws_send_started_ns",
+    "owner_ws_send_returned_ns",
 )
 
 
@@ -81,6 +90,38 @@ class StepChrono:
                 "wall_ms": wall,
                 "mono_ns": mono,
                 "signal_ts_ms": self.signal_ts_ms,
+            }
+        )
+
+    def send_timing(
+        self, timings: Mapping[str, Mapping[str, Optional[int]]], *, phase: str
+    ) -> None:
+        """Snapshot only allowed monotonic fields after ``ws_send`` exits.
+
+        Never serialize the send result or its items: they contain signed
+        frames and request ids. Missing markers remain null, not zero.
+        """
+        safe: dict[str, dict[str, Optional[int]]] = {}
+        for venue in ("bybit", "okx"):
+            markers = timings.get(venue)
+            if not isinstance(markers, Mapping):
+                continue
+            safe[venue] = {}
+            for name in _SEND_TIMING_FIELDS:
+                value = markers.get(name)
+                safe[venue][name] = value if type(value) is int else None
+        if not safe:
+            return
+        wall, mono = self._stamp()
+        self._rows.append(
+            {
+                "intent_id": self.intent_id,
+                "block": "send_timing",
+                "phase": "close" if phase == "close" else "open",
+                "wall_ms": wall,
+                "mono_ns": mono,
+                "signal_ts_ms": self.signal_ts_ms,
+                "send_timing_monotonic_ns": safe,
             }
         )
 

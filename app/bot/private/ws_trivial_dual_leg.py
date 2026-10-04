@@ -59,6 +59,28 @@ class TrivialSendError(RuntimeError):
 SendFn = Callable[["TrivialSendItem"], None]
 
 
+@dataclass
+class TrivialSendTiming:
+    """In-memory monotonic markers for one already-built send item."""
+
+    queue_enqueued_ns: Optional[int] = None
+    dequeued_ns: Optional[int] = None
+    callback_started_ns: Optional[int] = None
+    callback_returned_ns: Optional[int] = None
+    owner_ws_send_started_ns: Optional[int] = None
+    owner_ws_send_returned_ns: Optional[int] = None
+
+    def as_dict(self) -> dict[str, Optional[int]]:
+        return {
+            "queue_enqueued_ns": self.queue_enqueued_ns,
+            "dequeued_ns": self.dequeued_ns,
+            "callback_started_ns": self.callback_started_ns,
+            "callback_returned_ns": self.callback_returned_ns,
+            "owner_ws_send_started_ns": self.owner_ws_send_started_ns,
+            "owner_ws_send_returned_ns": self.owner_ws_send_returned_ns,
+        }
+
+
 @dataclass(frozen=True)
 class TrivialSendItem:
     """One already-signed venue frame for the long-lived sender."""
@@ -71,6 +93,7 @@ class TrivialSendItem:
     intent_id: Optional[str] = None
     dual_leg_id: Optional[str] = None
     signal_ts_ms: Optional[int] = None
+    timing: TrivialSendTiming = field(default_factory=TrivialSendTiming, compare=False)
 
 
 @dataclass
@@ -84,6 +107,7 @@ class TrivialSendResult:
     first_venue: str = "bybit"
     second_venue: str = "okx"
     items: list[TrivialSendItem] = field(default_factory=list)
+    timings: dict[str, dict[str, Optional[int]]] = field(default_factory=dict)
     error: Optional[str] = None
 
 
@@ -283,6 +307,10 @@ class TrivialDualSender:
         self._send_fn = send_fn
         self._loop = asyncio.new_event_loop()
         self._ready = threading.Event()
+        self._sender_ready = {
+            "bybit": threading.Event(),
+            "okx": threading.Event(),
+        }
         self._stop = threading.Event()
         self._sent_ns: dict[str, int] = {}
         self._sent_lock = threading.Lock()
@@ -294,6 +322,7 @@ class TrivialDualSender:
         )
         self._thread.start()
         if not self._ready.wait(timeout=5.0):
+            self.close()
             raise RuntimeError("trivial sender loop failed to start")
 
     def _run_loop(self) -> None:
@@ -302,25 +331,56 @@ class TrivialDualSender:
         self._okx_q = asyncio.Queue()
         self._loop.create_task(self._sender("bybit", self._bybit_q))
         self._loop.create_task(self._sender("okx", self._okx_q))
-        self._ready.set()
+        self._loop.create_task(self._mark_ready())
         self._loop.run_forever()
+
+    async def _mark_ready(self) -> None:
+        # The sender tasks run before this task. Wait until both are parked on
+        # their queues so startup readiness means the queues have consumers.
+        while not all(event.is_set() for event in self._sender_ready.values()):
+            await asyncio.sleep(0)
+        self._ready.set()
 
     async def _sender(
         self,
         venue: str,
         queue: asyncio.Queue[Optional[TrivialSendItem]],
     ) -> None:
+        self._sender_ready[venue].set()
         while True:
             item = await queue.get()
             if item is None:
                 return
+            item.timing.dequeued_ns = time.monotonic_ns()
             try:
                 if self._send_fn is not None:
-                    self._send_fn(item)
+                    item.timing.callback_started_ns = time.monotonic_ns()
+                    try:
+                        self._send_fn(item)
+                    finally:
+                        item.timing.callback_returned_ns = time.monotonic_ns()
                 with self._sent_lock:
                     self._sent_ns[f"{item.phase}:{item.venue}"] = time.monotonic_ns()
             except Exception as exc:  # noqa: BLE001 — never log payload/secrets
                 self._errors.append(f"{venue}:{type(exc).__name__}")
+
+    def is_ready(self) -> bool:
+        """Whether both sender tasks are live and have reached their queues."""
+        return bool(
+            self._ready.is_set()
+            and self._thread.is_alive()
+            and self._loop.is_running()
+            and self._bybit_q is not None
+            and self._okx_q is not None
+            and all(event.is_set() for event in self._sender_ready.values())
+        )
+
+    def queue_depths(self) -> dict[str, int]:
+        """Return current queue depths for startup readiness diagnostics."""
+        return {
+            "bybit": self._bybit_q.qsize() if self._bybit_q is not None else -1,
+            "okx": self._okx_q.qsize() if self._okx_q is not None else -1,
+        }
 
     def enqueue_dual(
         self,
@@ -373,8 +433,12 @@ class TrivialDualSender:
             signal_ts_ms=signal_ts_ms,
         )
         t1 = o_item.enqueued_ns
-        fut_b = asyncio.run_coroutine_threadsafe(self._bybit_q.put(b_item), self._loop)
-        fut_o = asyncio.run_coroutine_threadsafe(self._okx_q.put(o_item), self._loop)
+        fut_b = asyncio.run_coroutine_threadsafe(
+            self._put_and_stamp(self._bybit_q, b_item), self._loop
+        )
+        fut_o = asyncio.run_coroutine_threadsafe(
+            self._put_and_stamp(self._okx_q, o_item), self._loop
+        )
         fut_b.result(timeout=5.0)
         fut_o.result(timeout=5.0)
         first_sent = self._wait_sent(phase, "bybit", timeout_sec=5.0)
@@ -385,8 +449,16 @@ class TrivialDualSender:
             first_sent_ns=first_sent,
             second_sent_ns=second_sent,
             items=[b_item, o_item],
+            timings={item.venue: item.timing.as_dict() for item in (b_item, o_item)},
             error=self._errors[-1] if self._errors else None,
         )
+
+    @staticmethod
+    async def _put_and_stamp(
+        queue: asyncio.Queue[Optional[TrivialSendItem]], item: TrivialSendItem
+    ) -> None:
+        await queue.put(item)
+        item.timing.queue_enqueued_ns = time.monotonic_ns()
 
     def enqueue_one(
         self,
@@ -419,7 +491,7 @@ class TrivialDualSender:
             dual_leg_id=dual_leg_id,
             signal_ts_ms=signal_ts_ms,
         )
-        fut = asyncio.run_coroutine_threadsafe(queue.put(item), self._loop)
+        fut = asyncio.run_coroutine_threadsafe(self._put_and_stamp(queue, item), self._loop)
         fut.result(timeout=5.0)
         sent = self._wait_sent(phase, key, timeout_sec=5.0)
         return TrivialSendResult(
@@ -430,6 +502,7 @@ class TrivialDualSender:
             first_venue=key,
             second_venue=key,
             items=[item],
+            timings={key: item.timing.as_dict()},
             error=self._errors[-1] if self._errors else None,
         )
 
@@ -511,7 +584,16 @@ def warm_trade_send_fn(session: Any) -> SendFn:
 
     def _send(item: TrivialSendItem) -> None:
         try:
-            connector.send_trade(item.venue, item.text)
+            connector.send_trade_timed(
+                item.venue,
+                item.text,
+                on_send_start=lambda stamp: setattr(
+                    item.timing, "owner_ws_send_started_ns", stamp
+                ),
+                on_send_return=lambda stamp: setattr(
+                    item.timing, "owner_ws_send_returned_ns", stamp
+                ),
+            )
         except RuntimeError as exc:
             raise TrivialSendError(str(exc) or "trade socket missing") from exc
 
