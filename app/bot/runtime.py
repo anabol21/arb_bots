@@ -1143,6 +1143,8 @@ class BotRuntime:
             raise RuntimeError("canary_resume_trade_journal_abort_evidence")
         private_journal = source_root / "private" / "journal"
         if private_journal.exists():
+            from app.bot.private.journal_v1 import validate_event_shape
+
             for path in sorted(private_journal.glob("event_date=*/events.jsonl")):
                 if path.is_symlink():
                     raise RuntimeError("canary_resume_private_journal_symlink")
@@ -1150,10 +1152,41 @@ class BotRuntime:
                     if not line:
                         continue
                     event = json.loads(line)
-                    if str(event.get("event_type") or "") in {
-                        "reject", "dual_leg_abort", "reconciliation", "cancel_requested",
-                    }:
+                    try:
+                        validate_event_shape(event, require_opaque_ids=False)
+                    except Exception as exc:
+                        raise RuntimeError("canary_resume_private_journal_invalid") from exc
+                    event_type = str(event.get("event_type") or "")
+                    if event_type in {"reject", "dual_leg_abort", "cancel_requested"}:
                         raise RuntimeError("canary_resume_private_journal_abort_evidence")
+                    if event_type != "reconciliation":
+                        continue
+                    if event.get("reconciliation_scope") != "private_stream_reseed":
+                        raise RuntimeError("canary_resume_private_journal_ambiguous_reconciliation")
+                    if any(event.get(key) for key in (
+                        "dual_leg_id", "leg_id", "order_attempt_id", "intent_id",
+                        "client_order_id", "exchange_order_id", "order_id", "orderId",
+                    )):
+                        raise RuntimeError("canary_resume_private_journal_order_reconciliation")
+                    stream_state = (
+                        event.get("observation_source"),
+                        event.get("outcome"),
+                        event.get("reconciliation_state"),
+                        event.get("sequence_state"),
+                        event.get("subscription_readiness"),
+                        event.get("transport"),
+                    )
+                    allowed_gap = stream_state == (
+                        "private_ws", "observed", "inconclusive", "reseed_required",
+                        "not_ready", None,
+                    ) or stream_state == (
+                        "private_ws", "observed", "inconclusive", "gap", "not_ready", None,
+                    )
+                    allowed_reseed = stream_state == (
+                        "rest_reconcile", "success", "matched", "healthy", "ready", "rest",
+                    )
+                    if not (allowed_gap or allowed_reseed):
+                        raise RuntimeError("canary_resume_private_stream_state_unknown")
         candidate_rows = [row for row in rows if str(row.get("intent_id") or "") == intent_id]
         terminal = [row for row in candidate_rows if row.get("status") in {"pending", "open", "closed"}]
         if not terminal or terminal[-1].get("status") != "open" or terminal[-1].get("event") != "open":
@@ -1230,6 +1263,9 @@ class BotRuntime:
             or snapshot["okx_orders"]
         ):
             raise RuntimeError("canary_resume_exchange_position_mismatch")
+        session = self._private_warm
+        if session is None or not session.is_ready():
+            raise RuntimeError("canary_resume_new_private_session_not_ready")
         self.theta_trade.slot.position = OpenPosition(**position)
         self.theta_trade.slot.pending = False
         self.log.info("canary29_resume_verified | intent=%s | coin=%s | side=%s", intent_id, coin, side)

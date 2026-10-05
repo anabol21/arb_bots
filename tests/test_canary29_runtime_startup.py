@@ -177,6 +177,31 @@ class Gear22LongCanaryContractTests(unittest.TestCase):
             }) + "\n",
             encoding="utf-8",
         )
+        private_events = source / "private" / "journal" / "event_date=2026-10-05" / "events.jsonl"
+        private_events.parent.mkdir(parents=True)
+        private_events.write_text(
+            json.dumps({
+                "schema_version": "bbot.private.journal.v1",
+                "event_id": "event-1",
+                "event_type": "reconciliation",
+                "event_date": "2026-10-05",
+                "event_ts_utc": "2026-10-05T17:31:44.936Z",
+                "event_monotonic_ns": 1,
+                "run_id": "run-1",
+                "operation_id": "stream-operation-1",
+                "event_seq": 1,
+                "venue": "okx",
+                "environment": "live",
+                "outcome": "observed",
+                "reconciliation_scope": "private_stream_reseed",
+                "reconciliation_state": "inconclusive",
+                "observation_source": "private_ws",
+                "reconnect_generation": 4,
+                "sequence_state": "reseed_required",
+                "subscription_readiness": "not_ready",
+            }) + "\n",
+            encoding="utf-8",
+        )
         snapshot = {
             "bybit_positions": [{"symbol": "RVNUSDT", "side": "Sell", "size": "3740", "positionIdx": 0}],
             "okx_positions": [{"instId": "RVN-USDT-SWAP", "posSide": "net", "pos": "374"}],
@@ -211,6 +236,7 @@ class Gear22LongCanaryContractTests(unittest.TestCase):
         )
         runtime._okx_ct_vals = {"RVN-USDT-SWAP": Decimal("10")}
         runtime._canary29_read_startup_snapshot = lambda: snapshot
+        runtime._private_warm = SimpleNamespace(is_ready=lambda: True)
         runtime.log = Mock()
         return runtime, position.__dict__, snapshot
 
@@ -220,7 +246,10 @@ class Gear22LongCanaryContractTests(unittest.TestCase):
             runtime._canary29_resume_position()
             self.assertEqual(runtime.theta_trade.slot.position.trade_id, "intent-1")
 
-        for mutation in ("qty", "side", "order", "pending", "api_error", "abort"):
+        for mutation in (
+            "qty", "side", "order", "pending", "api_error", "abort",
+            "stream_not_ready", "stream_order_ambiguity", "non_stream_reconciliation",
+        ):
             with self.subTest(mutation=mutation), tempfile.TemporaryDirectory() as tmp:
                 runtime, _position, snapshot = self._resume_fixture(Path(tmp))
                 source = Path(runtime._canary29_resume_manifest["source_data_root"])
@@ -238,8 +267,36 @@ class Gear22LongCanaryContractTests(unittest.TestCase):
                     snapshot["okx_positions"][0]["pos"] = "not-a-number"
                 elif mutation == "abort":
                     private = source / "private" / "journal" / "event_date=2026-10-05" / "events.jsonl"
-                    private.parent.mkdir(parents=True)
-                    private.write_text(json.dumps({"event_type": "dual_leg_abort"}) + "\n")
+                    event = {
+                        "schema_version": "bbot.private.journal.v1",
+                        "event_id": "event-abort",
+                        "event_type": "dual_leg_abort",
+                        "event_date": "2026-10-05",
+                        "event_ts_utc": "2026-10-05T17:31:45Z",
+                        "event_monotonic_ns": 2,
+                        "run_id": "run-1",
+                        "operation_id": "operation-1",
+                        "event_seq": 2,
+                        "venue": "okx",
+                        "environment": "live",
+                        "outcome": "observed",
+                        "dual_leg_id": "dual-1",
+                        "leg_id": "leg-1",
+                        "peer_leg_id": "leg-2",
+                        "abort_reason": "test",
+                        "request_fingerprint": "fp",
+                    }
+                    private.write_text(json.dumps(event) + "\n")
+                elif mutation == "stream_not_ready":
+                    runtime._private_warm = SimpleNamespace(is_ready=lambda: False)
+                elif mutation in {"stream_order_ambiguity", "non_stream_reconciliation"}:
+                    private = source / "private" / "journal" / "event_date=2026-10-05" / "events.jsonl"
+                    event = json.loads(private.read_text().splitlines()[0])
+                    if mutation == "stream_order_ambiguity":
+                        event["dual_leg_id"] = "dual-1"
+                    else:
+                        event["reconciliation_scope"] = "post_dispatch_ambiguity"
+                    private.write_text(json.dumps(event) + "\n")
                 with self.assertRaises(Exception):
                     runtime._canary29_resume_position()
                 self.assertIsNone(runtime.theta_trade.slot.position)
