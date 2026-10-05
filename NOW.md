@@ -1,6 +1,6 @@
 # NOW
 
-Снимок на 2026-10-04 ~09:42 МСК. Каждая секция — зона своего агента, чужие секции не переписывать.
+Снимок на 2026-10-05 ~09:42 МСК. Каждая секция — зона своего агента, чужие секции не переписывать.
 
 Вектор развития: [roadmap.md](roadmap.md). Этот файл — снимок, не план.
 
@@ -19,12 +19,13 @@
 
 Сервер, утренний снимок, скрипты юнитов. Живые ордера и would_send не веду. Архитектура: `docs/`.
 
-- Вектор: держать D зелёным (collector/compact/backup); параллельно крутятся would_send-prod (стратег) и HL v2 (Старшой). Contour B live canary inactive — не заброс B. 2.5/3 / полный пул / bars on / live без команды — не трогаем.
+- Вектор: держать D зелёным (collector/compact/backup) как базу под would_send canary и 2.2 из [roadmap.md](roadmap.md); параллельно крутятся would_send-prod (стратег) и HL v2 (Старшой). Contour B live canary inactive — не заброс B. 2.5/3 / полный пул / bars on / live без команды — не трогаем.
 - Юнит `spread-collector-next`, код `/root/spread_staging`, данные `/data/live`.
-- SHA нет: `/root/spread_staging` не git-checkout, крутится задеплоенное дерево.
-- Статус 04.10 ~09:42 МСК: active с 22.09 14:07 МСК, NRestarts=0, MemoryCurrent ~1.5G (MemoryMax infinity), pairs=198, collect_bars=false, failures=0, unrecovered=0. Топ-10 volatile (OKX–Bybit, rolling 24ч) отработал 04.10 09:10–09:15 МСК. Таймеры compact/backup/discovery/ops-metrics/top10 active.
-- Соседи на хосте (не веду): `spread-bbot-would-send-prod` active с 02.10 14:38 МСК, MemoryMax 2G / ~229M, CPUQuota 100%, SHA `a12d593`, пул 42, position=None после close SAND; `spread-collector-hl-v2` active с 03.10 14:11 МСК, MemoryMax 6G / ~831M, CPUQuota 200%, heartbeat bybit/okx/hl 198/198/88. `spread-bbot-gear22-live-canary` и `theta-k1` inactive.
-- Лимиты collector: skew/age 2000 мс, HOT_ADD max_extra=8, bars off. Диск 32/79G, свободно ~45G (`/data/live` 1.7G, `live_hl_v2` ~0.6G, `bbot-would-send-prod` 6.3G, `compacted` 3.6G).
+- SHA нет: `/root/spread_staging` не git-checkout, крутится задеплоенное дерево (последний деплой — cutover 22.09).
+- Статус 05.10 ~09:42 МСК: active с 22.09 14:07 МСК, NRestarts=0, MemoryCurrent ~1.8G (MemoryMax infinity), pairs=198, ws_subscribe_ok=6878, collect_bars=false, failures=0, unrecovered=0, свежих файлов в `/data/live` за 5 мин ~790. Топ-10 volatile (OKX–Bybit, rolling 24ч) отработал 05.10 09:10–09:15 МСК (198 монет, слоты 287/289). θ-compact 03:15 МСК: 0 дней, 76 skip, 0 ошибок. Таймеры compact/backup/discovery/ops-metrics/top10 active.
+- Деплои за сутки (по юнитам на хосте): would_send-prod перекатан 04.10 14:31 МСК на `3f9a1df` (#71, = код-tip main, дальше в main только docs); HL v2 рестарт 04.10 16:43 МСК после host-патчей `runtime.py`/`listeners_hl.py`/`staff.py` (dirty поверх `4a76890`). collector-next не трогали.
+- Соседи на хосте (не веду): `spread-bbot-would-send-prod` active с 04.10 14:31 МСК, MemoryMax 2G / ~0.2G, SHA `3f9a1df`; `spread-collector-hl-v2` active с 04.10 16:43 МСК, MemoryMax 6G / ~1.0G, heartbeat bybit/okx/hl 198/198/88, dropped=0, reconn=0. `spread-bbot-gear22-live-canary` и `theta-k1` inactive/disabled.
+- Лимиты collector: skew/age 2000 мс, HOT_ADD max_extra=8, bars off. Диск 35/79G, свободно ~41G (`/data/live` 1.9G, `live_hl_v2` ~0.65G, `bbot-would-send-prod` 9.5G, `compacted` 3.8G). Ops 24ч: CPU avg 15% / peak 51%, egress 10.7 GiB / peak 13.5 Mbit/s.
 - Слежу я (голова), утренний дайджест ~9:32 МСК. @бот — Contour B (молчит), @стратег — would_send, @Старшой — HL. Sentry ops отдельно, не эта секция.
 - Не поднимать старый collector. Чужие data root не чищу без явного OK. Утренний ops-снимок NOW.md коммичу сразу в main. Прочий патч в NOW.md и на сервер — только после явного «да».
 
