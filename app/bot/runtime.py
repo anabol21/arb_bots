@@ -84,6 +84,39 @@ def _assert_okx_account_snapshot(response: Any) -> None:
         raise RuntimeError("okx_startup_snapshot_malformed")
 
 
+def _canary29_okx_metadata(
+    rows: list[dict[str, Any]], symbols: set[str]
+) -> tuple[dict[str, Any], dict[str, int]]:
+    from app.bot.private.order_metadata import parse_decimal, parse_inst_id_code
+
+    ct_vals: dict[str, Any] = {}
+    inst_codes: dict[str, int] = {}
+    for row in rows:
+        symbol = str(row.get("instId") or "")
+        if symbol not in symbols:
+            continue
+        if (
+            str(row.get("instType") or "") != "SWAP"
+            or str(row.get("settleCcy") or "").upper() != "USDT"
+        ):
+            continue
+        try:
+            ct_val = parse_decimal(row.get("ctVal"), field="ct_val")
+        except (TypeError, ValueError):
+            continue
+        inst_code = parse_inst_id_code(row.get("instIdCode"))
+        if ct_val <= 0 or inst_code is None:
+            continue
+        ct_vals[symbol] = ct_val
+        inst_codes[symbol] = inst_code
+    missing = symbols.difference(ct_vals).union(symbols.difference(inst_codes))
+    if missing:
+        raise RuntimeError(
+            "okx_canary_metadata_incomplete:" + ",".join(sorted(missing))
+        )
+    return ct_vals, inst_codes
+
+
 # Floor warm pickle periodic save interval (seconds)
 FLOOR_WARM_SAVE_INTERVAL_SEC = 600  # 10 minutes
 
@@ -390,6 +423,7 @@ class BotRuntime:
             c: (None, None) for c in self.coins
         }
         self._private_warm: Any = None
+        self._private_stop_event: asyncio.Event | None = None
         self._synthetic_sender: Any = None
         self._synthetic_sender_session: Any = None
         self._synthetic_live_send_enabled = False
@@ -798,6 +832,8 @@ class BotRuntime:
 
     def _stop_synthetic_private_send(self) -> None:
         """Close the profile sender before stopping the shared warm session."""
+        if self._private_stop_event is not None:
+            self._private_stop_event.set()
         sender = getattr(self, "_synthetic_sender", None)
         self._synthetic_sender = None
         self._synthetic_sender_session = None
@@ -811,6 +847,17 @@ class BotRuntime:
                 clear_process_warm_session(stop=True)
             finally:
                 self._private_warm = None
+
+    def _prefetch_okx_canary_metadata(self) -> None:
+        """Populate both OKX send caches from one validated instruments snapshot."""
+        from app.discovery.intersection import fetch_okx_swap_instruments
+
+        symbols = {self._meta(coin).okx_symbol for coin in self.coins}
+        rows = fetch_okx_swap_instruments()
+        ct_vals, inst_codes = _canary29_okx_metadata(rows, symbols)
+        self._okx_ct_vals = ct_vals
+        self._okx_inst_id_codes = inst_codes
+        self.log.info("okx_canary_metadata_prefetched | n=%s", len(symbols))
 
     async def _await_terminal_place_before_shutdown(self) -> bool:
         if not self._terminal_private_execution or self.theta_trade is None:
@@ -1978,8 +2025,12 @@ class BotRuntime:
 
         # Private WS and synthetic send path must be ready before signal tasks.
         try:
+            private_stop_event = self.stop_event
+            if self._terminal_private_execution:
+                self._private_stop_event = asyncio.Event()
+                private_stop_event = self._private_stop_event
             self._private_warm = self.start_private_warm_if_live_send(
-                stop_event=self.stop_event,
+                stop_event=private_stop_event,
                 coins=self.coins,
             )
             if self._private_warm is not None:
@@ -1990,38 +2041,40 @@ class BotRuntime:
                     self._private_warm._handshake_count,  # noqa: SLF001
                     self._private_warm.keepalive_running,
                 )
-                if self.profile == "synthetic_roll" or self._terminal_private_execution:
+                if self.profile == "synthetic_roll":
                     self._prefetch_okx_ct_vals()
                     self._prefetch_okx_inst_id_codes()
-                    if self._terminal_private_execution:
-                        await asyncio.to_thread(self._canary29_assert_startup_flat)
-                        if (
-                            self.theta_trade is not None
-                            and self.theta_trade.slot.slot_busy()
-                        ):
-                            raise RuntimeError("journal_position_not_flat")
-                        confirmed = frozenset(
-                            coin.strip().upper()
-                            for coin in os.environ.get("BBOT_CONFIRMED_1X_COINS", "").split(",")
-                            if coin.strip()
-                        )
-                        unknown = confirmed.difference(self.coins)
-                        if unknown:
-                            raise RuntimeError("BBOT_CONFIRMED_1X_COINS contains coins outside active universe")
-                        missing = set(self.coins).difference(confirmed)
-                        if missing:
-                            raise RuntimeError("terminal_private requires prep-verified 1x leverage for every coin")
-                        self._leverage_one = {
-                            key: "1"
-                            for coin in self.coins
-                            for meta in (self._meta(coin),)
-                            for key in (("okx", meta.okx_symbol), ("bybit", meta.bybit_symbol))
-                        }
-                    else:
-                        self._set_leverage_one()
+                    self._set_leverage_one()
+                if self._terminal_private_execution:
+                    self._prefetch_okx_canary_metadata()
+                    await asyncio.to_thread(self._canary29_assert_startup_flat)
+                    if (
+                        self.theta_trade is not None
+                        and self.theta_trade.slot.slot_busy()
+                    ):
+                        raise RuntimeError("journal_position_not_flat")
+                    confirmed = frozenset(
+                        coin.strip().upper()
+                        for coin in os.environ.get("BBOT_CONFIRMED_1X_COINS", "").split(",")
+                        if coin.strip()
+                    )
+                    unknown = confirmed.difference(self.coins)
+                    if unknown:
+                        raise RuntimeError("BBOT_CONFIRMED_1X_COINS contains coins outside active universe")
+                    missing = set(self.coins).difference(confirmed)
+                    if missing:
+                        raise RuntimeError("terminal_private requires prep-verified 1x leverage for every coin")
+                    self._leverage_one = {
+                        key: "1"
+                        for coin in self.coins
+                        for meta in (self._meta(coin),)
+                        for key in (("okx", meta.okx_symbol), ("bybit", meta.bybit_symbol))
+                    }
             else:
                 self.log.info("private_warm_skipped | live_private_send=false")
-                if self.profile == "synthetic_roll" or self._terminal_private_execution:
+                if self._terminal_private_execution:
+                    raise RuntimeError("terminal_private requires a warmed private session")
+                if self.profile == "synthetic_roll":
                     self._prefetch_okx_ct_vals()
 
             if self._synthetic_live_send_enabled:
