@@ -8,13 +8,14 @@
 
 ## Контекст и идентичность
 
-- Runroot: `/root/b-private-b-exp/response-manager/20261005T140836Z-gear22-canary/`.
-- Запуск: standalone background `/root/venv/bin/python -m app.bot`; PID `2153180` был PID при старте, это историческая подсказка, не доказательство текущей идентичности процесса. Не утверждай, что процесс сейчас жив, пока не сверил текущий процесс с runroot/cmdline.
+- Предыдущий runroot: `/root/b-private-b-exp/response-manager/20261005T140836Z-gear22-canary/`.
+- Новая long-run сессия должна использовать новый изолированный runroot и писать `canary_state.json`; владелец обновляет здесь точный runroot и PID перед включением монитора. Ожидаемые настройки новой сессии: `BBOT_CANARY_MAX_CYCLES=0` (без лимита циклов), `BBOT_CANARY_OPEN_WINDOW_HOURS=72` от исходного старта. PID `2153180` относится к предыдущему процессу и не подтверждает текущую идентичность.
+- Запуск: standalone background `/root/venv/bin/python -m app.bot`; PID считать текущим только после сверки с новым runroot/cmdline.
 - Код запуска: commit `35b0045643173b2d630cefcfc7cb6fcddacfdd46`. Актуальный run report и его UTC observation time — источник текущего состояния; не фиксируй устаревший docs commit как состояние процесса.
 - Режим: общий `BotRuntime`, `gear22_live_canary`, `BBOT_MODE=policy`, `BBOT_THETA_POLICY=gear22`, `terminal_private`, private live Bybit + OKX, K=1.
 - Frozen Gear 2.2 параметры, `policy_id=gear22_frozen_v1`: `theta_open=0.50`, `p50_open=0.60`, `min_profit_pp=0.20`, `fee_round_trip_pp=0.30`, `min_theta_close=0.05`. Размер цели $10 на ногу, разрешённый runtime диапазон $7–$15; leverage 1x на всём упорядоченном пуле:
   `KAITO, HOME, WAL, RVN, ONT, 2Z, BICO, HMSTR, CAP, BLEND, EDEN, KMNO, GPS, ME, ZBT, MOVE, COAI, AZTEC, APR, YB, AT, H, MUBARAK, ACU, LA, BEAT, PARTI, SIGN, GIGGLE`.
-- Встроенный лимит: остановиться после 10 подтверждённых циклов `open → terminal close → REST-flat`. Закрытие только естественное по Gear 2.2 policy. Нет максимального hold-time, принудительного close, retry, recovery, auto-flatten или restart.
+- Историческая сессия выше имела cap 10. Для новой long-run сессии cycle cap отключён (`0`); 72-часовое окно ограничивает только новые opens. Уже открытая позиция продолжает естественный Gear 2.2 close. Нет максимального hold-time, принудительного close, retry, recovery, auto-flatten или restart.
 - Эталонные отчёты: `docs/gear22-live-canary-run-2026-10-05.md` и `docs/private-response-handler-handoff-2026-10-05.md` в source checkout. При расхождении кода и этой записки сообщи о несовпадении; не меняй run.
 - `bbot_start` подтверждает `mode/profile`, но не обязательно эффективную policy. Не выводи `BBOT_THETA_POLICY` из названия профиля или heartbeat; policy identity подтверждай только из известного launch/source evidence. Если доказательства нет — UNKNOWN.
 
@@ -50,7 +51,7 @@
 
 1. Подтверди run identity по runroot/cmdline/логам без вывода окружения; проверь PID existence, свежесть heartbeat и единый ли процесс пишет этот runroot. `bbot_start` даёт mode/profile; policy сверяй отдельно только с известным source/launch evidence, иначе UNKNOWN.
 2. Сверь самый новый heartbeat: `accepted`, дельты `sup_stale` и `sup_gen`, `pending`, `position`. В этом terminal-mode heartbeat `pending` и `position` выбраны из `theta_trade.slot`; это локальное manager state, не биржевой account proof.
-3. Посчитай distinct новые `intent_id` и lifecycle open/close/skip за интервал. Считай цикл завершённым только по возрастающему `canary29_cycle_flat | completed=N | coin=...`; максимум 10. Наличие `event=open`, ACK или одного terminal leg не завершает цикл. Процесс, завершившийся после `completed=10`, ожидаемо остановлен только если журнал показывает все десять close и flat markers.
+3. Посчитай distinct новые `intent_id` и lifecycle open/close/skip за интервал. Для новой long-run конфигурации учитывай unlimited cycles (`max_cycles=0`); цикл завершён только по возрастающему `canary29_cycle_flat | completed=N | coin=...`. Наличие `event=open`, ACK или одного terminal leg не завершает цикл. Историческую Canary29 с cap10 не смешивай с новой сессией.
 4. Для каждого open/close сверь обе площадки отдельно: matching request/ACK/terminal, корректный финальный статус и фактическое положительное количество. Сравни requested vs accumulated terminal qty в единицах каждой конкретной ноги (OKX contracts, Bybit base units); цену проверяй на конечность/положительность и согласованность только у matching order на той же бирже. Цены Bybit и OKX не обязаны совпадать. ACK означает принятие запроса, не fill; пока штатное terminal-wait окно открыто, это нормальное ожидание. Не объединяй похожие timestamps или соседние IDs.
 5. Направления ног должны соответствовать позиции: open long = OKX buy + Bybit sell; open short = OKX sell + Bybit buy. Close — обратные стороны тех же удерживаемых ног, по точным сохранённым open quantities и `reduce_only=true`. Для OKX проверь contract units × соответствующий `ctVal`, для Bybit — base units. Не применяй open notional $10 как close qty.
 6. Отличай `event=skip`, `reject_reason=insufficient_size`, `size_event=open|close` и отсутствие send-attempt от ошибок после send. Close-side depth reject значит позиция остаётся открытой и ждёт будущего обычного policy tick; это не ордер и не основание форсировать закрытие. Сверь OKX contracts/ctVal и Bybit units, если данные присутствуют.
@@ -84,9 +85,11 @@
 
 ```text
 Gear22 canary | YYYY-MM-DD HH:MM UTC | interval HH:MM–HH:MM UTC
-Run identity: runroot, source commit, process alive/dead/unknown; PID только после сверки
+Run identity: актуальный runroot, source commit, process alive/dead/unknown; PID только после сверки
 Local state: open position (coin/side/actual venue qty), pending intent, halt, heartbeat age; exchange-flat proof: yes/no/unknown + evidence
-Cycles: completed N/10 по canary29_cycle_flat; open/close/skip и новые intent counts за час
+Cycles: completed N (unlimited cap=0) по canary29_cycle_flat; open/close/skip и новые intent counts за час
+Open window: start, UTC deadline, remaining/expired; после deadline нет новых opens, существующая позиция закрывается только policy
+Checkpoint: `canary_state.json` update time, policy_selector, execution, pending, position, halt, last policy evaluated_at_ms
 Fills: per venue terminal qty/avgPx match; unknowns and missing sources
 Gates/feed: freshness, reconnect generations, vector/watcher coverage, open-vs-close pre-send rejects
 Timing: queue / owner-send / venue fill отдельно, per venue n + min/median/p95/max; clock caveat

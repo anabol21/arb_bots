@@ -959,6 +959,8 @@ class ThetaTradeManager:
         decide_fn: Optional[Callable[..., Any]] = None,
         execution_mode: str = "inline",
         pre_send_guard_fn: Optional[Callable[..., Optional[str]]] = None,
+        entry_allowed_fn: Optional[Callable[[], bool]] = None,
+        state_change_fn: Optional[Callable[[], None]] = None,
     ) -> None:
         self.data_root = Path(data_root)
         self.config = config or ThetaTradeConfig.from_env()
@@ -970,6 +972,9 @@ class ThetaTradeManager:
         self._place_fn = place_fn
         self._meta_fn = meta_fn
         self._pre_send_guard_fn = pre_send_guard_fn
+        self._entry_allowed_fn = entry_allowed_fn
+        self._state_change_fn = state_change_fn
+        self.last_policy_status: dict[str, Any] = {}
         self.execution_mode = str(execution_mode).strip().lower()
         if self.execution_mode not in {"inline", "terminal_private"}:
             raise ValueError("execution_mode must be inline|terminal_private")
@@ -1744,10 +1749,24 @@ class ThetaTradeManager:
                 )
             except Exception as exc:  # malformed/stale pre-send data means no send
                 self.slot.pending = False
+                self.last_policy_status = {
+                    **self.last_policy_status,
+                    "action": "skip",
+                    "reason": "pre_send_guard_error",
+                    "reject_reason": type(exc).__name__,
+                    "size_event": decision.action,
+                }
                 self._log(f"theta_trade_pre_send_reject | reason={type(exc).__name__} | coin={coin}")
                 return []
             if reason:
                 self.slot.pending = False
+                self.last_policy_status = {
+                    **self.last_policy_status,
+                    "action": "skip",
+                    "reason": "pre_send_guard_reject",
+                    "reject_reason": str(reason),
+                    "size_event": decision.action,
+                }
                 self._log(f"theta_trade_pre_send_reject | reason={reason} | coin={coin}")
                 return []
 
@@ -1870,11 +1889,57 @@ class ThetaTradeManager:
                 self.execution_halt_reason = f"execution_exception:{type(exc).__name__}"
                 self._log(f"theta_trade_execution_halted | reason={self.execution_halt_reason}")
             finally:
+                if self._state_change_fn is not None:
+                    try:
+                        self._state_change_fn()
+                    except Exception as exc:
+                        self.slot.pending = True
+                        self.execution_halt_reason = (
+                            f"state_checkpoint_failed:{type(exc).__name__}"
+                        )
+                        self._log(
+                            "theta_trade_execution_halted | "
+                            f"reason={self.execution_halt_reason}"
+                        )
                 if self._terminal_place_task is asyncio.current_task():
                     self._terminal_place_task = None
 
         self._terminal_place_task = asyncio.create_task(run(), name="theta-private-place")
         return []
+
+    def _record_policy_status(
+        self, decision: ThetaDecision, *, evaluated_at_ms: int
+    ) -> ThetaDecision:
+        if (
+            self.execution_mode == "terminal_private"
+            and decision.action == "open"
+            and self._entry_allowed_fn is not None
+            and not self._entry_allowed_fn()
+        ):
+            decision = ThetaDecision(
+                action="skip",
+                base_coin=decision.base_coin,
+                side=decision.side,
+                reason="canary_open_window_elapsed",
+                theta_1m=decision.theta_1m,
+                opposite_theta_1m=decision.opposite_theta_1m,
+                policy_decision=decision.policy_decision,
+            )
+        pd = decision.policy_decision
+        self.last_policy_status = {
+            "evaluated_at_ms": int(evaluated_at_ms),
+            "action": decision.action,
+            "base_coin": decision.base_coin,
+            "side": decision.side,
+            "reason": decision.reason,
+            "reject_reason": decision.reject_reason,
+            "size_event": decision.size_event,
+            "potential_pp": decision.potential_pp,
+            "theta_1m": decision.theta_1m,
+            "policy_action": getattr(pd, "action", None),
+            "policy_reason": getattr(pd, "reason", None),
+        }
+        return decision
 
     def on_theta_snapshots(
         self,
@@ -1892,6 +1957,7 @@ class ThetaTradeManager:
             coin_order=coin_order,
             ts_s=tick_ms // 1000,
         )
+        decision = self._record_policy_status(decision, evaluated_at_ms=tick_ms)
         return self.execute_decision(
             decision, snapshots=snapshots, quotes=quotes, now_ms=now_ms
         )
@@ -1914,6 +1980,7 @@ class ThetaTradeManager:
             coin_order=coin_order,
             ts_s=tick_ms // 1000,
         )
+        decision = self._record_policy_status(decision, evaluated_at_ms=tick_ms)
         signal_ts_ms = int(time.time() * 1000) if now_ms is None else int(now_ms)
         signal_mono_ns = time.monotonic_ns()
 
@@ -1950,6 +2017,8 @@ class ThetaTradeManager:
         if self.execution_mode == "terminal_private" and self.execution_halt_reason:
             return []
         if decision.action == "skip":
+            if decision.reason == "canary_open_window_elapsed":
+                return []
             return self.execute_decision(
                 decision, snapshots=snapshots, quotes=quotes, now_ms=now_ms
             )
@@ -1999,6 +2068,7 @@ class ThetaTradeManager:
                 policy_decision=decision.policy_decision,
                 size_event=decision.action,
             )
+            self._record_policy_status(decision, evaluated_at_ms=signal_ts)
             return self.execute_decision(
                 decision, snapshots=snapshots, quotes=quotes, now_ms=signal_ts
             )

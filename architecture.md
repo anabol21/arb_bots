@@ -283,6 +283,8 @@ Profile `synthetic_roll` keeps the gear 2.2 K=1 slot and size gate, and swaps in
 
 `synthetic_roll` live startup imports `place_send` and `send_legs` after the private session is ready, then creates and caches its dual sender before starting signal-facing tasks. Readiness means both sender coroutines have reached their queues; startup logs zero queue depth and sends no dummy frame. The sender is bound to that same warm session, and shutdown closes it before stopping the session. The initial six-action timing evidence and the startup patch are recorded in [synthetic-roll send readiness](docs/synthetic-roll-send-readiness-2026-10-04.md).
 
+The same `terminal_private` path also supports the frozen `gear22` policy for the long-running live canary; policy and execution selectors remain independent. `BBOT_CANARY_MAX_CYCLES` defaults to 10, and `0` disables the cycle cap. `BBOT_CANARY_OPEN_WINDOW_HOURS` blocks new opens after its monotonic deadline; an existing position must reach its normal Gear 2.2 close and a confirmed REST-flat boundary before the runtime stops. There is no timed close, retry, reconciliation order, or automatic flatten. The terminal manager checkpoints `canary_state.json` atomically under the run data root on lifecycle changes and the 30-second heartbeat; the checkpoint includes policy/execution identity, open position, pending/halt state, cycle count, deadline, and the timestamp of the last policy evaluation. A failed checkpoint halts and retains pending state. Startup is flat-only by default. Explicit `BBOT_CANARY_RESUME_MANIFEST` is a narrow operator handoff for a known completed open: the source PID must be stopped, its safe-parsed heartbeat and fsynced terminal-open row must agree, full journal replay must show no later close/pending/abort/overlap, and one fresh accountwide Bybit linear-USDT and OKX SWAP positions/orders snapshot must match exact quantities and show no other position or order. Any mismatch refuses startup; uncertain outcomes are never adopted. This is not automatic crash recovery. See the [long-run canary handoff](docs/private-response-handler-handoff-2026-10-05.md).
+
 ### D. Offline model (not a VPS process)
 
 `model.ipynb` / `research/gear22_backtest/`: read parquet; `policy.decide`; dummy 1 Hz replay; fill = `spread_last`, not `Trade_Lat`. Gear 2.2 observation is **closed**. Gear 2.5 blocked until unlock. Not live-ready.
@@ -325,6 +327,7 @@ Local lean only: `SPREAD_LEAN_PARQUET_ROOT`, `SPREAD_LEAN_BARS_ROOT`, `SPREAD_LE
 | `BBOT_THETA_TRADE`, `BBOT_THETA_LIVE_SEND` | gear22 trade / live arm |
 | `BBOT_THETA_EXECUTION`, `BBOT_THETA_POLICY` | opt-in `terminal_private` execution and `gear22` / `synthetic` policy; terminal mode requires `gear22_live_canary`, policy mode, live gates, and all watchers |
 | `BBOT_CONFIRMED_1X_COINS` | prep-verified active universe; terminal startup refuses a partial pool and performs no leverage setters |
+| `BBOT_CANARY_MAX_CYCLES`, `BBOT_CANARY_OPEN_WINDOW_HOURS`, `BBOT_CANARY_RESUME_MANIFEST` | terminal-only cycle cap (`0` unlimited), natural-close open window, explicit strict resume manifest |
 | `BBOT_THETA_OPEN`, `BBOT_P50_OPEN`, `BBOT_MIN_PROFIT_PP`, `BBOT_MIN_THETA_CLOSE`, `BBOT_FEE_RT_PP`, `BBOT_FILL_DELAY_MS`, `BBOT_SLOT_K`, `BBOT_THETA_THR` | frozen-knob overlays |
 | `BBOT_FLOOR_WATCH`, `BBOT_TW_P50_WATCH`, `BBOT_THETA_WATCH`, `BBOT_FLOOR_WARM`, `BBOT_FLOOR_BAR_SAMPLE_CAP` | observers |
 | `BBOT_CHRONOMETRY`, `BBOT_L1_RING` | live canary instrumentation |
@@ -386,6 +389,8 @@ Created by `resolve_data_root()`: `journal/`, `floor/`, `tw_p50/`, `theta/`, `th
 | `/data/bbot-theta-k1-canary` | claimed in docs for would_send canary; **unit not in this tree** — **TODO verify** |
 
 Also: `{root}/floor/event_date=*/metrics.jsonl` (`bbot.floor.v1`); `tw_p50/.../metrics.jsonl`; `theta/.../metrics.jsonl`; `theta_trades/.../trades.jsonl`; `theta_trades/.../step_chrono.jsonl` (`synthetic_roll` place steps only); `{root}/state/pending.json`, `state/floor_warm.pkl`.
+
+The terminal live canary also writes `{root}/canary_state.json` as an atomic local checkpoint. It is operational state, not an exchange account ledger or proof of remote/mounted durability; a fresh startup REST snapshot remains authoritative for positions and active orders.
 
 `synthetic_roll` step chronometry also appends a `block=send_timing` row after `ws_send` exits when the dual sender returns timing markers. It carries `intent_id`, `signal_ts_ms`, and `phase`, plus `send_timing_monotonic_ns` keyed by `bybit` and `okx`: `queue_enqueued_ns`, `dequeued_ns`, `callback_started_ns`, `callback_returned_ns`, `owner_ws_send_started_ns`, and `owner_ws_send_returned_ns`. These are absolute process monotonic nanoseconds, with unavailable markers stored as null. The row excludes frames, credentials, and order/request ids, and uses the existing local JSONL flush/fsync; it does not establish a remote durable copy.
 

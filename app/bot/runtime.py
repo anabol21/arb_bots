@@ -3,13 +3,19 @@
 from __future__ import annotations
 
 import asyncio
+import ast
+import json
 import importlib
 import logging
+import math
 import os
 import random
+import re
 import signal
 import sys
+import tempfile
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
@@ -82,6 +88,82 @@ def _assert_okx_account_snapshot(response: Any) -> None:
         raise RuntimeError("okx_startup_snapshot_rejected")
     if not isinstance(response.get("data"), list):
         raise RuntimeError("okx_startup_snapshot_malformed")
+
+
+def _nonnegative_int_env(name: str, default: int) -> int:
+    raw = (os.environ.get(name) or "").strip()
+    if not raw:
+        return default
+    try:
+        value = int(raw)
+    except ValueError as exc:
+        raise ValueError(f"{name} must be a non-negative integer") from exc
+    if value < 0:
+        raise ValueError(f"{name} must be a non-negative integer")
+    return value
+
+
+def _utc_ms(raw: str) -> int:
+    value = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    if value.tzinfo is None:
+        raise ValueError("canary timestamp must include timezone")
+    return int(value.timestamp() * 1000)
+
+
+def _read_canary_json(path: Path) -> dict[str, Any]:
+    if path.is_symlink() or not path.is_file():
+        raise RuntimeError("canary_manifest_missing_or_symlink")
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise RuntimeError("canary_manifest_invalid") from exc
+    if not isinstance(value, dict):
+        raise RuntimeError("canary_manifest_invalid")
+    return value
+
+
+def _canary29_source_stopped(pid: int) -> bool:
+    if pid <= 1:
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return True
+    except OSError:
+        return False
+    return False
+
+
+def _heartbeat_position(log_path: Path) -> tuple[bool, dict[str, Any]]:
+    for line in reversed(log_path.read_text(encoding="utf-8").splitlines()):
+        if " | heartbeat | " not in line:
+            continue
+        match = re.search(r" \| pending=(True|False) \| position=(.*?) \| probe_done=", line)
+        if match is None:
+            raise RuntimeError("canary_resume_heartbeat_malformed")
+        expression = ast.parse(match.group(2), mode="eval").body
+        if isinstance(expression, ast.Constant) and expression.value is None:
+            return match.group(1) == "True", {}
+        if not isinstance(expression, ast.Call) or not isinstance(expression.func, ast.Name):
+            raise RuntimeError("canary_resume_position_invalid")
+        if expression.func.id != "OpenPosition" or expression.args:
+            raise RuntimeError("canary_resume_position_invalid")
+        allowed = {
+            "trade_id", "base_coin", "side", "open_signal_ts_ms", "open_fill_ts_ms",
+            "open_fill_spread", "open_notional", "open_theta_1m", "fill_spread_pp",
+            "okx_filled_qty", "bybit_filled_qty", "coin_filled_qty",
+        }
+        values: dict[str, Any] = {}
+        for kw in expression.keywords:
+            if kw.arg not in allowed or kw.arg in values:
+                raise RuntimeError("canary_resume_position_invalid")
+            values[kw.arg] = ast.literal_eval(kw.value)
+        if not {"trade_id", "base_coin", "side", "open_signal_ts_ms", "open_fill_ts_ms",
+                "open_fill_spread", "open_notional", "fill_spread_pp", "okx_filled_qty",
+                "bybit_filled_qty"}.issubset(values):
+            raise RuntimeError("canary_resume_position_incomplete")
+        return match.group(1) == "True", values
+    raise RuntimeError("canary_resume_heartbeat_missing")
 
 
 def _canary29_okx_metadata(
@@ -470,6 +552,54 @@ class BotRuntime:
         self._synthetic_roll_halt_reason: Optional[str] = None
         self._canary29_completed_cycles = 0
         self._canary29_done = False
+        self._canary29_done_reason: Optional[str] = None
+        self._canary29_max_cycles = (
+            _nonnegative_int_env("BBOT_CANARY_MAX_CYCLES", 10)
+            if self._terminal_private_execution
+            else 10
+        )
+        window_raw = (
+            (os.environ.get("BBOT_CANARY_OPEN_WINDOW_HOURS") or "").strip()
+            if self._terminal_private_execution
+            else ""
+        )
+        self._canary29_open_window_hours: Optional[float] = None
+        if window_raw:
+            try:
+                hours = float(window_raw)
+            except ValueError as exc:
+                raise ValueError("BBOT_CANARY_OPEN_WINDOW_HOURS must be positive") from exc
+            if not math.isfinite(hours) or hours <= 0:
+                raise ValueError("BBOT_CANARY_OPEN_WINDOW_HOURS must be positive")
+            self._canary29_open_window_hours = hours
+        self._canary29_started_at_ms = int(time.time() * 1000)
+        self._canary29_deadline_ms: Optional[int] = (
+            self._canary29_started_at_ms + int(self._canary29_open_window_hours * 3_600_000)
+            if self._canary29_open_window_hours is not None
+            else None
+        )
+        resume_raw = (os.environ.get("BBOT_CANARY_RESUME_MANIFEST") or "").strip()
+        self._canary29_resume_manifest_path = Path(resume_raw) if resume_raw else None
+        self._canary29_resume_manifest: Optional[dict[str, Any]] = None
+        if self._terminal_private_execution and self._canary29_resume_manifest_path is not None:
+            self._canary29_resume_manifest = _read_canary_json(
+                self._canary29_resume_manifest_path
+            )
+            self._canary29_started_at_ms = _utc_ms(
+                str(self._canary29_resume_manifest["run_started_at_utc"])
+            )
+            deadline_raw = self._canary29_resume_manifest.get("open_window_deadline_utc")
+            self._canary29_deadline_ms = _utc_ms(str(deadline_raw)) if deadline_raw else None
+            self._canary29_completed_cycles = int(
+                self._canary29_resume_manifest.get("completed_cycles") or 0
+            )
+        self._canary29_deadline_mono: Optional[float] = (
+            time.monotonic()
+            + max(0.0, (self._canary29_deadline_ms - int(time.time() * 1000)) / 1000.0)
+            if self._canary29_deadline_ms is not None
+            else None
+        )
+        self._canary29_state_path = self.data_root / "canary_state.json"
         self._okx_inst_id_codes: dict[str, int] = {}
         self._okx_ct_vals: dict[str, Any] = {}
         # (venue, symbol) → "1" after warmup. Never stores a lever above 1.
@@ -524,6 +654,16 @@ class BotRuntime:
                     ),
                     pre_send_guard_fn=(
                         self._canary29_pre_send_guard
+                        if self._terminal_private_execution
+                        else None
+                    ),
+                    entry_allowed_fn=(
+                        self._canary29_entry_allowed
+                        if self._terminal_private_execution
+                        else None
+                    ),
+                    state_change_fn=(
+                        self._write_canary_state
                         if self._terminal_private_execution
                         else None
                     ),
@@ -724,7 +864,9 @@ class BotRuntime:
         last_error: Optional[Exception] = None
         while True:
             try:
-                self._canary29_check_coin_flat(coin, session, SignedRestFlatBaseline, assert_flat)
+                self._canary29_check_coin_flat(
+                    coin, session, SignedRestFlatBaseline, assert_flat
+                )
                 return
             except Exception as exc:
                 last_error = exc
@@ -733,6 +875,37 @@ class BotRuntime:
                 time_module.sleep(0.5)
         assert last_error is not None
         raise last_error
+
+    def _canary29_record_close_flat(self, result: Any, coin: str) -> None:
+        if (
+            not self._terminal_private_execution
+            or not getattr(result, "completed", False)
+        ):
+            return
+        try:
+            self._canary29_assert_flat(coin)
+            self._canary29_completed_cycles += 1
+            self.log.info(
+                "canary29_cycle_flat | completed=%s | coin=%s",
+                self._canary29_completed_cycles,
+                coin,
+            )
+            if (
+                self._canary29_max_cycles > 0
+                and self._canary29_completed_cycles >= self._canary29_max_cycles
+            ):
+                self._canary29_done = True
+                self._canary29_done_reason = "cycle_cap_reached_flat"
+            elif self._canary29_window_elapsed():
+                self._canary29_done = True
+                self._canary29_done_reason = "open_window_elapsed_flat"
+            if self._canary29_done:
+                self.log.info("canary29_stopped | reason=%s", self._canary29_done_reason)
+        except Exception as exc:
+            result.completed = False
+            result.keep_pending = True
+            result.abort = f"post_close_flat_check:{type(exc).__name__}"
+            self._synthetic_roll_halt_reason = result.abort
 
     def _canary29_check_coin_flat(
         self, coin: str, session: Any, baseline_type: Any, assert_flat_fn: Any
@@ -747,8 +920,7 @@ class BotRuntime:
             ).check(exchange=exchange, symbol=symbol)
             assert_flat_fn(result)
 
-    def _canary29_assert_startup_flat(self) -> None:
-        from decimal import Decimal
+    def _canary29_read_startup_snapshot(self) -> dict[str, list[dict[str, Any]]]:
         from urllib.parse import quote
 
         from app.bot.private.venue import endpoints_for_venue
@@ -765,9 +937,6 @@ class BotRuntime:
         if session is None:
             raise RuntimeError("private_session_missing")
         endpoints = endpoints_for_venue("live")
-        bybit_symbols = {self._meta(coin).bybit_symbol: coin for coin in self.coins}
-        okx_symbols = {self._meta(coin).okx_symbol: coin for coin in self.coins}
-
         def bybit_pages(path: str, query: str) -> list[dict[str, Any]]:
             pages: list[dict[str, Any]] = []
             cursor = ""
@@ -789,46 +958,369 @@ class BotRuntime:
                 seen.add(cursor)
             raise RuntimeError("bybit_pagination_limit")
 
+        def okx_pages(path: str, query: str, cursor_key: str) -> list[dict[str, Any]]:
+            pages: list[dict[str, Any]] = []
+            cursor = ""
+            seen: set[str] = set()
+            while len(pages) < 20:
+                suffix = f"&after={quote(cursor, safe='')}" if cursor else ""
+                page = _okx_signed_get(
+                    credentials=session.okx_credentials,
+                    base=endpoints.okx_rest,
+                    path_with_query=f"{path}?{query}{suffix}",
+                )
+                _assert_okx_account_snapshot(page)
+                rows = page["data"]
+                pages.append(dict(page))
+                if len(rows) < 100:
+                    return pages
+                cursor = str(rows[-1].get(cursor_key) or "")
+                if not cursor or cursor in seen:
+                    raise RuntimeError("okx_cursor_missing_or_repeated")
+                seen.add(cursor)
+            raise RuntimeError("okx_pagination_limit")
+
         positions = bybit_pages(
             _BYBIT_POS, "category=linear&settleCoin=USDT&limit=200"
         )
         orders = bybit_pages(
             _BYBIT_OPEN, "category=linear&settleCoin=USDT&openOnly=0&limit=50"
         )
+        bybit_position_rows: list[dict[str, Any]] = []
+        bybit_order_rows: list[dict[str, Any]] = []
         for page in positions:
             _assert_bybit_account_snapshot(page)
-            for row in ((page.get("result") or {}).get("list") or []):
-                symbol = str(row.get("symbol") or "")
-                if symbol in bybit_symbols and Decimal(str(row.get("size") or "0")) != 0:
-                    raise RuntimeError(f"position_not_flat:bybit:{bybit_symbols[symbol]}")
+            bybit_position_rows.extend(dict(r) for r in page["result"]["list"])
         for page in orders:
             _assert_bybit_account_snapshot(page)
-            for row in ((page.get("result") or {}).get("list") or []):
-                symbol = str(row.get("symbol") or "")
-                if symbol in bybit_symbols:
-                    raise RuntimeError(f"open_orders_not_flat:bybit:{bybit_symbols[symbol]}")
+            bybit_order_rows.extend(dict(r) for r in page["result"]["list"])
 
         okx_positions = _okx_signed_get(
             credentials=session.okx_credentials,
             base=endpoints.okx_rest,
             path_with_query=f"{_OKX_POS}?instType=SWAP",
         )
-        okx_orders = _okx_signed_get(
-            credentials=session.okx_credentials,
-            base=endpoints.okx_rest,
-            path_with_query=f"{_OKX_OPEN}?instType=SWAP",
-        )
         _assert_okx_account_snapshot(okx_positions)
-        _assert_okx_account_snapshot(okx_orders)
-        for row in okx_positions.get("data") or []:
+        okx_order_pages = okx_pages(_OKX_OPEN, "instType=SWAP&limit=100", "ordId")
+        return {
+            "bybit_positions": bybit_position_rows,
+            "bybit_orders": bybit_order_rows,
+            "okx_positions": [dict(r) for r in okx_positions["data"]],
+            "okx_orders": [dict(r) for page in okx_order_pages for r in page["data"]],
+        }
+
+    def _canary29_assert_startup_flat(self) -> None:
+        from decimal import Decimal
+
+        bybit_symbols = {self._meta(coin).bybit_symbol: coin for coin in self.coins}
+        okx_symbols = {self._meta(coin).okx_symbol: coin for coin in self.coins}
+        snapshot = self._canary29_read_startup_snapshot()
+        for row in snapshot["bybit_positions"]:
+            symbol = str(row.get("symbol") or "")
+            if symbol in bybit_symbols and Decimal(str(row.get("size") or "0")) != 0:
+                raise RuntimeError(f"position_not_flat:bybit:{bybit_symbols[symbol]}")
+        for row in snapshot["bybit_orders"]:
+            symbol = str(row.get("symbol") or "")
+            if symbol in bybit_symbols:
+                raise RuntimeError(f"open_orders_not_flat:bybit:{bybit_symbols[symbol]}")
+        for row in snapshot["okx_positions"]:
             symbol = str(row.get("instId") or "")
             if symbol in okx_symbols and Decimal(str(row.get("pos") or "0")) != 0:
                 raise RuntimeError(f"position_not_flat:okx:{okx_symbols[symbol]}")
-        for row in okx_orders.get("data") or []:
+        for row in snapshot["okx_orders"]:
             symbol = str(row.get("instId") or "")
             if symbol in okx_symbols:
                 raise RuntimeError(f"open_orders_not_flat:okx:{okx_symbols[symbol]}")
         self.log.info("canary29_startup_flat_confirmed | coins=%s", len(self.coins))
+
+    def _canary29_resume_position(self) -> None:
+        from decimal import Decimal
+        from app.bot.theta_trade_manager import OpenPosition
+
+        manifest = self._canary29_resume_manifest
+        if not isinstance(manifest, dict):
+            raise RuntimeError("canary_resume_manifest_missing")
+        if self.theta_trade is None or self.theta_trade.slot.pending:
+            raise RuntimeError("canary_resume_target_slot_not_empty")
+        if manifest.get("schema_version") != "bbot.gear22.canary-state.v1":
+            raise RuntimeError("canary_resume_manifest_schema")
+        if (
+            manifest.get("policy_id") != "gear22_frozen_v1"
+            or manifest.get("policy_selector") != "gear22"
+            or manifest.get("execution") != "terminal_private"
+            or self._canary29_policy != "gear22"
+        ):
+            raise RuntimeError("canary_resume_policy_mismatch")
+        if int(manifest.get("max_cycles", -1)) != self._canary29_max_cycles:
+            raise RuntimeError("canary_resume_cycle_cap_mismatch")
+        old_hours = manifest.get("open_window_hours")
+        if old_hours != self._canary29_open_window_hours:
+            raise RuntimeError("canary_resume_window_config_mismatch")
+        try:
+            source_pid = int(manifest.get("source_pid") or 0)
+        except (TypeError, ValueError) as exc:
+            raise RuntimeError("canary_resume_source_pid_invalid") from exc
+        if not _canary29_source_stopped(source_pid):
+            raise RuntimeError("canary_resume_source_still_running")
+        source_root = Path(str(manifest.get("source_data_root") or ""))
+        if (
+            not source_root.is_absolute()
+            or source_root.is_symlink()
+            or not source_root.is_dir()
+            or source_root.resolve() == self.data_root.resolve()
+        ):
+            raise RuntimeError("canary_resume_source_path_invalid")
+        if manifest.get("execution_halt_reason"):
+            raise RuntimeError("canary_resume_source_halted")
+        source_log = source_root / "bbot.log"
+        log_text = source_log.read_text(encoding="utf-8")
+        if any(marker in log_text for marker in (
+            "theta_trade_execution_halted", "execution_exception", "canary29_stopped",
+        )):
+            raise RuntimeError("canary_resume_source_has_halt_marker")
+        pending, position = _heartbeat_position(source_log)
+        if pending or manifest.get("pending") is not False or not position:
+            raise RuntimeError("canary_resume_heartbeat_not_open")
+        position_snapshot = manifest.get("position")
+        if not isinstance(position_snapshot, dict):
+            raise RuntimeError("canary_resume_checkpoint_missing_position")
+        for key, value in position.items():
+            if position_snapshot.get(key) != value:
+                raise RuntimeError("canary_resume_heartbeat_checkpoint_mismatch")
+        intent_id = str(manifest.get("source_intent_id") or "")
+        if not intent_id or str(position.get("trade_id")) != intent_id:
+            raise RuntimeError("canary_resume_intent_mismatch")
+        restored = self.theta_trade.slot.position
+        if restored is not None and (
+            str(restored.trade_id) != intent_id
+            or str(restored.base_coin).upper() != str(position.get("base_coin") or "").upper()
+            or str(restored.side).lower() != str(position.get("side") or "").lower()
+        ):
+            raise RuntimeError("canary_resume_restored_slot_mismatch")
+        source_state_path = source_root / "canary_state.json"
+        if source_state_path.exists():
+            source_state = _read_canary_json(source_state_path)
+            if (
+                source_state.get("policy_id") != "gear22_frozen_v1"
+                or source_state.get("policy_selector") != "gear22"
+                or source_state.get("execution") != "terminal_private"
+                or source_state.get("pending") is not False
+                or source_state.get("execution_halt_reason")
+                or source_state.get("source_intent_id") != intent_id
+                or int(source_state.get("source_pid") or 0) != source_pid
+                or str(source_state.get("source_data_root") or "") != str(source_root)
+                or source_state.get("position") != position_snapshot
+            ):
+                raise RuntimeError("canary_resume_checkpoint_not_safe")
+        coin = str(position.get("base_coin") or "").upper()
+        side = str(position.get("side") or "").lower()
+        if coin not in self.coins or side not in {"long", "short"}:
+            raise RuntimeError("canary_resume_coin_or_side_invalid")
+        for key in ("open_fill_spread", "fill_spread_pp", "open_notional"):
+            try:
+                if not math.isfinite(float(position.get(key))):
+                    raise ValueError
+            except (TypeError, ValueError) as exc:
+                raise RuntimeError("canary_resume_policy_state_invalid") from exc
+        if float(position["open_notional"]) <= 0 or float(position["fill_spread_pp"]) != float(position["open_fill_spread"]):
+            raise RuntimeError("canary_resume_policy_state_mismatch")
+        meta = self._meta(coin)
+        journal_paths = sorted((source_root / "theta_trades").glob("event_date=*/trades.jsonl"))
+        if not journal_paths or any(path.is_symlink() for path in journal_paths):
+            raise RuntimeError("canary_resume_trade_journal_missing")
+        rows: list[dict[str, Any]] = []
+        for journal_path in journal_paths:
+            rows.extend(
+                json.loads(line)
+                for line in journal_path.read_text(encoding="utf-8").splitlines()
+                if line
+            )
+        if any(
+            str(row.get("status") or "").lower() in {"abort", "aborted", "unknown"}
+            or str(row.get("event") or "").lower() in {"abort", "send_abort"}
+            for row in rows
+        ):
+            raise RuntimeError("canary_resume_trade_journal_abort_evidence")
+        private_journal = source_root / "private" / "journal"
+        if private_journal.exists():
+            for path in sorted(private_journal.glob("event_date=*/events.jsonl")):
+                if path.is_symlink():
+                    raise RuntimeError("canary_resume_private_journal_symlink")
+                for line in path.read_text(encoding="utf-8").splitlines():
+                    if not line:
+                        continue
+                    event = json.loads(line)
+                    if str(event.get("event_type") or "") in {
+                        "reject", "dual_leg_abort", "reconciliation", "cancel_requested",
+                    }:
+                        raise RuntimeError("canary_resume_private_journal_abort_evidence")
+        candidate_rows = [row for row in rows if str(row.get("intent_id") or "") == intent_id]
+        terminal = [row for row in candidate_rows if row.get("status") in {"pending", "open", "closed"}]
+        if not terminal or terminal[-1].get("status") != "open" or terminal[-1].get("event") != "open":
+            raise RuntimeError("canary_resume_intent_not_terminal_open")
+        unresolved = []
+        by_intent: dict[str, list[dict[str, Any]]] = {}
+        for row in rows:
+            iid = str(row.get("intent_id") or "")
+            if iid and row.get("status") in {"pending", "open", "closed"}:
+                by_intent.setdefault(iid, []).append(row)
+        latest_lifecycle = [
+            lifecycle[-1] for lifecycle in by_intent.values()
+        ]
+        for latest in latest_lifecycle:
+            if latest.get("status") == "pending":
+                unresolved.append(str(latest.get("intent_id") or ""))
+        terminal_events = sorted(
+            (r for r in rows if r.get("status") in {"open", "closed"}),
+            key=lambda r: int(r.get("fill_ts_ms") or 0),
+        )
+        outstanding: Optional[dict[str, Any]] = None
+        for item in terminal_events:
+            if item.get("event") == "open" and item.get("status") == "open":
+                if outstanding is not None:
+                    raise RuntimeError("canary_resume_journal_overlapping_open")
+                outstanding = item
+            elif item.get("event") == "close" and item.get("status") == "closed":
+                if outstanding is None or any(
+                    str(item.get(k) or "") != str(outstanding.get(k) or "")
+                    for k in ("base_coin", "side", "okx_filled_qty", "bybit_filled_qty")
+                ):
+                    raise RuntimeError("canary_resume_journal_close_mismatch")
+                outstanding = None
+        if (
+            unresolved
+            or outstanding is None
+            or str(outstanding.get("intent_id") or "") != intent_id
+            or str(manifest.get("execution_halt_reason") or "")
+        ):
+            raise RuntimeError("canary_resume_journal_has_other_or_unresolved_intent")
+        row = terminal[-1]
+        if (
+            str(row.get("base_coin") or "").upper() != coin
+            or str(row.get("side") or "").lower() != side
+            or str(row.get("fill_ts_ms") or "") != str(position.get("open_fill_ts_ms"))
+            or Decimal(str(row.get("okx_filled_qty") or "0")) != Decimal(str(position.get("okx_filled_qty") or "0"))
+            or Decimal(str(row.get("bybit_filled_qty") or "0")) != Decimal(str(position.get("bybit_filled_qty") or "0"))
+        ):
+            raise RuntimeError("canary_resume_journal_position_mismatch")
+        ct_val = Decimal(str(self._okx_ct_vals.get(meta.okx_symbol) or "0"))
+        okx_qty = Decimal(str(position.get("okx_filled_qty") or "0"))
+        bybit_qty = Decimal(str(position.get("bybit_filled_qty") or "0"))
+        coin_qty = Decimal(str(position.get("coin_filled_qty") or "0"))
+        if ct_val <= 0 or okx_qty * ct_val != bybit_qty or coin_qty != bybit_qty:
+            raise RuntimeError("canary_resume_contract_units_mismatch")
+
+        snapshot = self._canary29_read_startup_snapshot()
+        bybit_open = [r for r in snapshot["bybit_positions"] if Decimal(str(r.get("size") or "0")) != 0]
+        okx_open = [r for r in snapshot["okx_positions"] if Decimal(str(r.get("pos") or "0")) != 0]
+        expected_bybit_side = "Sell" if side == "long" else "Buy"
+        expected_okx_sign = Decimal("1") if side == "long" else Decimal("-1")
+        if (
+            len(bybit_open) != 1
+            or bybit_open[0].get("symbol") != meta.bybit_symbol
+            or bybit_open[0].get("side") != expected_bybit_side
+            or (bybit_open[0].get("positionIdx") is not None and str(bybit_open[0].get("positionIdx")) != "0")
+            or Decimal(str(bybit_open[0].get("size") or "0")) != bybit_qty
+            or len(okx_open) != 1
+            or okx_open[0].get("instId") != meta.okx_symbol
+            or (okx_open[0].get("posSide") is not None and str(okx_open[0].get("posSide")) != "net")
+            or Decimal(str(okx_open[0].get("pos") or "0")) * expected_okx_sign <= 0
+            or abs(Decimal(str(okx_open[0].get("pos") or "0"))) != okx_qty
+            or snapshot["bybit_orders"]
+            or snapshot["okx_orders"]
+        ):
+            raise RuntimeError("canary_resume_exchange_position_mismatch")
+        self.theta_trade.slot.position = OpenPosition(**position)
+        self.theta_trade.slot.pending = False
+        self.log.info("canary29_resume_verified | intent=%s | coin=%s | side=%s", intent_id, coin, side)
+
+    def _canary29_entry_allowed(self) -> bool:
+        return self._canary29_deadline_mono is None or time.monotonic() < self._canary29_deadline_mono
+
+    def _canary29_window_elapsed(self) -> bool:
+        return self._canary29_deadline_mono is not None and time.monotonic() >= self._canary29_deadline_mono
+
+    @staticmethod
+    def _canary29_position_json(position: Any) -> Optional[dict[str, Any]]:
+        if position is None:
+            return None
+        return {
+            "trade_id": position.trade_id,
+            "base_coin": position.base_coin,
+            "side": position.side,
+            "open_signal_ts_ms": position.open_signal_ts_ms,
+            "open_fill_ts_ms": position.open_fill_ts_ms,
+            "open_fill_spread": position.open_fill_spread,
+            "open_notional": position.open_notional,
+            "open_theta_1m": position.open_theta_1m,
+            "fill_spread_pp": position.fill_spread_pp,
+            "okx_filled_qty": position.okx_filled_qty,
+            "bybit_filled_qty": position.bybit_filled_qty,
+            "coin_filled_qty": position.coin_filled_qty,
+        }
+
+    def _write_canary_state(self) -> None:
+        if not self._terminal_private_execution or self.theta_trade is None:
+            return
+        value = {
+            "schema_version": "bbot.gear22.canary-state.v1",
+            "policy_id": (
+                "gear22_frozen_v1"
+                if self._canary29_policy == "gear22"
+                else "canary29_synthetic_v1"
+            ),
+            "policy_selector": self._canary29_policy,
+            "execution": "terminal_private",
+            "source_data_root": str(self.data_root),
+            "source_pid": os.getpid(),
+            "source_intent_id": getattr(self.theta_trade.slot.position, "trade_id", None),
+            "run_started_at_utc": datetime.fromtimestamp(
+                self._canary29_started_at_ms / 1000, timezone.utc
+            ).isoformat().replace("+00:00", "Z"),
+            "open_window_deadline_utc": (
+                datetime.fromtimestamp(self._canary29_deadline_ms / 1000, timezone.utc)
+                .isoformat().replace("+00:00", "Z")
+                if self._canary29_deadline_ms is not None
+                else None
+            ),
+            "completed_cycles": self._canary29_completed_cycles,
+            "max_cycles": self._canary29_max_cycles,
+            "open_window_hours": self._canary29_open_window_hours,
+            "position": _jsonable_extra(self._canary29_position_json(self.theta_trade.slot.position) or {}),
+            "pending": bool(self.theta_trade.slot.pending),
+            "execution_halt_reason": self.theta_trade.execution_halt_reason or self._synthetic_roll_halt_reason,
+            "done_reason": self._canary29_done_reason,
+            "last_policy_status": _jsonable_extra(dict(self.theta_trade.last_policy_status)),
+            "updated_at_utc": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+        }
+        self.data_root.mkdir(parents=True, exist_ok=True)
+        fd, temp_name = tempfile.mkstemp(prefix=".canary_state.", suffix=".tmp", dir=self.data_root)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                json.dump(value, handle, sort_keys=True, separators=(",", ":"), allow_nan=False)
+                handle.write("\n")
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temp_name, self._canary29_state_path)
+            dir_fd = os.open(self.data_root, os.O_RDONLY)
+            try:
+                os.fsync(dir_fd)
+            finally:
+                os.close(dir_fd)
+        finally:
+            try:
+                os.unlink(temp_name)
+            except FileNotFoundError:
+                pass
+
+    def _canary29_latch_checkpoint_failure(self, exc: Exception) -> None:
+        if self.theta_trade is not None:
+            self.theta_trade.slot.pending = True
+            reason = f"state_checkpoint_failed:{type(exc).__name__}"
+            self.theta_trade.execution_halt_reason = reason
+            self._synthetic_roll_halt_reason = reason
+            self.log.error("canary29_stopped | reason=%s", reason)
+        self.stop_event.set()
 
     def _stop_synthetic_private_send(self) -> None:
         """Close the profile sender before stopping the shared warm session."""
@@ -982,26 +1474,8 @@ class BotRuntime:
             )
         if wire is None or not getattr(wire, "healthy", False):
             self._synthetic_roll_halt_reason = "wire_capture_failed"
-        elif (
-            self._terminal_private_execution
-            and str(kwargs.get("spread_side") or "") == "close"
-            and getattr(result, "completed", False)
-        ):
-            try:
-                self._canary29_assert_flat(str(kwargs.get("base_coin") or ""))
-                self._canary29_completed_cycles += 1
-                self.log.info(
-                    "canary29_cycle_flat | completed=%s | coin=%s",
-                    self._canary29_completed_cycles,
-                    kwargs.get("base_coin"),
-                )
-                if self._canary29_completed_cycles >= 10:
-                    self._canary29_done = True
-            except Exception as exc:
-                result.completed = False
-                result.keep_pending = True
-                result.abort = f"post_close_flat_check:{type(exc).__name__}"
-                self._synthetic_roll_halt_reason = result.abort
+        elif str(kwargs.get("spread_side") or "") == "close":
+            self._canary29_record_close_flat(result, str(kwargs.get("base_coin") or ""))
         if (
             not getattr(result, "completed", False)
             and (
@@ -1627,6 +2101,16 @@ class BotRuntime:
                 quotes=self.quotes,
                 coin_order=self.coins,
             )
+            if (
+                self._canary29_window_elapsed()
+                and self.theta_trade.slot.position is None
+                and not self.theta_trade.slot.pending
+            ):
+                self._canary29_done = True
+                self._canary29_done_reason = "open_window_elapsed_flat"
+                self.log.info("canary29_stopped | reason=%s", self._canary29_done_reason)
+                self.stop_event.set()
+                self._write_canary_state()
             halt_reason = self.theta_trade.execution_halt_reason or self._synthetic_roll_halt_reason
             if halt_reason:
                 self._synthetic_roll_halt_reason = halt_reason
@@ -1922,6 +2406,20 @@ class BotRuntime:
     async def _heartbeat(self) -> None:
         while not self.stop_event.is_set():
             self._heartbeat_n += 1
+            if self._terminal_private_execution and self.theta_trade is not None:
+                if (
+                    self._canary29_window_elapsed()
+                    and self.theta_trade.slot.position is None
+                    and not self.theta_trade.slot.pending
+                ):
+                    self._canary29_done = True
+                    self._canary29_done_reason = "open_window_elapsed_flat"
+                    self.log.info("canary29_stopped | reason=%s", self._canary29_done_reason)
+                    self.stop_event.set()
+                try:
+                    self._write_canary_state()
+                except Exception as exc:
+                    self._canary29_latch_checkpoint_failure(exc)
             snap = self.gate.heartbeat_fields()
             pending = self.broker.pending.intent_id if self.broker.pending else None
             position = self.broker.position
@@ -1981,6 +2479,12 @@ class BotRuntime:
         
         def _signal_handler(signame: str) -> None:
             self.log.info(f"bbot_signal_received | signal={signame}")
+            if self._terminal_private_execution:
+                self._canary29_done_reason = f"operator_signal_{signame.lower()}"
+                try:
+                    self._write_canary_state()
+                except Exception as exc:
+                    self.log.error("canary29_state_checkpoint_failed | err=%s", type(exc).__name__)
             # Save floor warm pickle immediately (synchronously) before stop_event.
             # WS tasks may not unwind to finally before systemd timeout.
             self._save_floor_warm_pickle()
@@ -2015,8 +2519,12 @@ class BotRuntime:
             f"tw_p50_watch={'on' if self.tw_p50_enabled else 'off'} | "
             f"theta_watch={'on' if self.theta_enabled else 'off'} | "
             f"theta_trade={'on' if self.theta_trade_enabled else 'off'} | "
+            f"theta_execution={'terminal_private' if self._terminal_private_execution else 'inline'} | "
+            f"theta_policy={self._canary29_policy if self._terminal_private_execution else 'n/a'} | "
             f"theta_live_send="
-            f"{'on' if getattr(self.theta_trade, 'live_send', False) else 'off'} | "
+            f"{'on' if (self._terminal_private_execution or getattr(self.theta_trade, 'live_send', False)) else 'off'} | "
+            f"canary_max_cycles={self._canary29_max_cycles} | "
+            f"canary_open_window_hours={self._canary29_open_window_hours} | "
             f"floor_warm={'loaded' if self._floor_warm_loaded else 'off'}"
         )
         if self.mode == "policy" and self.policy is None:
@@ -2051,9 +2559,13 @@ class BotRuntime:
                     self._set_leverage_one()
                 if self._terminal_private_execution:
                     self._prefetch_okx_canary_metadata()
-                    await asyncio.to_thread(self._canary29_assert_startup_flat)
+                    if self._canary29_resume_manifest_path is None:
+                        await asyncio.to_thread(self._canary29_assert_startup_flat)
+                    else:
+                        await asyncio.to_thread(self._canary29_resume_position)
                     if (
-                        self.theta_trade is not None
+                        self._canary29_resume_manifest_path is None
+                        and self.theta_trade is not None
                         and self.theta_trade.slot.slot_busy()
                     ):
                         raise RuntimeError("journal_position_not_flat")
@@ -2074,6 +2586,7 @@ class BotRuntime:
                         for meta in (self._meta(coin),)
                         for key in (("okx", meta.okx_symbol), ("bybit", meta.bybit_symbol))
                     }
+                    self._write_canary_state()
             else:
                 self.log.info("private_warm_skipped | live_private_send=false")
                 if self._terminal_private_execution:
@@ -2164,6 +2677,11 @@ class BotRuntime:
             # Persist floor warm pickle for next start (B path only).
             self._save_floor_warm_pickle()
             if await self._await_terminal_place_before_shutdown():
+                if self._terminal_private_execution:
+                    try:
+                        self._write_canary_state()
+                    except Exception as exc:
+                        self.log.error("canary29_state_checkpoint_failed | err=%s", type(exc).__name__)
                 self._stop_synthetic_private_send()
 
 
