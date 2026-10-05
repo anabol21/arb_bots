@@ -71,6 +71,8 @@ Execution selector отделён от policy selector. Оба решения п
 
 Перед любым запуском сверить exact source tree/hashes в уже одобренной директории `/root/b-private-b-exp/response-manager-code/response-handler-20261005/`; не передавать env, private/runtime data или новые файлы вне неё. Runtime/data и свежие журналы Canary пишутся под `/root/b-private-b-exp/response-manager/` в отдельный run directory; mounted/remote durability не подтверждается. Повторное применение службы, изменение production D или её конфигурации исключено.
 
+Изолированному pre-B2.2 checkout требуется ровно один прежний source dependency, который `LiveFloorObserver` открывает file-relative: `research/gear22_quiet_regime_viz/floors.py`. Он совпадает с проверенным would-send source SHA-256 `9ba5e76e5abb7c3ece2033c6ffb007d50af434069a5339ca2dce99f76d573ef0`; локальный tracked source сохранён в checkout, а VPS копия положена в ту же package-relative path. Код чистая floor math dependency (stdlib + numpy); source fallback checkout остаётся вторым на `PYTHONPATH`.
+
 Leverage prep command (no trading loop; old trio is not GET-read again):
 
 ```bash
