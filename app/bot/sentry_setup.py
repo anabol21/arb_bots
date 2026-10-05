@@ -142,7 +142,7 @@ def capture_trade_event(
         level: error (default for Issues + issueCreated) | warning | info
     """
     if not _lazy_init_if_needed():
-        _log.debug(f"sentry_trade_emit | status=skipped | trade_id={trade_id} | event={event}")
+        _log.info(f"sentry_trade_emit | status=skipped | trade_id={trade_id} | event={event}")
         return
     
     sentry = _try_import_sentry()
