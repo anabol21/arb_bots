@@ -212,9 +212,15 @@ flowchart TB
   mktDecide --> place
   thetaDec -->|stub: no broker.place| thetaJ["theta_trades.jsonl\nwould_send=true send=false"]
   thetaDec -->|live_send: broker.place now| place
-  thetaDec -->|BBOT_THETA_EXECUTION=terminal_private\ngear22_live_canary only| canaryGate["common K=1 size/freshness/depth gate"]
+  thetaDec -->|BBOT_THETA_EXECUTION=terminal_private\ngear22_live_canary only| canaryGate["common K=1 size/freshness/held-depth gate"]
   canaryGate -->|one prewarmed worker| privateSend["existing warmed dual sender"]
-  privateSend --> chrono["intent-linked StepChrono\nwall-ms + native monotonic signal"]
+  privateSend --> terminal["terminal order result\nACK is not fill"]
+  terminal -->|both exact fills| journal["intent StepChrono\nwall-ms + native monotonic signal"]
+  journal --> slot["single owner updates K=1 slot"]
+  slot --> flat{"close REST-flat confirmed?"}
+  flat -->|cycles < 10| observers
+  flat -->|cycle 10| stop["stop flat; no forced close"]
+  terminal -->|uncertain after send| halt["pending exposure + halt\nno retry or recovery"]
 
   place{BBOT_BROKER}
   place -->|stub / private_testnet| stub["StubBroker.place\npending + Trade_Lat fill"]
