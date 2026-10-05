@@ -1162,13 +1162,14 @@ class ThetaTradeManager:
                 # Log a skip audit row (not an open/close trade).
                 signal_ts = int(now_ms if now_ms is not None else time.time() * 1000)
                 okx, bybit = self._books_for(quotes, decision.base_coin)
+                size_event = insufficient_size_event(
+                    decision, held=self.slot.position
+                )
                 size_info = decision.size_info or size_check(
                     okx=okx,
                     bybit=bybit,
                     side=decision.side,
-                    event=insufficient_size_event(
-                        decision, held=self.slot.position
-                    ),
+                    event=size_event,
                     notional_usdt=self.config.notional_usdt,
                     book_depth=self.config.book_depth,
                 )
@@ -1180,6 +1181,7 @@ class ThetaTradeManager:
                     "event": "skip",
                     "reason": "reject",
                     "reject_reason": "insufficient_size",
+                    "size_event": size_event,
                     "would_send": False,
                     "send": False,
                     "signal_ts_ms": signal_ts,

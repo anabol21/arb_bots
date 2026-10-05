@@ -1924,6 +1924,10 @@ class BotRuntime:
             self._heartbeat_n += 1
             snap = self.gate.heartbeat_fields()
             pending = self.broker.pending.intent_id if self.broker.pending else None
+            position = self.broker.position
+            if self._terminal_private_execution and self.theta_trade is not None:
+                pending = self.theta_trade.slot.pending
+                position = self.theta_trade.slot.position
             # Mark probe done after fill cleared pending
             if self.mode == "probe" and self.probe_intent_placed and not self.broker.has_pending():
                 self.probe_done = True
@@ -1949,7 +1953,7 @@ class BotRuntime:
                     snap["ticks_suppressed_stale"],
                     snap["ticks_suppressed_generation"],
                     pending,
-                    self.broker.position,
+                    position,
                     self.probe_done,
                     counters,
                 )

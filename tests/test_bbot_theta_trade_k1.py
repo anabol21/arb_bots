@@ -587,6 +587,7 @@ class CloseSizeGateTests(unittest.TestCase):
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0]["event"], "skip")
         self.assertEqual(rows[0]["reject_reason"], "insufficient_size")
+        self.assertEqual(rows[0]["size_event"], "close")
         self.assertFalse(rows[0]["would_send"])
         self.assertFalse(rows[0]["send"])
         self.assertIsNotNone(mgr.slot.position)

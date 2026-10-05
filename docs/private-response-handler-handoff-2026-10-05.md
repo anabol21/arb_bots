@@ -15,7 +15,7 @@
 - `tests/test_bbot_synthetic_roll_private.py`, `test_bbot_synthetic_roll.py`, `test_wire_transcript.py`, `test_warm_single_loop.py`, `test_okx_depth_units.py` — scoped regressions;
 - `validation/run_response_manager_experiment.py` — только bounded experiment runner, не сервис.
 
-Торговое поведение и добавление OKX depth size context ограничены `synthetic_roll`. При этом изменены общие private send/capture helpers (`send_legs.py`, `ws_warm_loop.py`, `wire_transcript.py`), используемые этим профилем. `gear22_live_canary` и остальные контуры сохраняют прежний runtime size context. Парсер OKX книг остаётся в contract units.
+Исторические изменения synthetic-roll size context ограничены `synthetic_roll`; общий OKX book parser остаётся в contract units. Текущий Canary29 `terminal_private` — отдельный явный opt-in внутри существующего `gear22_live_canary` runtime, с общей pre-send size/depth проверкой и теми же private send helpers. Другие режимы исполнения не переключаются автоматически.
 
 ## Инварианты и границы
 
@@ -61,6 +61,14 @@ Send timing в отчёте оценён: signal имеет wall timestamp с м
 
 ## Canary29 implementation handoff
 
+### Completed live campaign
+
+The authorized 29-coin campaign completed ten open → terminal close → REST-flat cycles on 2026-10-05 and stopped flat at its built-in cap. The full cycle table, native queue/send timing, execution timestamp availability, vector coverage, tested source hash, and VPS-local artifact paths are recorded in [the Canary29 run report](canary29-live-run-2026-10-05.md). Runtime logs and journals first materialized under `/root/b-private-b-exp/response-manager/20261005T-canary29-rerun2/`; remote/mounted durability was not tested.
+
+The live run used source commit `5cd295e` and the deployed `app/bot/runtime.py` SHA-256 recorded in that report. Two later local-only observability edits were compiled and checked after the run; they were not part of the tested VPS source and were not run live. No service configuration was changed and no source was pushed.
+
+The completed run is evidence for this bounded campaign only. It does not authorize another live campaign, leverage mutation, service restart, or a new destination path. Any later live run needs its own explicit authorization.
+
 Новый режим остаётся в существующем `BotRuntime` и существующем Gear 2.2 one-second feature/vector path. `BBOT_THETA_EXECUTION=terminal_private` разрешён только для `BBOT_PROFILE=gear22_live_canary`, `BBOT_MODE=policy`, `BBOT_THETA_LIVE_SEND=1`, `BBOT_BROKER=private_live`, `VENUE=live`, `LIVE_ORDERS=1`, и включённых floor/TW-p50/theta watchers. `BBOT_THETA_TRADE=0` завершает startup до private/account work. `BBOT_THETA_POLICY=gear22` использует существующую Gear22 policy; `synthetic` включает отдельный односекундный Canary29 roll. Синтетический выбор потребляет один RNG draw на общем tick, включая pending hold; close использует только фактическую открытую позицию и roll 31. Вектор остаётся общим и должен быть ready для open.
 
 Execution selector отделён от policy selector. Оба решения проходят общий `ThetaTradeManager` size/depth gate и тот же injected private sender. Синхронное ожидание private terminal fill уходит в один заранее прогретый worker; K=1 reservation ставится до scheduling. Tick loop продолжает policy hold без backlog и второго send. Свежесть проверяет общий `TickValidityGate`, включая generation после reconnect и возраст 0–2000 ms. Закрытие подтверждает depth по фактическим quantities обеих ног. Любой неопределённый исход после возможной отправки сохраняет pending и останавливает кампанию. До send stale/invalid/depth reject безопасно пропускает текущий tick без fallback.
@@ -69,7 +77,7 @@ Execution selector отделён от policy selector. Оба решения п
 
 Сигнал получает локальные wall-ms и `monotonic_ns` сразу после выбора decision, до size/freshness/private gates. Оба значения передаются через intent `extra` в первую `signal_decision` строку существующего `StepChrono`; venue execution timestamps остаются отдельными.
 
-Перед любым запуском сверить exact source tree/hashes в уже одобренной директории `/root/b-private-b-exp/response-manager-code/response-handler-20261005/`; не передавать env, private/runtime data или новые файлы вне неё. Runtime/data и свежие журналы Canary пишутся под `/root/b-private-b-exp/response-manager/` в отдельный run directory; mounted/remote durability не подтверждается. Повторное применение службы, изменение production D или её конфигурации исключено.
+Для будущей отдельно авторизованной кампании сверить exact source tree/hash перед запуском; не передавать env, private/runtime data или новые файлы в code tree. Текущая кампания использовала отдельный run directory под `/root/b-private-b-exp/response-manager/`; mounted/remote durability не подтверждена. Повторное применение службы, изменение production D или её конфигурации не выполнялось.
 
 Изолированному pre-B2.2 checkout требуется ровно один прежний source dependency, который `LiveFloorObserver` открывает file-relative: `research/gear22_quiet_regime_viz/floors.py`. Он совпадает с проверенным would-send source SHA-256 `9ba5e76e5abb7c3ece2033c6ffb007d50af434069a5339ca2dce99f76d573ef0`; локальный tracked source сохранён в checkout, а VPS копия положена в ту же package-relative path. Код чистая floor math dependency (stdlib + numpy); source fallback checkout остаётся вторым на `PYTHONPATH`.
 
@@ -85,4 +93,4 @@ It sets and reads back only the 26 newly authorized instruments. It writes a non
 
 Локальная scoped-проверка для текущих контрактов: `py_compile` по изменённым Python модулям, `tests.test_bbot_theta_trade_k1.TerminalExecutionModeTests`, Canary29 policy contract tests, и $7–$15 shared notional cases. Не повторять старые private handler/replay suites, если изменённые интерфейсы их не затрагивают. Canary лимит — 10 только полных open→terminal close→REST flat циклов. Нет таймера принудительного close; close только по roll 31 и общей policy/state. После 10-го flat — остановка. Любое расхождение/unknown exposure — halt, без автоматического retry/recovery/flatten.
 
-Эта реализация ещё не подтверждает VPS deployment или live readiness. До запуска остаются code deploy и exact-hash verification в разрешённом каталоге, read-only выбор активного would-send pool/warm state, передача prep/launch команд root, и root clearance для последующего live stage. Не выставлять плечо и не отправлять заявки до этого clearance.
+Campaign status: complete and flat at the ten-cycle cap. Use the linked run report as the evidence record. Startup flat validation and per-close flat checks belonged to this campaign; do not repeat account/settings GETs as a retrospective audit. No claim is made about mounted/remote durability or unattended recovery behavior.

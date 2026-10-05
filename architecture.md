@@ -232,6 +232,8 @@ flowchart TB
   live --> thetaLive["theta_trades.jsonl\nwould_send=true send=true/false"]
 ```
 
+The terminal-private Canary29 branch is an opt-in mode inside the existing `python -m app.bot` process; it does not introduce a second runner or change the systemd contours. On 2026-10-05, an isolated VPS-local run used this path for ten completed open→terminal close→REST-flat cycles, then exited flat at its configured cap. The source commit and actual VPS-local run artifacts are recorded in [the campaign report](docs/canary29-live-run-2026-10-05.md). The run did not validate mounted or remote-storage durability.
+
 Default live send path: Contour B `app/bot/private/ws_trivial_dual_leg.py` (W6 `build_trade_place` frames, then `ws.send`). Full W6 recover→approve→lease→preflight is **off** that path unless `BBOT_PRIVATE_SEND_PATH=w6` **and** `BBOT_PRIVATE_W6=1`. `BBOT_PRIVATE_W6=1` alone does not switch the manager.
 
 `LiveBroker.place` does **not** append stub `legs.jsonl` on success (`on_valid_tick` returns False; fill is venue-observed). Stub `build_leg_record` always sets `would_send=true`, `send=false`; extra fields cannot override those keys.
