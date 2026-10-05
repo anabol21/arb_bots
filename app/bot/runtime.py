@@ -59,11 +59,30 @@ from app.bot.ws_books import (
     run_bybit_orderbook1,
     run_okx_books5,
 )
-from app.utils.tick_validity import TickValidityGate, book_l1_complete
+from app.utils.tick_validity import (
+    TickValidityGate,
+    book_l1_complete,
+)
 from app.utils.universe_csv import load_take_yes_base_coins, read_universe_dicts
 
 ensure_repo_on_syspath()
 from research.is_crypto import is_crypto  # noqa: E402
+
+
+def _assert_bybit_account_snapshot(response: Any) -> None:
+    if not isinstance(response, dict) or str(response.get("retCode")) != "0":
+        raise RuntimeError("bybit_startup_snapshot_rejected")
+    result = response.get("result")
+    if not isinstance(result, dict) or not isinstance(result.get("list"), list):
+        raise RuntimeError("bybit_startup_snapshot_malformed")
+
+
+def _assert_okx_account_snapshot(response: Any) -> None:
+    if not isinstance(response, dict) or str(response.get("code")) != "0":
+        raise RuntimeError("okx_startup_snapshot_rejected")
+    if not isinstance(response.get("data"), list):
+        raise RuntimeError("okx_startup_snapshot_malformed")
+
 
 # Floor warm pickle periodic save interval (seconds)
 FLOOR_WARM_SAVE_INTERVAL_SEC = 600  # 10 minutes
@@ -231,6 +250,27 @@ class BotRuntime:
         if self.profile == "canary":
             self.profile = "canary_wal_eden"
 
+        execution = (os.environ.get("BBOT_THETA_EXECUTION") or "inline").strip().lower()
+        if execution not in {"inline", "terminal_private"}:
+            raise ValueError("BBOT_THETA_EXECUTION must be inline|terminal_private")
+        self._terminal_private_execution = execution == "terminal_private"
+        self._canary29_policy = "gear22"
+        if self._terminal_private_execution:
+            if self.profile != "gear22_live_canary":
+                raise ValueError("terminal_private execution requires gear22_live_canary")
+            if self.mode != "policy":
+                raise ValueError("terminal_private execution requires BBOT_MODE=policy")
+            send_flag = (os.environ.get("BBOT_THETA_LIVE_SEND") or "").strip().lower()
+            if send_flag not in {"1", "true", "on", "yes"}:
+                raise ValueError("terminal_private requires BBOT_THETA_LIVE_SEND=1")
+            if not theta_trade_enabled(self.profile):
+                raise ValueError("terminal_private requires BBOT_THETA_TRADE=1")
+            self._canary29_policy = (
+                os.environ.get("BBOT_THETA_POLICY") or "gear22"
+            ).strip().lower()
+            if self._canary29_policy not in {"gear22", "synthetic"}:
+                raise ValueError("BBOT_THETA_POLICY must be gear22|synthetic")
+
         # Fail closed before broker/sentry when live canary is armed without LIVE_ORDERS.
         assert_theta_live_send_gates(self.profile)
         
@@ -250,6 +290,10 @@ class BotRuntime:
                 coins_raw = "BTC,ETH,SOL,XRP"
             elif self.mode == "policy" and self.profile == "gear22_live_canary":
                 coins_raw = ",".join(GEAR22_HTML_TOP30)
+                if self._terminal_private_execution:
+                    from app.bot.synthetic_policy import CANARY29_COINS
+
+                    coins_raw = ",".join(CANARY29_COINS)
             elif self.mode == "policy" and self.profile == "synthetic_roll":
                 coins_raw = "BTC,ETH,SOL,XRP"
             else:
@@ -257,6 +301,11 @@ class BotRuntime:
         self.coins = parse_coins(coins_raw)
         if not self.coins:
             raise RuntimeError("BBOT_COINS empty after is_crypto filter")
+        if self._terminal_private_execution:
+            from app.bot.synthetic_policy import CANARY29_COINS
+
+            if tuple(self.coins) != CANARY29_COINS:
+                raise ValueError("terminal_private requires the ordered Canary29 pool")
         if self.profile == "canary_wal_eden":
             from app.policy.trade_manager import live_size_coin_allowed
 
@@ -276,6 +325,8 @@ class BotRuntime:
             self.notional = 10.0
         else:
             self.notional = 100.0
+        if self._terminal_private_execution and self.notional != 10.0:
+            raise ValueError("terminal_private requires BBOT_NOTIONAL_USDT=10")
         self.trade_lat_ms = int(os.environ.get("BBOT_TRADE_LAT_MS") or "100")
         self.data_root = resolve_data_root()
         self.log_path = resolve_log_path(self.data_root)
@@ -362,6 +413,10 @@ class BotRuntime:
             self.tw_p50_journal = TwP50JournalWriter(self.data_root)
         # Theta = p50 − floor; ~1 Hz follow-on to tw_p50 emit (never ticks).
         self.theta_enabled = theta_watch_enabled(self.profile)
+        if self._terminal_private_execution and not (
+            self.floor_enabled and self.tw_p50_enabled and self.theta_enabled
+        ):
+            raise ValueError("terminal_private requires floor, TW p50, and theta watchers")
         self.theta_screener: LiveThetaScreener | None = None
         self.theta_journal: ThetaJournalWriter | None = None
         self._theta_flush_warned = False
@@ -379,6 +434,8 @@ class BotRuntime:
         self._theta_trade_warned = False
         self._synthetic_roll_halted = False
         self._synthetic_roll_halt_reason: Optional[str] = None
+        self._canary29_completed_cycles = 0
+        self._canary29_done = False
         self._okx_inst_id_codes: dict[str, int] = {}
         self._okx_ct_vals: dict[str, Any] = {}
         # (venue, symbol) → "1" after warmup. Never stores a lever above 1.
@@ -388,17 +445,32 @@ class BotRuntime:
             theta_cfg = ThetaTradeConfig.from_env()
             if live_send or self.profile == "synthetic_roll":
                 theta_cfg.notional_usdt = float(self.notional)
-            if self.profile == "synthetic_roll":
+            if self.profile == "synthetic_roll" or self._terminal_private_execution:
                 from app.bot.synthetic_policy import (
+                    make_canary29_decide,
                     make_synthetic_decide,
                     synthetic_live_gates,
                 )
 
-                seed_raw = str(os.environ.get("BBOT_SYNTHETIC_SEED") or "").strip()
+                seed_name = (
+                    "BBOT_CANARY29_SEED"
+                    if self._terminal_private_execution
+                    else "BBOT_SYNTHETIC_SEED"
+                )
+                seed_raw = str(os.environ.get(seed_name) or "").strip()
                 rng = random.Random(int(seed_raw)) if seed_raw else random.Random()
                 gates_on = synthetic_live_gates(os.environ)
                 self._synthetic_live_send_enabled = gates_on
-                # gear22_would_send / gear22_live_canary keep their own place_fn.
+                decide_fn = (
+                    make_canary29_decide(self.coins, rng)
+                    if self._terminal_private_execution
+                    and self._canary29_policy == "synthetic"
+                    else (
+                        make_synthetic_decide(self.coins, rng)
+                        if self.profile == "synthetic_roll"
+                        else None
+                    )
+                )
                 self.theta_trade = ThetaTradeManager(
                     data_root=self.data_root,
                     config=theta_cfg,
@@ -406,11 +478,21 @@ class BotRuntime:
                     live_send=False,
                     place_fn=(
                         self._synthetic_live_place
-                        if gates_on
+                        if gates_on or self._terminal_private_execution
                         else self._synthetic_local_place
                     ),
                     meta_fn=self._meta,
-                    decide_fn=make_synthetic_decide(self.coins, rng),
+                    decide_fn=decide_fn,
+                    execution_mode=(
+                        "terminal_private"
+                        if self._terminal_private_execution
+                        else "inline"
+                    ),
+                    pre_send_guard_fn=(
+                        self._canary29_pre_send_guard
+                        if self._terminal_private_execution
+                        else None
+                    ),
                 )
             else:
                 self.theta_trade = ThetaTradeManager(
@@ -496,7 +578,7 @@ class BotRuntime:
         """Load the live place modules and ready both queues before signals."""
         session = self._private_warm
         if (
-            self.profile != "synthetic_roll"
+            (self.profile != "synthetic_roll" and not self._terminal_private_execution)
             or not getattr(self, "_synthetic_live_send_enabled", False)
             or session is None
         ):
@@ -546,6 +628,174 @@ class BotRuntime:
         )
         return True
 
+    def _canary29_pre_send_guard(
+        self,
+        *,
+        coin: str,
+        event: str,
+        okx_book: dict[str, Any],
+        bybit_book: dict[str, Any],
+    ) -> Optional[str]:
+        """Fail closed on stale L1 or an unready cached private send path."""
+        del event  # actual open/close depth is checked by ThetaTradeManager
+        if not books_ready(okx_book, bybit_book):
+            return "incomplete_book"
+        now_ms = time.time() * 1000.0
+        for book in (okx_book, bybit_book):
+            age = now_ms - float(book["local_recv_ts_ms"])
+            if age < 0 or age > 2000:
+                return "stale_book"
+        gate_reason = self.gate.evaluate(coin, okx_book, bybit_book, now_ms)
+        if gate_reason is not None:
+            return f"book_{gate_reason}"
+        session = self._private_warm
+        sender = self._synthetic_sender
+        wire = getattr(session, "wire", None) if session is not None else None
+        if (
+            session is None
+            or not session.is_ready()
+            or not sender
+            or not sender.is_ready()
+            or wire is None
+            or not getattr(wire, "healthy", False)
+        ):
+            return "private_channel_down"
+        try:
+            meta = self._meta(coin)
+        except KeyError:
+            return "metadata_missing"
+        symbol = str(meta.okx_symbol)
+        bybit_symbol = str(meta.bybit_symbol)
+        if not self._okx_ct_vals.get(symbol) or not self._okx_inst_id_codes.get(symbol):
+            return "instrument_metadata_missing"
+        if not (
+            self._leverage_one.get(("okx", symbol)) == "1"
+            and self._leverage_one.get(("bybit", bybit_symbol)) == "1"
+        ):
+            return "leverage_not_one"
+        return None
+
+    def _canary29_assert_flat(self, coin: str) -> None:
+        """Confirm selected-symbol flatness, allowing REST a bounded projection."""
+        import time as time_module
+        from app.bot.private.ws_w4_baseline import (
+            SignedRestFlatBaseline,
+            assert_flat,
+        )
+
+        session = self._private_warm
+        if session is None:
+            raise RuntimeError("private_session_missing")
+        deadline = time_module.monotonic() + 5.0
+        last_error: Optional[Exception] = None
+        while True:
+            try:
+                self._canary29_check_coin_flat(coin, session, SignedRestFlatBaseline, assert_flat)
+                return
+            except Exception as exc:
+                last_error = exc
+                if time_module.monotonic() >= deadline:
+                    break
+                time_module.sleep(0.5)
+        assert last_error is not None
+        raise last_error
+
+    def _canary29_check_coin_flat(
+        self, coin: str, session: Any, baseline_type: Any, assert_flat_fn: Any
+    ) -> None:
+        meta = self._meta(coin)
+        for exchange, symbol, credentials in (
+            ("bybit", meta.bybit_symbol, session.bybit_credentials),
+            ("okx", meta.okx_symbol, session.okx_credentials),
+        ):
+            result = baseline_type(
+                exchange=exchange, credentials=credentials
+            ).check(exchange=exchange, symbol=symbol)
+            assert_flat_fn(result)
+
+    def _canary29_assert_startup_flat(self) -> None:
+        from decimal import Decimal
+        from urllib.parse import quote
+
+        from app.bot.private.venue import endpoints_for_venue
+        from app.bot.private.ws_w4_baseline import (
+            _BYBIT_OPEN,
+            _BYBIT_POS,
+            _OKX_OPEN,
+            _OKX_POS,
+            _bybit_signed_get,
+            _okx_signed_get,
+        )
+
+        session = self._private_warm
+        if session is None:
+            raise RuntimeError("private_session_missing")
+        endpoints = endpoints_for_venue("live")
+        bybit_symbols = {self._meta(coin).bybit_symbol: coin for coin in self.coins}
+        okx_symbols = {self._meta(coin).okx_symbol: coin for coin in self.coins}
+
+        def bybit_pages(path: str, query: str) -> list[dict[str, Any]]:
+            pages: list[dict[str, Any]] = []
+            cursor = ""
+            seen: set[str] = set()
+            while len(pages) < 20:
+                suffix = f"&cursor={quote(cursor, safe='')}" if cursor else ""
+                page = _bybit_signed_get(
+                    credentials=session.bybit_credentials,
+                    base=endpoints.bybit_rest,
+                    path=path,
+                    query=query + suffix,
+                )
+                pages.append(dict(page))
+                cursor = str((page.get("result") or {}).get("nextPageCursor") or "")
+                if not cursor:
+                    return pages
+                if cursor in seen:
+                    raise RuntimeError("bybit_cursor_repeated")
+                seen.add(cursor)
+            raise RuntimeError("bybit_pagination_limit")
+
+        positions = bybit_pages(
+            _BYBIT_POS, "category=linear&settleCoin=USDT&limit=200"
+        )
+        orders = bybit_pages(
+            _BYBIT_OPEN, "category=linear&settleCoin=USDT&openOnly=0&limit=50"
+        )
+        for page in positions:
+            _assert_bybit_account_snapshot(page)
+            for row in ((page.get("result") or {}).get("list") or []):
+                symbol = str(row.get("symbol") or "")
+                if symbol in bybit_symbols and Decimal(str(row.get("size") or "0")) != 0:
+                    raise RuntimeError(f"position_not_flat:bybit:{bybit_symbols[symbol]}")
+        for page in orders:
+            _assert_bybit_account_snapshot(page)
+            for row in ((page.get("result") or {}).get("list") or []):
+                symbol = str(row.get("symbol") or "")
+                if symbol in bybit_symbols:
+                    raise RuntimeError(f"open_orders_not_flat:bybit:{bybit_symbols[symbol]}")
+
+        okx_positions = _okx_signed_get(
+            credentials=session.okx_credentials,
+            base=endpoints.okx_rest,
+            path_with_query=f"{_OKX_POS}?instType=SWAP",
+        )
+        okx_orders = _okx_signed_get(
+            credentials=session.okx_credentials,
+            base=endpoints.okx_rest,
+            path_with_query=f"{_OKX_OPEN}?instType=SWAP",
+        )
+        _assert_okx_account_snapshot(okx_positions)
+        _assert_okx_account_snapshot(okx_orders)
+        for row in okx_positions.get("data") or []:
+            symbol = str(row.get("instId") or "")
+            if symbol in okx_symbols and Decimal(str(row.get("pos") or "0")) != 0:
+                raise RuntimeError(f"position_not_flat:okx:{okx_symbols[symbol]}")
+        for row in okx_orders.get("data") or []:
+            symbol = str(row.get("instId") or "")
+            if symbol in okx_symbols:
+                raise RuntimeError(f"open_orders_not_flat:okx:{okx_symbols[symbol]}")
+        self.log.info("canary29_startup_flat_confirmed | coins=%s", len(self.coins))
+
     def _stop_synthetic_private_send(self) -> None:
         """Close the profile sender before stopping the shared warm session."""
         sender = getattr(self, "_synthetic_sender", None)
@@ -561,6 +811,27 @@ class BotRuntime:
                 clear_process_warm_session(stop=True)
             finally:
                 self._private_warm = None
+
+    async def _await_terminal_place_before_shutdown(self) -> bool:
+        if not self._terminal_private_execution or self.theta_trade is None:
+            return True
+        task = self.theta_trade._terminal_place_task
+        if task is None:
+            return True
+        try:
+            await asyncio.wait_for(asyncio.shield(task), timeout=15.0)
+            return True
+        except asyncio.CancelledError:
+            self.stop_event.set()
+            try:
+                await asyncio.wait_for(asyncio.shield(task), timeout=15.0)
+            except (asyncio.TimeoutError, asyncio.CancelledError):
+                self.log.error("terminal_place_still_active | keeping_private_session_open=true")
+                return False
+            raise
+        except asyncio.TimeoutError:
+            self.log.error("terminal_place_still_active | keeping_private_session_open=true")
+            return False
 
     def _synthetic_local_place(self, **kwargs: Any) -> Any:
         """No sockets. Same journal and chrono as the live place path."""
@@ -586,7 +857,8 @@ class BotRuntime:
         from app.bot.private.send_legs import _attempt_ids
         session = self._private_warm
         if session is None:
-            self._synthetic_roll_halt_reason = "private_channel_down"
+            if not self._terminal_private_execution:
+                self._synthetic_roll_halt_reason = "private_channel_down"
             return PlaceSendResult(abort="private_channel_down")
         from app.bot.private.okx_ct_val import bind_okx_ct_val
         from app.bot.private.okx_inst_id import lookup_okx_inst_id_code
@@ -594,19 +866,22 @@ class BotRuntime:
         meta = kwargs.get("meta")
         bound, ct_err = bind_okx_ct_val(meta, self._okx_ct_vals)
         if ct_err:
-            self._synthetic_roll_halt_reason = ct_err
+            if not self._terminal_private_execution:
+                self._synthetic_roll_halt_reason = ct_err
             return PlaceSendResult(abort=ct_err)
         symbol = str(getattr(bound, "okx_symbol", "") or "")
         bybit_symbol = str(getattr(bound, "bybit_symbol", "") or "")
         inst = lookup_okx_inst_id_code(self._okx_inst_id_codes, symbol)
         if inst is None:
-            self._synthetic_roll_halt_reason = "okx_inst_id_code_missing"
+            if not self._terminal_private_execution:
+                self._synthetic_roll_halt_reason = "okx_inst_id_code_missing"
             return PlaceSendResult(abort="okx_inst_id_code_missing")
         if not (
             self._leverage_one.get(("okx", symbol)) == "1"
             and self._leverage_one.get(("bybit", bybit_symbol)) == "1"
         ):
-            self._synthetic_roll_halt_reason = "leverage_not_one"
+            if not self._terminal_private_execution:
+                self._synthetic_roll_halt_reason = "leverage_not_one"
             return PlaceSendResult(abort="leverage_not_one")
         kwargs = dict(kwargs)
         kwargs["meta"] = bound
@@ -616,7 +891,8 @@ class BotRuntime:
             or getattr(self, "_synthetic_sender_session", None) is not session
             or not sender.is_ready()
         ):
-            self._synthetic_roll_halt_reason = "synthetic_sender_not_ready"
+            if not self._terminal_private_execution:
+                self._synthetic_roll_halt_reason = "synthetic_sender_not_ready"
             return PlaceSendResult(abort="synthetic_sender_not_ready")
         wire = getattr(session, "wire", None)
         if wire is None or not getattr(wire, "healthy", False):
@@ -659,7 +935,33 @@ class BotRuntime:
             )
         if wire is None or not getattr(wire, "healthy", False):
             self._synthetic_roll_halt_reason = "wire_capture_failed"
-        elif not getattr(result, "completed", False):
+        elif (
+            self._terminal_private_execution
+            and str(kwargs.get("spread_side") or "") == "close"
+            and getattr(result, "completed", False)
+        ):
+            try:
+                self._canary29_assert_flat(str(kwargs.get("base_coin") or ""))
+                self._canary29_completed_cycles += 1
+                self.log.info(
+                    "canary29_cycle_flat | completed=%s | coin=%s",
+                    self._canary29_completed_cycles,
+                    kwargs.get("base_coin"),
+                )
+                if self._canary29_completed_cycles >= 10:
+                    self._canary29_done = True
+            except Exception as exc:
+                result.completed = False
+                result.keep_pending = True
+                result.abort = f"post_close_flat_check:{type(exc).__name__}"
+                self._synthetic_roll_halt_reason = result.abort
+        if (
+            not getattr(result, "completed", False)
+            and (
+                getattr(result, "send_attempted", False)
+                or getattr(result, "keep_pending", False)
+            )
+        ):
             abort = getattr(result, "abort", None)
             status = getattr(result, "status", None)
             self._synthetic_roll_halt_reason = str(
@@ -722,6 +1024,7 @@ class BotRuntime:
         if session is None:
             return
         targets: list[LeverageTarget] = []
+        confirmed: dict[tuple[str, str], str] = {}
         for coin in self.coins:
             try:
                 meta = self._meta(coin)
@@ -735,12 +1038,13 @@ class BotRuntime:
                     bybit_symbol=meta.bybit_symbol,
                 )
             )
-        self._leverage_one = set_leverage_one(
+        confirmed.update(set_leverage_one(
             targets,
             okx_credentials=session.okx_credentials,
             bybit_credentials=session.bybit_credentials,
             endpoints=endpoints_for_venue("live"),
-        )
+        ))
+        self._leverage_one = confirmed
         missing = [
             f"{venue}:{symbol}"
             for target in targets
@@ -882,7 +1186,9 @@ class BotRuntime:
         bybit = self.quotes[base_coin]["bybit"]
         # Keep WS parsing in raw contract units; attach the startup-cached
         # multiplier only at the private manager's runtime context boundary.
-        if self.theta_trade is not None and self.profile == "synthetic_roll":
+        if self.theta_trade is not None and (
+            self.profile == "synthetic_roll" or self._terminal_private_execution
+        ):
             okx["_private_size_gate"] = True
             try:
                 symbol = self._meta(base_coin).okx_symbol
@@ -1252,7 +1558,21 @@ class BotRuntime:
 
     async def _run_theta_trade(self, theta_snaps: list[Any]) -> None:
         """K=1 would_send decide+fill off the theta emit (never tick WAL)."""
-        if self.theta_trade is None or not theta_snaps:
+        if self.theta_trade is None or (
+            not theta_snaps
+            and not (
+                self._terminal_private_execution
+                and self._canary29_policy == "synthetic"
+            )
+        ):
+            return
+        if self._canary29_done:
+            self.stop_event.set()
+            return
+        halt_reason = self.theta_trade.execution_halt_reason or self._synthetic_roll_halt_reason
+        if halt_reason:
+            self._synthetic_roll_halt_reason = halt_reason
+            self.stop_event.set()
             return
         try:
             await self.theta_trade.on_theta_snapshots_async(
@@ -1260,8 +1580,16 @@ class BotRuntime:
                 quotes=self.quotes,
                 coin_order=self.coins,
             )
+            halt_reason = self.theta_trade.execution_halt_reason or self._synthetic_roll_halt_reason
+            if halt_reason:
+                self._synthetic_roll_halt_reason = halt_reason
+                self.stop_event.set()
         except Exception as exc:  # noqa: BLE001 — never stall the public book path
-            if not self._theta_trade_warned:
+            if self._terminal_private_execution:
+                self._synthetic_roll_halt_reason = f"terminal_tick:{type(exc).__name__}"
+                self.stop_event.set()
+                self.log.error("canary29_stopped | reason=%s", self._synthetic_roll_halt_reason)
+            elif not self._theta_trade_warned:
                 self._theta_trade_warned = True
                 self.log.warning(
                     "theta_trade_failed | err=%s",
@@ -1645,6 +1973,9 @@ class BotRuntime:
                 "policy_missing | continuing WS-only; will not open intents"
             )
 
+        if self._terminal_private_execution:
+            await asyncio.to_thread(lambda: None)  # start the default worker before signal ticks
+
         # Private WS and synthetic send path must be ready before signal tasks.
         try:
             self._private_warm = self.start_private_warm_if_live_send(
@@ -1659,13 +1990,38 @@ class BotRuntime:
                     self._private_warm._handshake_count,  # noqa: SLF001
                     self._private_warm.keepalive_running,
                 )
-                if self.profile == "synthetic_roll":
+                if self.profile == "synthetic_roll" or self._terminal_private_execution:
                     self._prefetch_okx_ct_vals()
                     self._prefetch_okx_inst_id_codes()
-                    self._set_leverage_one()
+                    if self._terminal_private_execution:
+                        await asyncio.to_thread(self._canary29_assert_startup_flat)
+                        if (
+                            self.theta_trade is not None
+                            and self.theta_trade.slot.slot_busy()
+                        ):
+                            raise RuntimeError("journal_position_not_flat")
+                        confirmed = frozenset(
+                            coin.strip().upper()
+                            for coin in os.environ.get("BBOT_CONFIRMED_1X_COINS", "").split(",")
+                            if coin.strip()
+                        )
+                        unknown = confirmed.difference(self.coins)
+                        if unknown:
+                            raise RuntimeError("BBOT_CONFIRMED_1X_COINS contains coins outside active universe")
+                        missing = set(self.coins).difference(confirmed)
+                        if missing:
+                            raise RuntimeError("terminal_private requires prep-verified 1x leverage for every coin")
+                        self._leverage_one = {
+                            key: "1"
+                            for coin in self.coins
+                            for meta in (self._meta(coin),)
+                            for key in (("okx", meta.okx_symbol), ("bybit", meta.bybit_symbol))
+                        }
+                    else:
+                        self._set_leverage_one()
             else:
                 self.log.info("private_warm_skipped | live_private_send=false")
-                if self.profile == "synthetic_roll":
+                if self.profile == "synthetic_roll" or self._terminal_private_execution:
                     self._prefetch_okx_ct_vals()
 
             if self._synthetic_live_send_enabled:
@@ -1750,7 +2106,8 @@ class BotRuntime:
         finally:
             # Persist floor warm pickle for next start (B path only).
             self._save_floor_warm_pickle()
-            self._stop_synthetic_private_send()
+            if await self._await_terminal_place_before_shutdown():
+                self._stop_synthetic_private_send()
 
 
 def main() -> int:

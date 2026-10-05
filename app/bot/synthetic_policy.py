@@ -11,6 +11,13 @@ import random
 from dataclasses import dataclass
 from typing import Mapping, Optional, Sequence
 
+CANARY29_COINS = (
+    "KAITO", "HOME", "WAL", "RVN", "ONT", "2Z", "BICO", "HMSTR", "CAP",
+    "BLEND", "EDEN", "KMNO", "GPS", "ME", "ZBT", "MOVE", "COAI", "AZTEC",
+    "APR", "YB", "AT", "H", "MUBARAK", "ACU", "LA", "BEAT", "PARTI",
+    "SIGN", "GIGGLE",
+)
+
 
 @dataclass(frozen=True)
 class SyntheticDecision:
@@ -112,8 +119,29 @@ def make_canary29_decide(coins: Sequence[str], rng: random.Random):
     """Manager adapter; receives the one timestamp shared by this tick."""
     pool = tuple(str(c).strip().upper() for c in coins if str(c).strip())
 
-    def decide_fn(*, slot: object, ts_s: int, **_kwargs: object) -> SyntheticDecision:
-        return decide_canary29_roll(slot=slot, coins=pool, rng=rng, ts_s=ts_s)
+    def decide_fn(
+        *,
+        slot: object,
+        ts_s: int,
+        snapshots: Sequence[object],
+        quotes: Mapping[str, Mapping[str, Mapping[str, object]]],
+        **_kwargs: object,
+    ) -> SyntheticDecision:
+        decision = decide_canary29_roll(
+            slot=slot, coins=pool, rng=rng, ts_s=ts_s
+        )
+        if decision.action == "open":
+            from app.bot.theta_trade_manager import build_feature_snapshot
+
+            vector = build_feature_snapshot(
+                coin=decision.coin,
+                ts_s=ts_s,
+                snapshots=snapshots,  # type: ignore[arg-type]
+                quotes=quotes,  # type: ignore[arg-type]
+            )
+            if vector is None or not (vector.usable_long and vector.usable_short):
+                return SyntheticDecision(action="hold", roll=decision.roll)
+        return decision
 
     return decide_fn
 

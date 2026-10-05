@@ -18,6 +18,7 @@ from app.bot.private.order_metadata import InstrumentMetadata, parse_decimal
 from app.bot.private.order_plan import OrderPlanError, _quantize_qty
 
 TARGET_NOTIONAL_USD = Decimal("10")
+MIN_NOTIONAL_USD = Decimal("7")
 NOTIONAL_BAND_USD = Decimal("15")
 _MISSING = object()
 
@@ -201,6 +202,11 @@ def shared_coin_qty(
     ):
         raise CoinQtyError("min_notional_above_band")
     chosen = best[1]
+    if (
+        min(chosen.okx_notional, chosen.bybit_notional) < MIN_NOTIONAL_USD
+        or max(chosen.okx_notional, chosen.bybit_notional) > NOTIONAL_BAND_USD
+    ):
+        raise CoinQtyError("notional_outside_band")
     # Safety: the legs we would send must still be the same coin amount.
     okx_sz2 = _snap(
         chosen.coin_qty / ct_val, symbol="OKX", step=okx_lot_sz, min_qty=okx_min_sz

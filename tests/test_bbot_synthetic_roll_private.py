@@ -176,6 +176,19 @@ class CoinQtyTests(unittest.TestCase):
             )
         self.assertEqual(ctx.exception.code, "min_notional_above_band")
 
+    def test_chosen_shared_notional_below_seven_is_rejected(self) -> None:
+        with self.assertRaises(CoinQtyError) as ctx:
+            shared_coin_qty(
+                okx_px=Decimal("6.8"),
+                bybit_px=Decimal("6.8"),
+                ct_val=Decimal("1"),
+                okx_lot_sz=Decimal("1"),
+                okx_min_sz=Decimal("1"),
+                bybit_qty_step=Decimal("1"),
+                bybit_min_qty=Decimal("1"),
+            )
+        self.assertEqual(ctx.exception.code, "notional_outside_band")
+
     def test_missing_ct_val_is_qty_mismatch(self) -> None:
         with self.assertRaises(CoinQtyError) as ctx:
             shared_from_meta(

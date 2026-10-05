@@ -40,7 +40,14 @@ _SEND_TIMING_FIELDS = (
 class StepChrono:
     """Buffer enter/exit stamps, then append JSONL."""
 
-    def __init__(self, data_root: Path, *, intent_id: str, signal_ts_ms: int) -> None:
+    def __init__(
+        self,
+        data_root: Path,
+        *,
+        intent_id: str,
+        signal_ts_ms: int,
+        signal_monotonic_ns: Optional[int] = None,
+    ) -> None:
         self.data_root = Path(data_root)
         text = str(self.data_root.resolve())
         for bad in _D_ROOTS:
@@ -48,10 +55,25 @@ class StepChrono:
                 raise RuntimeError(f"step chrono refuses D path: {self.data_root}")
         self.intent_id = str(intent_id)
         self.signal_ts_ms = int(signal_ts_ms)
+        self.signal_monotonic_ns = (
+            int(signal_monotonic_ns) if signal_monotonic_ns is not None else None
+        )
         self._rows: list[dict[str, Any]] = []
         self._written = 0
         self._enter_mono: dict[str, int] = {}
         self._enter_wall: dict[str, int] = {}
+        if self.signal_monotonic_ns is not None:
+            self._rows.append(
+                {
+                    "intent_id": self.intent_id,
+                    "block": "signal_decision",
+                    "edge": "selected",
+                    "wall_ms": self.signal_ts_ms,
+                    "mono_ns": self.signal_monotonic_ns,
+                    "signal_ts_ms": self.signal_ts_ms,
+                    "signal_mono_ns": self.signal_monotonic_ns,
+                }
+            )
 
     def _stamp(self) -> tuple[int, int]:
         return int(time.time() * 1000), int(time.monotonic_ns())

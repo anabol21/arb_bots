@@ -65,6 +65,7 @@ class PlaceSendResult:
     intent_id: Optional[str] = None
     okx_filled_qty: Optional[str] = None
     bybit_filled_qty: Optional[str] = None
+    send_attempted: bool = False
 
 
 def _sides(spread_side: str, close_of: Optional[str]) -> tuple[str, str, str, bool]:
@@ -539,10 +540,16 @@ def _place(
     leverage_one: bool = False,
     close_qty: Optional[Mapping[str, object]] = None,
 ) -> PlaceSendResult:
-    del extra  # manager passes the live-canary extra dict; this path does not use it
+    extra = extra if isinstance(extra, dict) else {}
     iid = str(intent_id or uuid.uuid4())
     coin = str(base_coin).strip().upper()
-    chrono = StepChrono(data_root, intent_id=iid, signal_ts_ms=int(signal_ts_ms))
+    chrono = StepChrono(
+        data_root,
+        intent_id=iid,
+        signal_ts_ms=int(signal_ts_ms),
+        signal_monotonic_ns=extra.get("signal_mono_ns"),
+    )
+    send_attempted = False
     okx_side, bybit_side, pos_side, reduce_only = _sides(spread_side, close_of)
     event = "close" if reduce_only else "open"
     phase = event
@@ -557,6 +564,7 @@ def _place(
             base_coin=coin,
             side=pos_side,
             intent_id=iid,
+            send_attempted=send_attempted,
         )
 
     chrono.enter("preprocess")
@@ -616,8 +624,10 @@ def _place(
                 phase=phase,
             )
             if okx_side == "buy":
+                send_attempted = True
                 sent = send_long(**common)
             else:
+                send_attempted = True
                 sent = send_short(**common)
             send_abort = sent.abort
             send_result = sent.send_result
@@ -803,6 +813,7 @@ def _place(
         intent_id=iid,
         okx_filled_qty=fill_qty["okx"],
         bybit_filled_qty=fill_qty["bybit"],
+        send_attempted=True,
     )
 
 

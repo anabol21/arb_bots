@@ -212,6 +212,9 @@ flowchart TB
   mktDecide --> place
   thetaDec -->|stub: no broker.place| thetaJ["theta_trades.jsonl\nwould_send=true send=false"]
   thetaDec -->|live_send: broker.place now| place
+  thetaDec -->|BBOT_THETA_EXECUTION=terminal_private\ngear22_live_canary only| canaryGate["common K=1 size/freshness/depth gate"]
+  canaryGate -->|one prewarmed worker| privateSend["existing warmed dual sender"]
+  privateSend --> chrono["intent-linked StepChrono\nwall-ms + native monotonic signal"]
 
   place{BBOT_BROKER}
   place -->|stub / private_testnet| stub["StubBroker.place\npending + Trade_Lat fill"]
@@ -312,6 +315,8 @@ Local lean only: `SPREAD_LEAN_PARQUET_ROOT`, `SPREAD_LEAN_BARS_ROOT`, `SPREAD_LE
 | `BBOT_COINS`, `BBOT_NOTIONAL_USDT`, `BBOT_TRADE_LAT_MS` | universe / size / stub Trade_Lat |
 | `BBOT_DATA_ROOT`, `BBOT_LOG_PATH` | bot data + log (never `runtime.log`) |
 | `BBOT_THETA_TRADE`, `BBOT_THETA_LIVE_SEND` | gear22 trade / live arm |
+| `BBOT_THETA_EXECUTION`, `BBOT_THETA_POLICY` | opt-in `terminal_private` execution and `gear22` / `synthetic` policy; terminal mode requires `gear22_live_canary`, policy mode, live gates, and all watchers |
+| `BBOT_CONFIRMED_1X_COINS` | prep-verified active universe; terminal startup refuses a partial pool and performs no leverage setters |
 | `BBOT_THETA_OPEN`, `BBOT_P50_OPEN`, `BBOT_MIN_PROFIT_PP`, `BBOT_MIN_THETA_CLOSE`, `BBOT_FEE_RT_PP`, `BBOT_FILL_DELAY_MS`, `BBOT_SLOT_K`, `BBOT_THETA_THR` | frozen-knob overlays |
 | `BBOT_FLOOR_WATCH`, `BBOT_TW_P50_WATCH`, `BBOT_THETA_WATCH`, `BBOT_FLOOR_WARM`, `BBOT_FLOOR_BAR_SAMPLE_CAP` | observers |
 | `BBOT_CHRONOMETRY`, `BBOT_L1_RING` | live canary instrumentation |

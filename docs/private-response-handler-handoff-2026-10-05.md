@@ -2,7 +2,7 @@
 
 ## Быстрый вход
 
-Работа идёт в отдельной копии `/private/tmp/arb_bots-exchange-response-20261004`, ветка `codex/exchange-response-handler`, от pre-B2.2 прогрева. Изменённый код пока не установлен как сервис на VPS. Это важно: checkout, экспериментальный процесс и установленные VPS units — разные среды.
+Исторические три цикла описаны ниже. Текущая реализация Canary29 ведётся отдельно в `/private/tmp/arb_bots-canary29-20261005`, ветка `codex/canary29-terminal-policy`, от опубликованного pre-B2.2 commit `ba3a98f2f8e9253988ef68de8ac9445e3e380397`. Исходный пользовательский checkout не менялся. Эти контексты различны: локальный checkout, отдельно подготовленный VPS код, экспериментальный процесс и действующие VPS units.
 
 Перед правками прочитайте [архитектуру](../architecture.md), затем этот список:
 
@@ -58,3 +58,19 @@ Send timing в отчёте оценён: signal имеет wall timestamp с м
 Сначала изучить diff и свежие тесты только для изменённых контрактов. Не повторять успешную торговую кампанию, GET-аудит или изменение leverage без новой явной авторизации. Нерешённые отдельные темы: долгий unattended soak, crash/restart/recovery semantics для pending exposure и сохранность журналов при сбое локального/VPS storage и при удалённом копировании. Прежде чем менять send/recovery topology, сравнить варианты и обновить архитектуру.
 
 Эти отчёты и документы передают технический контекст, но не дают автоматического разрешения на новые live заявки, VPS deployment, service restart или remote-storage изменения.
+
+## Canary29 implementation handoff
+
+Новый режим остаётся в существующем `BotRuntime` и существующем Gear 2.2 one-second feature/vector path. `BBOT_THETA_EXECUTION=terminal_private` разрешён только для `BBOT_PROFILE=gear22_live_canary`, `BBOT_MODE=policy`, `BBOT_THETA_LIVE_SEND=1`, `BBOT_BROKER=private_live`, `VENUE=live`, `LIVE_ORDERS=1`, и включённых floor/TW-p50/theta watchers. `BBOT_THETA_TRADE=0` завершает startup до private/account work. `BBOT_THETA_POLICY=gear22` использует существующую Gear22 policy; `synthetic` включает отдельный односекундный Canary29 roll. Синтетический выбор потребляет один RNG draw на общем tick, включая pending hold; close использует только фактическую открытую позицию и roll 31. Вектор остаётся общим и должен быть ready для open.
+
+Execution selector отделён от policy selector. Оба решения проходят общий `ThetaTradeManager` size/depth gate и тот же injected private sender. Синхронное ожидание private terminal fill уходит в один заранее прогретый worker; K=1 reservation ставится до scheduling. Tick loop продолжает policy hold без backlog и второго send. Свежесть проверяет общий `TickValidityGate`, включая generation после reconnect и возраст 0–2000 ms. Закрытие подтверждает depth по фактическим quantities обеих ног. Любой неопределённый исход после возможной отправки сохраняет pending и останавливает кампанию. До send stale/invalid/depth reject безопасно пропускает текущий tick без fallback.
+
+Настройка плеча и её REST readback выполняются отдельной разрешённой prep-стадией для новых инструментов. Она записывает подтверждённый полный пул в `BBOT_CONFIRMED_1X_COINS`; runtime требует подтверждения для каждого активного coin, строит 58-entry cache и не вызывает leverage setter. Перед стартом runtime делает один accountwide flat snapshot (Bybit position/open orders с `settleCoin=USDT`, paginated; OKX SWAP position/open orders) и фильтрует активные инструменты. После каждого close он опрашивает только закрытый symbol максимум 5 секунд. API errors/malformed snapshots не считаются flat. Startup отказывает при непустой journal position.
+
+Сигнал получает локальные wall-ms и `monotonic_ns` сразу после выбора decision, до size/freshness/private gates. Оба значения передаются через intent `extra` в первую `signal_decision` строку существующего `StepChrono`; venue execution timestamps остаются отдельными.
+
+Перед любым запуском сверить exact source tree/hashes в уже одобренной директории `/root/b-private-b-exp/response-manager-code/response-handler-20261005/`; не передавать env, private/runtime data или новые файлы вне неё. Runtime/data и свежие журналы Canary пишутся под `/root/b-private-b-exp/response-manager/` в отдельный run directory; mounted/remote durability не подтверждается. Повторное применение службы, изменение production D или её конфигурации исключено.
+
+Локальная scoped-проверка для текущих контрактов: `py_compile` по изменённым Python модулям, `tests.test_bbot_theta_trade_k1.TerminalExecutionModeTests`, Canary29 policy contract tests, и $7–$15 shared notional cases. Не повторять старые private handler/replay suites, если изменённые интерфейсы их не затрагивают. Canary лимит — 10 только полных open→terminal close→REST flat циклов. Нет таймера принудительного close; close только по roll 31 и общей policy/state. После 10-го flat — остановка. Любое расхождение/unknown exposure — halt, без автоматического retry/recovery/flatten.
+
+Эта реализация ещё не подтверждает VPS deployment или live readiness. До запуска остаются code deploy и exact-hash verification в разрешённом каталоге, read-only выбор активного would-send pool/warm state, передача prep/launch команд root, и root clearance для последующего live stage. Не выставлять плечо и не отправлять заявки до этого clearance.

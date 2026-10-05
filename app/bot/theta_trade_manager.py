@@ -632,6 +632,7 @@ def decide_theta_k1(
     book_depth: int = 1,
     coin_order: Optional[Sequence[str]] = None,
     policy_params: Optional[PolicyParams] = None,
+    ts_s: Optional[int] = None,
 ) -> ThetaDecision:
     """Pure K=1 entry/exit decide using gear 2.2 policy (no I/O, no sleep).
     
@@ -643,7 +644,7 @@ def decide_theta_k1(
         (s.base_coin, s.side): s for s in snapshots
     }
     
-    now_s = int(time.time())
+    now_s = int(ts_s if ts_s is not None else time.time())
     
     if slot.position is not None and not slot.pending:
         pos = slot.position
@@ -956,6 +957,8 @@ class ThetaTradeManager:
         place_fn: Optional[PlaceFn] = None,
         meta_fn: Optional[MetaFn] = None,
         decide_fn: Optional[Callable[..., Any]] = None,
+        execution_mode: str = "inline",
+        pre_send_guard_fn: Optional[Callable[..., Optional[str]]] = None,
     ) -> None:
         self.data_root = Path(data_root)
         self.config = config or ThetaTradeConfig.from_env()
@@ -966,8 +969,17 @@ class ThetaTradeManager:
         self.live_send = bool(live_send)
         self._place_fn = place_fn
         self._meta_fn = meta_fn
-        # None keeps frozen gear 2.2 ``decide_theta_k1``. A synthetic profile
-        # injects one pool-level decide; size gate and K=1 stay in this manager.
+        self._pre_send_guard_fn = pre_send_guard_fn
+        self.execution_mode = str(execution_mode).strip().lower()
+        if self.execution_mode not in {"inline", "terminal_private"}:
+            raise ValueError("execution_mode must be inline|terminal_private")
+        if self.execution_mode == "terminal_private" and (
+            self._place_fn is None or self._meta_fn is None
+        ):
+            raise ValueError("terminal_private requires place_fn and meta_fn")
+        self.execution_halt_reason: Optional[str] = None
+        self._terminal_place_task: Any = None
+        # Policy and execution routing are independent; None retains gear22.
         self._decide_fn = decide_fn
         if self.live_send and (self._place_fn is None or self._meta_fn is None):
             raise ThetaLiveSendError(
@@ -1203,8 +1215,12 @@ class ThetaTradeManager:
 
         if decision.action not in ("open", "close"):
             return []
+        if self.execution_mode == "terminal_private":
+            raise RuntimeError("terminal_private execution requires async entry")
 
-        if self._decide_fn is not None and self._slot_blocks(decision):
+        if (
+            self._decide_fn is not None and self._slot_blocks(decision)
+        ):
             return []
 
         signal_ts = int(now_ms if now_ms is not None else time.time() * 1000)
@@ -1633,6 +1649,7 @@ class ThetaTradeManager:
         *,
         quotes: Mapping[str, Mapping[str, Mapping[str, Any]]],
         coin_order: Optional[Sequence[str]],
+        ts_s: int,
     ) -> ThetaDecision:
         if self._decide_fn is None:
             return decide_theta_k1(
@@ -1644,6 +1661,7 @@ class ThetaTradeManager:
                 book_depth=self.config.book_depth,
                 coin_order=coin_order,
                 policy_params=self.config.policy_params,
+                ts_s=ts_s,
             )
         raw = self._decide_fn(
             snapshots=snapshots,
@@ -1654,6 +1672,7 @@ class ThetaTradeManager:
             book_depth=int(self.config.book_depth),
             thr=float(self.config.theta_thr),
             policy_params=self.config.policy_params,
+            ts_s=int(ts_s),
         )
         return coerce_external_decision(raw)
 
@@ -1662,6 +1681,7 @@ class ThetaTradeManager:
         decision: ThetaDecision,
         *,
         signal_ts: int,
+        signal_mono_ns: Optional[int] = None,
         okx_s: Mapping[str, Any],
         bybit_s: Mapping[str, Any],
     ) -> list[dict[str, Any]]:
@@ -1708,12 +1728,32 @@ class ThetaTradeManager:
                     exc,
                     extras={"trade_id": trade_id, "coin": coin, "event": decision.action},
                 )
+                if self.execution_mode == "terminal_private":
+                    self.slot.pending = False
+                return []
+
+        if self.execution_mode == "terminal_private" and self._pre_send_guard_fn is not None:
+            try:
+                reason = self._pre_send_guard_fn(
+                    coin=str(coin).upper(),
+                    event=decision.action,
+                    okx_book=dict(okx_s),
+                    bybit_book=dict(bybit_s),
+                )
+            except Exception as exc:  # malformed/stale pre-send data means no send
+                self.slot.pending = False
+                self._log(f"theta_trade_pre_send_reject | reason={type(exc).__name__} | coin={coin}")
+                return []
+            if reason:
+                self.slot.pending = False
+                self._log(f"theta_trade_pre_send_reject | reason={reason} | coin={coin}")
                 return []
 
         extra = {
             "trade_id": trade_id,
             "intent_id": intent_id,
             "synthetic_roll": self._decide_fn is not None,
+            "signal_mono_ns": signal_mono_ns,
         }
         self.slot.pending = True
         keep_pending = False
@@ -1738,6 +1778,19 @@ class ThetaTradeManager:
                 okx_filled_qty,
                 bybit_filled_qty,
             ) = _read_place_result(result)
+            if (
+                self.execution_mode == "terminal_private"
+                and not completed
+                and bool(getattr(result, "send_attempted", False))
+            ):
+                keep_pending = True
+                self.slot.pending = True
+                self.execution_halt_reason = str(
+                    _abort or getattr(result, "status", None) or "terminal_incomplete"
+                )
+                self._log(
+                    f"theta_trade_execution_halted | reason={self.execution_halt_reason}"
+                )
             if completed and decision.action == "open":
                 fill_ts_i = int(fill_ts if fill_ts is not None else time.time() * 1000)
                 fill_spread = spread_for_side(okx_s, bybit_s, side)
@@ -1766,6 +1819,61 @@ class ThetaTradeManager:
             if not keep_pending:
                 self.slot.pending = False
 
+    def _schedule_terminal_private_place(
+        self,
+        decision: ThetaDecision,
+        *,
+        signal_ts: int,
+        signal_mono_ns: Optional[int],
+        okx_s: Mapping[str, Any],
+        bybit_s: Mapping[str, Any],
+    ) -> list[dict[str, Any]]:
+        """Reserve K=1 before handing blocking terminal handling to one worker."""
+        import asyncio
+
+        if self.slot.pending or self._terminal_place_task is not None:
+            return []
+        self.slot.pending = True
+
+        async def run() -> None:
+            import asyncio
+
+            worker = asyncio.create_task(
+                asyncio.to_thread(
+                    self._execute_injected_place,
+                    decision,
+                    signal_ts=signal_ts,
+                    signal_mono_ns=signal_mono_ns,
+                    okx_s=okx_s,
+                    bybit_s=bybit_s,
+                ),
+                name="theta-private-place-worker",
+            )
+            try:
+                await asyncio.shield(worker)
+            except asyncio.CancelledError:
+                self._terminal_place_task = worker
+                worker.add_done_callback(
+                    lambda done: setattr(
+                        self,
+                        "_terminal_place_task",
+                        None,
+                    )
+                    if self._terminal_place_task is done
+                    else None
+                )
+                raise
+            except Exception as exc:  # uncertain result must retain pending exposure
+                self.slot.pending = True
+                self.execution_halt_reason = f"execution_exception:{type(exc).__name__}"
+                self._log(f"theta_trade_execution_halted | reason={self.execution_halt_reason}")
+            finally:
+                if self._terminal_place_task is asyncio.current_task():
+                    self._terminal_place_task = None
+
+        self._terminal_place_task = asyncio.create_task(run(), name="theta-private-place")
+        return []
+
     def on_theta_snapshots(
         self,
         snapshots: Sequence[ThetaSnapshot],
@@ -1775,8 +1883,12 @@ class ThetaTradeManager:
         now_ms: Optional[int] = None,
     ) -> list[dict[str, Any]]:
         """Sync entry (unit tests / offline). Prefer ``on_theta_snapshots_async`` live."""
+        tick_ms = int(now_ms if now_ms is not None else time.time() * 1000)
         decision = self._decide(
-            snapshots, quotes=quotes, coin_order=coin_order
+            snapshots,
+            quotes=quotes,
+            coin_order=coin_order,
+            ts_s=tick_ms // 1000,
         )
         return self.execute_decision(
             decision, snapshots=snapshots, quotes=quotes, now_ms=now_ms
@@ -1793,9 +1905,15 @@ class ThetaTradeManager:
         """Async emit-loop entry: ``fill_ts = signal_ts + BBOT_FILL_DELAY_MS``."""
         import asyncio
 
+        tick_ms = int(now_ms if now_ms is not None else time.time() * 1000)
         decision = self._decide(
-            snapshots, quotes=quotes, coin_order=coin_order
+            snapshots,
+            quotes=quotes,
+            coin_order=coin_order,
+            ts_s=tick_ms // 1000,
         )
+        signal_ts_ms = int(time.time() * 1000) if now_ms is None else int(now_ms)
+        signal_mono_ns = time.monotonic_ns()
 
         async def _async_sleep(seconds: float) -> None:
             await asyncio.sleep(seconds)
@@ -1805,7 +1923,11 @@ class ThetaTradeManager:
         try:
             # execute_decision may call sleep_fn — support awaitable.
             return await self._execute_decision_async(
-                decision, snapshots=snapshots, quotes=quotes, now_ms=now_ms
+                decision,
+                snapshots=snapshots,
+                quotes=quotes,
+                now_ms=signal_ts_ms,
+                signal_mono_ns=signal_mono_ns,
             )
         finally:
             self._sleep_fn = prev
@@ -1817,11 +1939,14 @@ class ThetaTradeManager:
         snapshots: Sequence[ThetaSnapshot],
         quotes: Mapping[str, Mapping[str, Mapping[str, Any]]],
         now_ms: Optional[int] = None,
+        signal_mono_ns: Optional[int] = None,
     ) -> list[dict[str, Any]]:
         """Async twin of ``execute_decision`` (await fill delay)."""
         import asyncio
         from inspect import isawaitable
 
+        if self.execution_mode == "terminal_private" and self.execution_halt_reason:
+            return []
         if decision.action == "skip":
             return self.execute_decision(
                 decision, snapshots=snapshots, quotes=quotes, now_ms=now_ms
@@ -1829,19 +1954,36 @@ class ThetaTradeManager:
         if decision.action not in ("open", "close"):
             return []
 
-        if self._decide_fn is not None and self._slot_blocks(decision):
+        if (
+            (self._decide_fn is not None or self.execution_mode == "terminal_private")
+            and self._slot_blocks(decision)
+        ):
             return []
 
         signal_ts = int(now_ms if now_ms is not None else time.time() * 1000)
         okx_s, bybit_s = self._books_for(quotes, decision.base_coin)
-        signal_size = decision.size_info or size_check(
-            okx=okx_s,
-            bybit=bybit_s,
-            side=decision.side,
-            event=decision.action,
-            notional_usdt=self.config.notional_usdt,
-            book_depth=self.config.book_depth,
-        )
+        if self.execution_mode == "terminal_private" and decision.action == "close":
+            pos = self.slot.position
+            signal_size = size_check(
+                okx=okx_s,
+                bybit=bybit_s,
+                side=decision.side,
+                event="close",
+                notional_usdt=self.config.notional_usdt,
+                book_depth=self.config.book_depth,
+                okx_ct_val=okx_s.get("ct_val"),
+                required_okx_contracts=(pos.okx_filled_qty if pos else None),
+                required_bybit_qty=(pos.bybit_filled_qty if pos else None),
+            )
+        else:
+            signal_size = decision.size_info or size_check(
+                okx=okx_s,
+                bybit=bybit_s,
+                side=decision.side,
+                event=decision.action,
+                notional_usdt=self.config.notional_usdt,
+                book_depth=self.config.book_depth,
+            )
         if not signal_size.get("size_ok"):
             decision = ThetaDecision(
                 action="skip",
@@ -1859,10 +2001,20 @@ class ThetaTradeManager:
                 decision, snapshots=snapshots, quotes=quotes, now_ms=signal_ts
             )
 
+        if self.execution_mode == "terminal_private":
+            return self._schedule_terminal_private_place(
+                decision,
+                signal_ts=signal_ts,
+                signal_mono_ns=signal_mono_ns,
+                okx_s=okx_s,
+                bybit_s=bybit_s,
+            )
+
         if self._decide_fn is not None:
             return self._execute_injected_place(
                 decision,
                 signal_ts=signal_ts,
+                signal_mono_ns=signal_mono_ns,
                 okx_s=okx_s,
                 bybit_s=bybit_s,
             )
