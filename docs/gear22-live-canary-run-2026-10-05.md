@@ -29,12 +29,14 @@ The terminal-private Gear 2.2 canary used that same ordered pool and manager pol
 
 The intentional sizing difference is the canary's $10 target notional versus $20 in the would-send process. Runtime guards enforce the $7–$15 admissible band; confirmed 1x leverage is required for all 29 coins; K remains 1. Live routing uses the existing warmed private dual sender inside the common `BotRuntime`. The policy selector is Gear 2.2 (`BBOT_THETA_POLICY=gear22`), not the synthetic selector.
 
-The run used local source commit `35b0045643173b2d630cefcfc7cb6fcddacfdd46`. The two root-reviewed, log-only files copied into the isolated VPS code tree had these hashes:
+The historical cap-10 run used local source commit `35b0045643173b2d630cefcfc7cb6fcddacfdd46`; the two root-reviewed log-only files then copied to the VPS had these hashes:
 
 - `app/bot/runtime.py`: `84723aaa27aaf3e09510919253a859552eb0c0141dfb14d45df5fc802dd9d7ff`
 - `app/bot/theta_trade_manager.py`: `1c005d79121368377614e1e8e140dc6dd8a56904bd46271875e329055df4ec7f`
 
 No policy or execution logic was changed for this run.
+
+The current long-run uses reviewed source through commit `859adc48df0e0c3416acedc56bf447eec2e30625`. The deployed runtime files are `app/bot/runtime.py` SHA-256 `59fca6a0a799eb161ae72b2877d7fd2c2bed6f08755d9f33ddf0bc4076d44b89` and `app/bot/theta_trade_manager.py` SHA-256 `70176827ac2d5e32e567d8861a5bae8a89860e26047d67a690cde4d567f7f14a`.
 
 ## Startup and first intent
 
