@@ -76,6 +76,48 @@ def make_synthetic_decide(
     return decide_fn
 
 
+def decide_canary29_roll(
+    *,
+    slot: object,
+    coins: Sequence[str],
+    rng: random.Random,
+    ts_s: int,
+) -> SyntheticDecision:
+    """One 1..100 draw per global tick, with opens indexed by UTC second."""
+    pool = tuple(str(c).strip().upper() for c in coins if str(c).strip())
+    if len(pool) != 29:
+        raise ValueError(f"Canary29 requires 29 ordered coins, got {len(pool)}")
+    roll = int(rng.randint(1, 100))
+    pos = getattr(slot, "position", None)
+    pending = bool(getattr(slot, "pending", False))
+    if roll == 17 and pos is None and not pending:
+        return SyntheticDecision(
+            action="open",
+            coin=pool[int(ts_s) % 29],
+            side=str(rng.choice(("long", "short"))),
+            roll=roll,
+        )
+    if roll == 31 and pos is not None and not pending:
+        coin = getattr(pos, "base_coin", None) or getattr(pos, "coin", "")
+        return SyntheticDecision(
+            action="close",
+            coin=str(coin).strip().upper(),
+            side=str(getattr(pos, "side", "")).strip().lower(),
+            roll=roll,
+        )
+    return SyntheticDecision(action="hold", roll=roll)
+
+
+def make_canary29_decide(coins: Sequence[str], rng: random.Random):
+    """Manager adapter; receives the one timestamp shared by this tick."""
+    pool = tuple(str(c).strip().upper() for c in coins if str(c).strip())
+
+    def decide_fn(*, slot: object, ts_s: int, **_kwargs: object) -> SyntheticDecision:
+        return decide_canary29_roll(slot=slot, coins=pool, rng=rng, ts_s=ts_s)
+
+    return decide_fn
+
+
 def synthetic_live_gates(env: Optional[Mapping[str, str]] = None) -> bool:
     """Same fail-closed live flags as Contour B. Off → local sender, no sockets."""
     e = env if env is not None else os.environ
