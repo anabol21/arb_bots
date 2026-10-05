@@ -26,6 +26,7 @@ from app.bot.theta_trade_manager import (
     ThetaTradeConfig,
     ThetaTradeJournalWriter,
     ThetaTradeManager,
+    build_feature_snapshot,
     decide_theta_k1,
     slip_spread,
     theta_trade_enabled,
@@ -102,6 +103,31 @@ class ThetaTradeFlagTests(unittest.TestCase):
         self.assertTrue(
             theta_trade_enabled("gear2_would_send", {"BBOT_THETA_TRADE": "1"})
         )
+
+
+class FeatureSnapshotTests(unittest.TestCase):
+    def test_finite_zero_values_remain_usable(self) -> None:
+        zero_book = _books(
+            okx_ask=100.0,
+            okx_bid=100.0,
+            bybit_ask=100.0,
+            bybit_bid=100.0,
+        )
+        snapshot = build_feature_snapshot(
+            coin="BTC",
+            ts_s=1,
+            snapshots=[
+                _snap("BTC", "long", 0.0, floor=0.0, p50_1m=0.0),
+                _snap("BTC", "short", 0.0, floor=0.0, p50_1m=0.0),
+            ],
+            quotes={"BTC": zero_book},
+        )
+        self.assertIsNotNone(snapshot)
+        assert snapshot is not None
+        self.assertTrue(snapshot.usable_long)
+        self.assertTrue(snapshot.usable_short)
+        self.assertEqual(snapshot.theta_1m_long, 0.0)
+        self.assertEqual(snapshot.spread_last_long, 0.0)
 
 
 class DecideK1Tests(unittest.TestCase):
