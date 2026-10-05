@@ -71,6 +71,16 @@ Execution selector отделён от policy selector. Оба решения п
 
 Перед любым запуском сверить exact source tree/hashes в уже одобренной директории `/root/b-private-b-exp/response-manager-code/response-handler-20261005/`; не передавать env, private/runtime data или новые файлы вне неё. Runtime/data и свежие журналы Canary пишутся под `/root/b-private-b-exp/response-manager/` в отдельный run directory; mounted/remote durability не подтверждается. Повторное применение службы, изменение production D или её конфигурации исключено.
 
+Leverage prep command (no trading loop; old trio is not GET-read again):
+
+```bash
+cd /root/b-private-b-exp/response-manager-code/response-handler-20261005
+PYTHONPATH=/root/b-private-b-exp/response-manager-code/response-handler-20261005:/root/spread_bbot_would_send_prod \
+  /root/venv/bin/python validation/run_response_manager_experiment.py --prepare-canary29
+```
+
+It sets and reads back only the 26 newly authorized instruments. It writes a non-secret confirmation report and `confirmed_1x.env` under its own prep run root. For the campaign, make a separate run root under `/root/b-private-b-exp/response-manager/`, copy `/data/bbot-would-send-prod/state/floor_warm.pkl` into that run's `data/state/floor_warm.pkl` (read-only source), then load the two `BBOT_*COINS` values from the prep config. Export the flags above, `BBOT_DATA_ROOT=$RUNROOT/data`, `BBOT_PRIVATE_DATA_ROOT=$RUNROOT/private-data`, `BBOT_FLOOR_WARM=1`, `BBOT_FLOOR_WARM_PATH=$RUNROOT/data/state/floor_warm.pkl`, and `BBOT_PRIVATE_ENV_FILE=/etc/spread/bbot-private-live.env`; run `/root/venv/bin/python -m app.bot` from the approved code directory with that directory first on `PYTHONPATH` and `/root/spread_bbot_would_send_prod` second for research fallback. The runtime startup performs its one fresh accountwide flat snapshot after prep and before any signal send; do not run a separate account baseline audit.
+
 Локальная scoped-проверка для текущих контрактов: `py_compile` по изменённым Python модулям, `tests.test_bbot_theta_trade_k1.TerminalExecutionModeTests`, Canary29 policy contract tests, и $7–$15 shared notional cases. Не повторять старые private handler/replay suites, если изменённые интерфейсы их не затрагивают. Canary лимит — 10 только полных open→terminal close→REST flat циклов. Нет таймера принудительного close; close только по roll 31 и общей policy/state. После 10-го flat — остановка. Любое расхождение/unknown exposure — halt, без автоматического retry/recovery/flatten.
 
 Эта реализация ещё не подтверждает VPS deployment или live readiness. До запуска остаются code deploy и exact-hash verification в разрешённом каталоге, read-only выбор активного would-send pool/warm state, передача prep/launch команд root, и root clearance для последующего live stage. Не выставлять плечо и не отправлять заявки до этого clearance.

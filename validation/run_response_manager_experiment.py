@@ -22,8 +22,11 @@ from typing import Any, Mapping
 from urllib.parse import quote, urlencode
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from app.bot.synthetic_policy import CANARY29_COINS
 
 POOL = ("2Z", "HOME", "LA")
+CANARY29_POOL = CANARY29_COINS
+PREVIOUSLY_CONFIRMED_1X = frozenset({"2Z", "HOME", "LA"})
 SEED = 20261004
 TARGET_NOTIONAL = Decimal("10")
 MAX_CYCLES = 3
@@ -53,21 +56,27 @@ def _bybit_pages(credentials: Any, base: str, path: str, query: str) -> list[Map
     raise RuntimeError("bybit_pagination_limit")
 
 
-def _configure(mode: str) -> str:
+def _configure(mode: str, *, pool: tuple[str, ...] = POOL, canary29: bool = False) -> str:
     run_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ") + "-response"
     run_root = ROOT / run_id
     os.environ.update(
         {
-            "BBOT_PROFILE": "synthetic_roll",
+            "BBOT_PROFILE": "gear22_live_canary" if canary29 else "synthetic_roll",
             # `probe` activates BotRuntime's separate public-book broker probe
             # alongside the theta manager. Keep the runtime on its policy path;
             # synthetic_roll returns from that path before strategy actions.
             "BBOT_MODE": "policy",
-            "BBOT_BROKER": "private_live" if mode == "execute" else "stub",
+            "BBOT_BROKER": "private_live" if mode in {"execute", "prepare"} else "stub",
             "VENUE": "live",
-            "LIVE_ORDERS": "1" if mode == "execute" else "0",
-            "BBOT_THETA_LIVE_SEND": "0",
-            "BBOT_COINS": ",".join(POOL),
+            "LIVE_ORDERS": "1" if mode in {"execute", "prepare"} else "0",
+            "BBOT_THETA_LIVE_SEND": "1" if canary29 else "0",
+            "BBOT_THETA_EXECUTION": "terminal_private" if canary29 else "inline",
+            "BBOT_THETA_TRADE": "1",
+            "BBOT_FLOOR_WATCH": "1",
+            "BBOT_TW_P50_WATCH": "1",
+            "BBOT_THETA_WATCH": "1",
+            "BBOT_COINS": ",".join(pool),
+            "BBOT_CONFIRMED_1X_COINS": ",".join(sorted(PREVIOUSLY_CONFIRMED_1X)) if canary29 else "",
             "BBOT_NOTIONAL_USDT": "10",
             "BBOT_SYNTHETIC_SEED": str(SEED),
             "BBOT_PRIVATE_ENV_FILE": ENV_FILE,
@@ -159,17 +168,25 @@ def _rest_preflight(coins: tuple[str, ...], universe: Mapping[str, Any], bybit: 
             raise RuntimeError(f"open_orders_not_flat:okx:{coin}")
 
 
-def _set_and_readback(runtime: Any) -> dict[str, str]:
+def _set_and_readback(
+    runtime: Any,
+    *,
+    coins: tuple[str, ...] = POOL,
+    previously_confirmed: frozenset[str] = frozenset(),
+) -> dict[str, str]:
     from app.bot.private.leverage_one import LeverageTarget, set_leverage_one
     from app.bot.private.rest_readonly import build_okx_readonly_headers
     from app.bot.private.venue import endpoints_for_venue
     from app.bot.private.ws_w4_baseline import _BYBIT_POS, _bybit_signed_get, _http_get_json
 
+    if not previously_confirmed.issubset(coins):
+        raise RuntimeError("previous_confirmations_outside_active_pool")
     bybit, okx = _credentials()
-    _rest_preflight(POOL, runtime.universe, bybit, okx)
+    _rest_preflight(coins, runtime.universe, bybit, okx)
     targets = [
         LeverageTarget(coin, runtime.universe[coin].okx_symbol, runtime.universe[coin].bybit_symbol)
-        for coin in POOL
+        for coin in coins
+        if coin not in previously_confirmed
     ]
     ep = endpoints_for_venue("live")
     confirmed = set_leverage_one(
@@ -178,13 +195,21 @@ def _set_and_readback(runtime: Any) -> dict[str, str]:
         bybit_credentials=bybit,
         endpoints=ep,
     )
-    if len(confirmed) != 6:
-        raise RuntimeError("leverage_set_not_confirmed_for_all_six")
+    if len(confirmed) != 2 * len(targets):
+        raise RuntimeError("leverage_set_not_confirmed_for_all_targets")
     out: dict[str, str] = {}
+    for coin in previously_confirmed:
+        out[f"bybit:{coin}"] = "1"
+        out[f"okx:{coin}"] = "1"
     for target in targets:
         bq = f"category=linear&symbol={target.bybit_symbol}&settleCoin=USDT&limit=200"
         bdata = _bybit_signed_get(credentials=bybit, base=ep.bybit_rest, path=_BYBIT_POS, query=bq)
-        brows = ((bdata.get("result") or {}).get("list")) or []
+        if str(bdata.get("retCode")) != "0":
+            raise RuntimeError(f"leverage_readback_rejected:bybit:{target.coin}")
+        bresult = bdata.get("result")
+        if not isinstance(bresult, Mapping) or not isinstance(bresult.get("list"), list):
+            raise RuntimeError(f"leverage_readback_malformed:bybit:{target.coin}")
+        brows = bresult["list"]
         bvals = {str(row.get(k)) for row in brows if str(row.get("symbol") or "") == target.bybit_symbol for k in ("leverage", "buyLeverage", "sellLeverage") if row.get(k) not in (None, "")}
         if not bvals or bvals != {"1"}:
             raise RuntimeError(f"leverage_readback_failed:bybit:{target.coin}")
@@ -202,6 +227,8 @@ def _set_and_readback(runtime: Any) -> dict[str, str]:
             raise RuntimeError(f"leverage_readback_failed:okx:{target.coin}")
         out[f"bybit:{target.coin}"] = "1"
         out[f"okx:{target.coin}"] = "1"
+    if len(out) != 2 * len(coins):
+        raise RuntimeError("leverage_readback_manifest_incomplete")
     return out
 
 
@@ -829,7 +856,10 @@ def _offline_self_test() -> None:
         assert place_calls[0]["spread_side"] == "open_short"
         assert manager.slot.position is None and manager.slot.pending is False
 
-    Runtime = _runtime_class()
+    if canary29_prep:
+        from app.bot.runtime import BotRuntime as Runtime
+    else:
+        Runtime = _runtime_class()
     candidate_runtime = Runtime.__new__(Runtime)
     candidate_runtime.stop_event = asyncio.Event()
     candidate_runtime.gate = SimpleNamespace(evaluate=lambda *_args: None)
@@ -931,17 +961,49 @@ def main() -> int:
     group = parser.add_mutually_exclusive_group(required=True)
     group.add_argument("--self-test", action="store_true")
     group.add_argument("--set-leverage-only", action="store_true")
+    group.add_argument("--prepare-canary29", action="store_true")
     group.add_argument("--execute-live", action="store_true")
     args = parser.parse_args()
     if args.self_test:
         _offline_self_test()
         print(json.dumps({"self_test": "pass", "orders_sent": 0, "pool": POOL, "seed": SEED}))
         return 0
-    run_id = _configure("execute" if args.execute_live else "leverage")
+    canary29_prep = bool(args.prepare_canary29)
+    coins = CANARY29_POOL if canary29_prep else POOL
+    run_id = _configure(
+        "prepare" if canary29_prep else ("execute" if args.execute_live else "leverage"),
+        pool=coins,
+        canary29=canary29_prep,
+    )
     Runtime = _runtime_class()
     runtime = Runtime()
-    if tuple(runtime.coins) != POOL or runtime.notional != 10.0:
+    if tuple(runtime.coins) != coins or runtime.notional != 10.0:
         raise RuntimeError("experiment_pool_or_notional_mismatch")
+    if canary29_prep:
+        result = _set_and_readback(
+            runtime,
+            coins=CANARY29_POOL,
+            previously_confirmed=PREVIOUSLY_CONFIRMED_1X,
+        )
+        report = {
+            "run_id": run_id,
+            "mode": "canary29_leverage_prepare",
+            "status": "confirmed_1x",
+            "pool": CANARY29_POOL,
+            "previously_confirmed_no_new_readback": sorted(PREVIOUSLY_CONFIRMED_1X),
+            "readback_confirmed_new_coins": len(CANARY29_POOL) - len(PREVIOUSLY_CONFIRMED_1X),
+            "confirmations": result,
+            "orders_sent": 0,
+        }
+        report_path = _save_report(run_id, report)
+        config_path = report_path.parent / "confirmed_1x.env"
+        config_path.write_text(
+            "BBOT_COINS=" + ",".join(CANARY29_POOL) + "\n"
+            + "BBOT_CONFIRMED_1X_COINS=" + ",".join(CANARY29_POOL) + "\n",
+            encoding="utf-8",
+        )
+        print(json.dumps({**report, "report_path": str(report_path), "config_path": str(config_path)}, sort_keys=True))
+        return 0
     if args.set_leverage_only:
         result = _set_and_readback(runtime)
         report = {"run_id": run_id, "mode": "leverage_only", "status": "confirmed_1x", "confirmed": result, "order_requests": 0}
