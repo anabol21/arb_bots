@@ -1,6 +1,14 @@
 # Gear 2.2 live canary — 2026-10-05
 
-## Latest status at 2026-10-05 14:33:40 UTC
+## Long-run resume status at 2026-10-05 19:47:03 UTC
+
+The previous standalone process (PID 2153180) was gracefully stopped after its final known open was terminally recorded. The new standalone background process is PID 2191957, started from the approved isolated code tree with runroot `/root/b-private-b-exp/response-manager/20261005T194200Z-gear22-longrun/`. At the observation time it was alive, had no pending intent or halt, and had adopted the known RVN long: 404 OKX contracts / 4,040 Bybit units. The source-of-truth open is in the prior run's `theta_trades/event_date=2026-10-05/trades.jsonl`; the new checkpoint records its source intent and position. No new open row is expected until this resumed position closes and another trade opens.
+
+The new checkpoint at 19:46:55.249 UTC records `policy_selector=gear22`, `execution=terminal_private`, `completed_cycles=1` (the one inherited cycle was verified flat before the current open), `max_cycles=0`, `pending=false`, and no halt. Its fixed entry deadline remains `2026-10-08T14:08:36Z`, measured from the original 14:08:36 UTC start. The runtime's most recent policy evaluation at 19:46:54.486 UTC was `hold_below_min_theta`; this is a normal policy hold, not a stopped process. The built-in startup account-wide positions/orders snapshot passed once before adoption. No later account-wide REST check was made.
+
+Startup logs confirmed the new private session ready, all 29 OKX metadata entries prefetched, and the expected 58 market-feed subscriptions. The floor warm pickle was copied into this runroot; its would-send source was left untouched. This observation confirms startup and resumed local state, not a completed long-run campaign or remote-storage durability. The process remains active under natural Gear 2.2 close behavior, with no cycle cap and no forced-close timer.
+
+## Historical ten-cycle-campaign status at 2026-10-05 14:33:40 UTC
 
 The standalone background `python -m app.bot` process was verified alive under PID `2153180`, with the expected isolated-code working directory and command line. At the latest heartbeat (14:33:26.103 UTC), the manager reported `pending=False` and one local RVN long position: 374 OKX contracts / 3,740 Bybit units, $10 open notional. The same trade journal row records `okx_fill_px=0.002644` and `bybit_fill_px=0.002674`. There are no close rows, no `canary29_cycle_flat` markers (0/10), and no halt markers. The trade rows in this snapshot contain no fee or realized-PnL fields. The close condition/reason is not emitted in this snapshot; do not infer why the position remains open.
 
