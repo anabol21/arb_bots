@@ -1,8 +1,10 @@
 # Gear 2.2 live canary — 2026-10-05
 
-## Status at 2026-10-05 14:11:54 UTC
+## Latest status at 2026-10-05 14:33:40 UTC
 
-The standalone background `python -m app.bot` process is still running under PID `2153180`. Startup completed, the account-wide flat check passed, and the Gear 2.2 manager opened one RVN long position. At the latest heartbeat (14:11:25.949 UTC), the manager reported `pending=False`, RVN long still open, with no cycle-flat marker and no halt marker. The campaign cap is ten completed open → terminal close → REST-flat cycles. Close remains policy-driven; there is no timed or forced close. The process was intentionally left running under that cap.
+The standalone background `python -m app.bot` process was verified alive under PID `2153180`, with the expected isolated-code working directory and command line. At the latest heartbeat (14:33:26.103 UTC), the manager reported `pending=False` and one local RVN long position: 374 OKX contracts / 3,740 Bybit units, $10 open notional. The same trade journal row records `okx_fill_px=0.002644` and `bybit_fill_px=0.002674`. There are no close rows, no `canary29_cycle_flat` markers (0/10), and no halt markers. The trade rows in this snapshot contain no fee or realized-PnL fields. The close condition/reason is not emitted in this snapshot; do not infer why the position remains open.
+
+The latest counters were `accepted=164422`, `sup_stale=16431`, `sup_gen=0`. They are runtime counters, not a venue-state or execution-success measurement. The local manager slot remains open; this snapshot did not repeat REST checks, so current exchange exposure/flatness beyond the matching trade evidence is not freshly account-wide verified. The campaign remains in progress, not a completed result. Its cap is ten completed open → terminal close → REST-flat cycles. Close remains policy-driven; there is no timed or forced close. The process was intentionally left running under that cap.
 
 This is an in-progress canary, not a completed campaign or a result about strategy performance.
 
@@ -30,7 +32,7 @@ No policy or execution logic was changed for this run.
 
 The process started at `2026-10-05 14:08:36 UTC` from `/root/b-private-b-exp/response-manager-code/response-handler-20261005/`. It loaded the existing would-send floor warm pickle into its own runroot (`touched=204`), reported the warmed private session ready, prefetched OKX metadata for all 29 coins, and passed the built-in account-wide Bybit linear USDT / OKX SWAP flat check before signals were admitted. Confirmed 1x leverage was supplied from the existing preparation manifest; no leverage setters or readbacks were repeated.
 
-The first selected Gear 2.2 intent was RVN long at `2026-10-05 14:08:57.965 UTC`. Its terminal journal recorded matching filled quantities of 374 OKX contracts and 3,740 Bybit units, with the local terminal fill completion at `14:08:58.042 UTC`. This 77 ms difference is a local signal-to-terminal-completion interval, not an exchange execution-latency measurement. Per-leg average prices and exchange `execTime`/`fillTime` values were not captured in this bounded status read, so no venue-time latency or price claim is made here.
+The first selected Gear 2.2 intent was RVN long at `2026-10-05 14:08:57.965 UTC`. Its terminal journal recorded matching filled quantities of 374 OKX contracts and 3,740 Bybit units, with local terminal completion at `14:08:58.042 UTC`; the later local trade row records fill prices of 0.002644 (OKX) and 0.002674 (Bybit). This 77 ms difference is a local signal-to-terminal-completion interval, not an exchange execution-latency measurement. Matching venue `execTime`/`fillTime` values were not captured in the bounded run snapshot, so no venue-time latency claim is made here.
 
 The existing `StepChrono` markers show signal decision monotonic time `4816560747965106 ns` and the generic `ws_send` stage-enter time `4816560759303172 ns`, 11.338 ms later. This is a stage-boundary measurement, not the physical owner `ws.send` start. Queue-enqueue and owner-send markers were not extracted.
 
@@ -40,5 +42,5 @@ The existing `StepChrono` markers show signal decision monotonic time `481656074
 - Public runtime data and logs first materialize under that runroot; private journals and wire logs are under its `private/` subdirectory.
 - The warm-pickle source `/data/bbot-would-send-prod/state/floor_warm.pkl` was copied read-only into this runroot.
 - The existing would-send service and production D services were not changed or restarted.
-- At the latest observation, the process was alive, with one RVN long position, no pending intent, zero completed flat cycles, and no recorded halt. The ten-cycle cap stops the process only after cycle ten is confirmed REST-flat.
+- At the 2026-10-05 14:33:40 UTC observation, the process matched PID 2153180 and remained alive with one local RVN long slot, no pending intent, zero completed flat cycles, and no recorded halt. Trade journal shows one open and no close; the ten-cycle cap stops the process only after cycle ten is confirmed REST-flat.
 - This run made no claim about mounted or remote-storage durability. No later account-wide REST audit was made.

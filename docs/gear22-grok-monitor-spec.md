@@ -10,7 +10,7 @@
 
 - Runroot: `/root/b-private-b-exp/response-manager/20261005T140836Z-gear22-canary/`.
 - Запуск: standalone background `/root/venv/bin/python -m app.bot`; PID `2153180` был PID при старте, это историческая подсказка, не доказательство текущей идентичности процесса. Не утверждай, что процесс сейчас жив, пока не сверил текущий процесс с runroot/cmdline.
-- Код запуска: commit `35b0045643173b2d630cefcfc7cb6fcddacfdd46`; отчёт/документация: commit `4f5017cf95e1a5d1c5b122249a872d2dd46c4f80`.
+- Код запуска: commit `35b0045643173b2d630cefcfc7cb6fcddacfdd46`. Актуальный run report и его UTC observation time — источник текущего состояния; не фиксируй устаревший docs commit как состояние процесса.
 - Режим: общий `BotRuntime`, `gear22_live_canary`, `BBOT_MODE=policy`, `BBOT_THETA_POLICY=gear22`, `terminal_private`, private live Bybit + OKX, K=1.
 - Frozen Gear 2.2 параметры, `policy_id=gear22_frozen_v1`: `theta_open=0.50`, `p50_open=0.60`, `min_profit_pp=0.20`, `fee_round_trip_pp=0.30`, `min_theta_close=0.05`. Размер цели $10 на ногу, разрешённый runtime диапазон $7–$15; leverage 1x на всём упорядоченном пуле:
   `KAITO, HOME, WAL, RVN, ONT, 2Z, BICO, HMSTR, CAP, BLEND, EDEN, KMNO, GPS, ME, ZBT, MOVE, COAI, AZTEC, APR, YB, AT, H, MUBARAK, ACU, LA, BEAT, PARTI, SIGN, GIGGLE`.
