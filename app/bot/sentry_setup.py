@@ -122,6 +122,7 @@ def _lazy_init_if_needed() -> bool:
     return init_sentry(profile=os.environ.get("BBOT_PROFILE", "unknown"))
 
 
+# Patch by Grok Bot (бот): skip/emit logged at INFO for live canary bbot.log visibility.
 def capture_trade_event(
     *,
     event: str,
@@ -142,7 +143,7 @@ def capture_trade_event(
         level: error (default for Issues + issueCreated) | warning | info
     """
     if not _lazy_init_if_needed():
-        _log.debug(f"sentry_trade_emit | status=skipped | trade_id={trade_id} | event={event}")
+        _log.info(f"sentry_trade_emit | status=skipped | trade_id={trade_id} | event={event}")
         return
     
     sentry = _try_import_sentry()
