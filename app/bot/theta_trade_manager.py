@@ -1036,22 +1036,6 @@ class ThetaTradeManager:
             return float(DEFAULT_OBSERVE_PARAMS.fee_round_trip_pp)
         return float(params.fee_round_trip_pp)
 
-    def abort_coin_if_held(self, coin: str, *, reason: str = "hot_drop") -> bool:
-        """Clear K=1 slot when it holds/pends ``coin`` (hot-drop tear-down)."""
-        coin_u = str(coin).strip().upper()
-        if not coin_u:
-            return False
-        pos = self.slot.position
-        held = pos is not None and str(pos.base_coin).upper() == coin_u
-        if not held:
-            return False
-        self.slot.position = None
-        self.slot.pending = False
-        self._log(
-            f"theta_trade_abort_coin | base_coin={coin_u} | reason={reason}"
-        )
-        return True
-
     def _books_for(self, quotes: Mapping[str, Any], coin: str) -> tuple[dict, dict]:
         books = quotes.get(coin) or {}
         return dict(books.get("okx") or {}), dict(books.get("bybit") or {})
