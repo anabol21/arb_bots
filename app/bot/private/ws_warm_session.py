@@ -246,6 +246,33 @@ class PrivateWarmSession:
     def subscribed_okx(self) -> tuple[str, ...]:
         return self.okx_symbols or ((self.okx_symbol,) if self.okx_symbol else ())
 
+    def add_coin(self, coin: str, *, bybit_symbol: str, okx_symbol: str) -> None:
+        """Extend account-wide Bybit filtering and subscribe OKX on its owner socket."""
+        key = str(coin).strip().upper()
+        if not key:
+            raise ValueError("private subscription coin is empty")
+        with self._lock:
+            if key in self.coins:
+                return
+            if self._stopped or not self.is_ready():
+                raise RuntimeError("private session is not ready")
+            if self._place_inflight:
+                raise RuntimeError("private subscription deferred during place")
+            # Send first; commit the client-side allowlists only if it succeeds.
+            self.okx_runtime.add_okx_subscription(str(okx_symbol))
+            self.coins = (*self.coins, key)
+            self.bybit_symbols = (*self.subscribed_bybit(), str(bybit_symbol))
+            self.okx_symbols = (*self.subscribed_okx(), str(okx_symbol))
+            self.bybit_runtime.subscribe_symbols = self.bybit_symbols
+            self._publish_base_coins()
+
+    def coin_ready(self, *, bybit_symbol: str, okx_symbol: str) -> bool:
+        return (
+            self.is_ready()
+            and str(bybit_symbol) in self.subscribed_bybit()
+            and self.okx_runtime.okx_symbol_ready(str(okx_symbol))
+        )
+
     def is_ready(self) -> bool:
         if self._stopped or not self._started:
             return False

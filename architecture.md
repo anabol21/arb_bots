@@ -41,10 +41,12 @@ HOT_ADD is in this tree: `app/discovery/`, `docs/hot-add-new-coins.md`, and `SPR
 
 Gear 2.3 (opt-in via `BBOT_HOT_ADD=1`) reuses the Gear 2.2 process and the
 would-send cumulative coin snapshot. Patch A adds public book tasks and watcher
-state only; new coins are not trade entries. Patch B's private subscriptions
-remain on the existing Bybit/OKX private session sockets and recv owner; see
-`docs/gear23-dynamic-pool.md` for readiness gates and the bounded validation
-record. The Gear 2.2 process/service is unchanged when the flag is unset.
+state. Patch B updates the existing Bybit private allowlist and sends
+instrument-scoped OKX orders/positions subscriptions through the current
+private-session owner loop. A new entry requires public/private readiness,
+warm observers, valid metadata, and prep-confirmed 1x. See
+`docs/gear23-dynamic-pool.md` for the readiness gates and bounded A/B validation
+records. The Gear 2.2 process/service is unchanged when the flag is unset.
 
 Portable policy (pure function, no I/O): `app/policy/trade_manager.py`, `app/policy/gear2_market_manager.py`, `app/policy/features.py`. Model notebook still owns its own VARIATION/HYPER copy.
 
@@ -214,8 +216,9 @@ flowchart TB
   profile -->|gear1 / signal_test| tickDecide["policy.decide"]
   profile -->|gear2_would_send / canary_wal_eden| mktDecide["decide_market_tick"]
   profile -->|gear22_would_send / gear22_live_canary| observers["floor + tw_p50 + theta ~1Hz"]
-  observers -->|opt-in gear23 Patch A| pool["cumulative delta CSV → public OKX + Bybit feeds"]
-  pool -->|observer-only; not trade eligible| observers
+  observers -->|opt-in gear23| pool["cumulative delta CSV → public OKX + Bybit feeds"]
+  pool --> privpool["existing private session: Bybit allowlist + OKX orders/positions ACKs"]
+  privpool -->|metadata + warm + fresh public/private + confirmed 1x| observers
   observers --> thetaDec["ThetaTradeManager"]
   tickDecide --> place
   mktDecide --> place
@@ -339,7 +342,7 @@ Local lean only: `SPREAD_LEAN_PARQUET_ROOT`, `SPREAD_LEAN_BARS_ROOT`, `SPREAD_LE
 | `BBOT_CANARY_MAX_CYCLES`, `BBOT_CANARY_OPEN_WINDOW_HOURS`, `BBOT_CANARY_RESUME_MANIFEST` | terminal-only cycle cap (`0` unlimited), natural-close open window, explicit strict resume manifest |
 | `BBOT_THETA_OPEN`, `BBOT_P50_OPEN`, `BBOT_MIN_PROFIT_PP`, `BBOT_MIN_THETA_CLOSE`, `BBOT_FEE_RT_PP`, `BBOT_FILL_DELAY_MS`, `BBOT_SLOT_K`, `BBOT_THETA_THR` | frozen-knob overlays |
 | `BBOT_FLOOR_WATCH`, `BBOT_TW_P50_WATCH`, `BBOT_THETA_WATCH`, `BBOT_FLOOR_WARM`, `BBOT_FLOOR_BAR_SAMPLE_CAP` | observers |
-| `BBOT_HOT_ADD`, `BBOT_HOT_ADD_DELTA`, `BBOT_HOT_ADD_MAX_EXTRA`, `BBOT_HOT_ADD_POLL_SEC`, `BBOT_HOT_ADD_WARM`, `BBOT_HOT_ADD_HISTORY_ROOT` | opt-in Gear 2.3 Patch A public-only cumulative pool; added coins remain outside trade manager eligibility |
+| `BBOT_HOT_ADD`, `BBOT_HOT_ADD_DELTA`, `BBOT_HOT_ADD_MAX_EXTRA`, `BBOT_HOT_ADD_POLL_SEC`, `BBOT_HOT_ADD_WARM`, `BBOT_HOT_ADD_HISTORY_ROOT` | opt-in Gear 2.3 cumulative pool; private additions reuse the active owner session and entries require every readiness gate |
 | `BBOT_CHRONOMETRY`, `BBOT_L1_RING` | live canary instrumentation |
 | `BBOT_PRIVATE_DATA_ROOT`, `BBOT_PRIVATE_LOG_PATH`, `BBOT_PRIVATE_ENV_FILE` | private journal / secret **path** |
 | `BBOT_PRIVATE_SEND_PATH`, `BBOT_PRIVATE_W6`, `W6_DUAL_LEG`, `BBOT_PRIVATE_W4`/`W4_POST_ONLY`, `BBOT_PRIVATE_W5`/`W5_MARKET`, `BBOT_PRIVATE_W7`/`W7_PARALLEL_DUAL_LEG` | send-path / experiment flags |

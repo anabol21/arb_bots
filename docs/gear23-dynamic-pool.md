@@ -1,25 +1,25 @@
-# Gear 2.3 dynamic pool — Patch A
+# Gear 2.3 dynamic pool — Patches A and B
 
 Gear 2.3 reuses would-send's cumulative hot-add CSV contract for the Gear 2.2 public market-data contour. The fixed configured pool remains the base. A delta snapshot can append candidates, starting one OKX books5 and one Bybit orderbook.1 public stream per accepted coin. Metadata is resolved through the same fail-closed lot/tick gate as would-send.
 
-Patch A is public-only. It leaves every added coin out of the trade manager's coin order; a candidate can be observed and warmed but cannot be opened. It does not add private subscriptions, establish leverage, verify account settings, or enable order sending. A later patch must explicitly add readiness and eligibility gates before any candidate can reach the manager.
+Patch A added public book tasks and watcher state. Patch B reuses the existing private session: Bybit's account-wide subscription gains the added symbol in its inbound allowlist, and OKX subscribes `orders` and `positions` for each added instrument on the current owner socket. No extra socket, recv task, selector, leverage request, or exchange setting change is introduced. New entries require valid metadata, a successful history warm, fresh books in both current public generations, current private readiness (including per-instrument OKX ACKs), and prep-confirmed 1x on both venues. A missing 1x confirmation blocks only that candidate. Existing held coins remain in the manager's pool for close handling.
 
 ## Opt-in configuration
 
-`BBOT_HOT_ADD=1` is off by default. Patch A accepts it only for a Gear 2.2 profile with `BBOT_BROKER=stub`, `LIVE_ORDERS` false, `BBOT_THETA_LIVE_SEND` false, and non-terminal-private execution. For a manual experiment use an isolated `BBOT_DATA_ROOT`, a separate `BBOT_HOT_ADD_DELTA` snapshot, and an environment without exchange credentials. Do not point it at the production would-send delta or share a live canary run root.
+`BBOT_HOT_ADD=1` is off by default. Public/stub mode accepts a Gear 2.2 profile with `BBOT_BROKER=stub` and live gates off. Private mode is limited to the existing fully gated Gear 2.2 private-live contour. The enabled run reads the complete cumulative snapshot before private startup, then polls that same snapshot for additions. For a manual public experiment use an isolated `BBOT_DATA_ROOT` and delta snapshot. The private readonly experiment uses the approved VPS live environment only on that host; it must not invoke an order path or alter leverage/account settings.
 
 | Variable | Default | Meaning |
 |---|---:|---|
-| `BBOT_HOT_ADD` | off | Enable the public-only poller. |
+| `BBOT_HOT_ADD` | off | Enable the dynamic coin pool. |
 | `BBOT_HOT_ADD_DELTA` | `hot_add_delta.csv` | Snapshot path; relative paths resolve under `BBOT_DATA_ROOT`. |
-| `BBOT_HOT_ADD_MAX_EXTRA` | 8 | Maximum added coins. Set to the would-send configured cap for comparisons. |
+| `BBOT_HOT_ADD_MAX_EXTRA` | 8 | Maximum added coins. The active would-send configuration uses a 48-extra cap; use that value for the bounded VPS comparison. |
 | `BBOT_HOT_ADD_POLL_SEC` | 30 | Snapshot poll interval. |
 | `BBOT_HOT_ADD_WARM` | on | Attempt read-only observer warm from available history. |
 | `BBOT_HOT_ADD_HISTORY_ROOT` | data root | Optional alternate read-only warm-history root. |
 
 The snapshot uses the existing `app/utils/universe_delta.py` columns. A candidate absent from the loaded universe must carry positive lot/tick/minimum metadata for both venues. Invalid metadata is logged and skipped. Missing snapshots do not remove the base pool. The production parser is cumulative and idempotent; Patch A is append-only and deliberately has no drop file behavior.
 
-## Patch A checks
+## Offline checks
 
 Offline checks are `python3 -m unittest tests.test_gear23_hot_add tests.test_hot_add_supervisor` and `python3 -m py_compile app/bot/runtime.py app/bot/hot_add.py app/bot/hot_add_warm.py app/utils/task_supervisor.py`. The bounded runtime experiment, after review, should use a dedicated run directory and a manually written CSV with one new candidate, then a second candidate. Confirm two public subscriptions per accepted candidate, duplicate snapshot no-ops, invalid metadata skip, explicit observer warm result, and unchanged trade-eligible base pool. Keep `LIVE_ORDERS=0`; no private session or exchange order is part of A.
 
@@ -29,10 +29,48 @@ The runner `validation/gear23_public_stub_experiment.py` reads three selected me
 /root/venv/bin/python validation/gear23_public_stub_experiment.py \
   --data-root /data/bbot-gear23-patch-a-<new-run-id> \
   --source-delta /data/bbot-would-send-prod/hot_add_delta.csv \
-  --coins CT,AEON
+  --coins CT,AEON,ARX
 ```
 
-Patch B must separately validate private subscription readiness, candidate metadata/1x preparation, fresh public generations, observer warm state, held/pending coin retention, and trade eligibility. It must reuse the active would-send selector's existing cumulative snapshot rather than run a second selector.
+Patch B tests exercise per-instrument OKX ACK matching through the actual owner receive loop, candidate admission gates, held coin retention, and unchanged default Gear 2.2 pool behavior. The readonly VPS experiment reuses the active would-send cumulative snapshot after manually writing the prescribed test additions in an isolated run root; it does not start a second selector. Local code and tests live in the isolated checkout. VPS execution writes logs and runtime artifacts under the dedicated `/data/bbot-gear23-patch-b-*` run root; that VPS-local directory is the experiment's materialization and durability boundary, with no remote upload claim.
+
+## Patch B VPS result (2026-10-06)
+
+The private-readiness experiment completed the ordered CT, duplicate CT,
+AEON+ARX, and invalid G23BAD snapshots against the active would-send CSV as a
+read-only metadata source. All three candidates received both public ACKs,
+successful observer warm, positive TW/theta rows (CT 36; AEON and ARX 16 each),
+and current-generation OKX `orders` and `positions` ACKs matching their
+instrument and unique request ID. Private readiness was true for all three;
+all remained blocked by the expected missing prep-confirmed 1x. No candidate
+was reported eligible. G23BAD failed closed and was not added.
+
+The child used the existing private warm startup and its mandatory signed,
+read-only REST reseed: 29 reads each for six account/position/instrument
+endpoints (174 GETs total). These are the warm session's existing per-coin
+balance, position, and instrument reads; no account-mode or leverage GET and no
+setting request was made. The send-path entry manager and callbacks were disabled; socket
+guards recorded zero blocked operations, the stub broker saw zero place
+attempts, and no REST mutation transport was available. The process received
+SIGTERM and drained all supervised tasks. Logs show one auth/login per venue,
+generation 0 throughout, and the OKX private subscription count increased from
+one startup subscribe to four total (three added instruments). These support
+reuse of the current owner path. The run's late socket-identity sample occurred
+after runtime cleanup had cleared socket references (`id(None)`), so that sample
+does not independently prove object identity; a later harness change captures
+socket identities immediately before cleanup and requires that check for PASS.
+No second private run was made because it would repeat the mandatory account
+reseed.
+
+This run is functionally PASS with the socket-identity measurement limitation
+above. Summary SHA-256: `f31c13131e538aaeb6b5cef395632369552c532471e926aa7555fd8afb7c381b`.
+VPS log timestamps are UTC (the host timezone), so 11:23–11:24 UTC corresponds
+to 14:23–14:24 MSK. VPS data/logs are under
+`/data/bbot-gear23-patch-b-20261006-luna/`; the isolated
+source copy executed at
+`/root/b-private-b-exp/response-manager-code/response-handler-20261005/gear23-patch-b-20261006-luna/gear23/`.
+These are VPS-local artifacts; remote durability/upload was not tested. The
+Gear 2.2 live process and would-send production CSV were not modified.
 
 ## Patch A VPS result (2026-10-06)
 
@@ -75,6 +113,6 @@ An extra coin remains entry-ineligible until valid instrument metadata, current
 public books, required history warmup, both exchanges' private readiness, and
 existing preconfirmed 1x evidence are all present. Missing 1x confirmation for
 an extra does not stop the base contour; dynamic refresh never sets leverage.
-A held or pending coin stays available for close management. Gear 2.2 policy,
-quantity calculation, K1 slot and halt behavior, order parsing, and the validated
+A held position remains pinned for close management. Gear 2.2 policy, quantity
+calculation, global K=1 pending/halt behavior, order parsing, and the validated
 send path remain unchanged.

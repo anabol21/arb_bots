@@ -26,6 +26,9 @@ class FakeWsCM:
         self.outbox: list[str] = []
         self._q: Optional[asyncio.Queue[Optional[str]]] = None
         self.closed = False
+        self.subscribe_ack_code = "0"
+        self.auto_subscribe_ack = True
+        self.reverse_subscribe_ack = False
 
     async def __aenter__(self) -> "FakeWsCM":
         self._q = asyncio.Queue()
@@ -62,15 +65,18 @@ class FakeWsCM:
         if op == "login":
             await self._q.put(json.dumps({"event": "login", "code": "0"}))
         elif op == "subscribe":
-            await self._q.put(
-                json.dumps(
-                    {
-                        "event": "subscribe",
-                        "code": "0",
-                        "arg": {"channel": "orders"},
-                    }
-                )
-            )
+            if not self.auto_subscribe_ack:
+                return
+            args = list(data.get("args", []))
+            if self.reverse_subscribe_ack:
+                args.reverse()
+            for arg in args:
+                await self._q.put(json.dumps({
+                    "event": "subscribe",
+                    "id": data.get("id"),
+                    "code": self.subscribe_ack_code,
+                    "arg": arg,
+                }))
         elif op == "ping":
             await self._q.put("pong")
 
@@ -435,6 +441,185 @@ class SingleLoopWarmTests(unittest.TestCase):
                 any(f == "ping" for f in okx_priv.outbox),
                 f"okx private outbox={okx_priv.outbox!r}",
             )
+            session.stop()
+
+    def test_added_okx_coin_ack_is_instrument_scoped_on_owner_loop(self) -> None:
+        from app.bot.private.selftest import W2PrivateWsTests
+        from app.bot.private.ws_private import RestReseedResult
+        from app.bot.private.ws_warm_session import start_warm_private_session
+
+        warm_loop, cms, _ = self._factory()
+        with tempfile.TemporaryDirectory() as td:
+            env = self._live_env(td)
+            Path(env["BBOT_PRIVATE_DATA_ROOT"]).mkdir(parents=True, exist_ok=True)
+            session = start_warm_private_session(
+                env=env,
+                bybit_credentials=W2PrivateWsTests()._creds(),
+                okx_credentials=W2PrivateWsTests()._creds(okx=True),
+                socket_provider=self._provider(warm_loop),
+                rest_probe_fn=lambda **_: RestReseedResult(matched=True),
+                attach=True,
+                keepalive=True,
+                heartbeat_every_sec=3600.0,
+                silence_timeout_sec=30.0,
+            )
+            cm = cms["ws://okx/private"][0]
+            self.assertTrue(session.is_ready())
+            cm.subscribe_ack_code = "60000"
+            asyncio.run(
+                asyncio.to_thread(
+                    session.add_coin,
+                    "NEW",
+                    bybit_symbol="NEWUSDT",
+                    okx_symbol="NEW-USDT-SWAP",
+                )
+            )
+            request = next(
+                json.loads(frame)
+                for frame in reversed(cm.outbox)
+                if isinstance(frame, str)
+                and frame.startswith("{")
+                and json.loads(frame).get("op") == "subscribe"
+                and any(a.get("instId") == "NEW-USDT-SWAP" for a in json.loads(frame).get("args", []))
+            )
+            self.assertTrue(request.get("id"))
+            self.assertTrue(session.is_ready(), "extra NACK must not unready healthy base pool")
+            self.assertFalse(session.coin_ready(bybit_symbol="NEWUSDT", okx_symbol="NEW-USDT-SWAP"))
+
+            loop = warm_loop.loop
+            assert loop is not None and cm._q is not None
+            wrong = json.dumps({
+                "event": "subscribe", "id": "wrong-request-id", "code": "0",
+                "arg": {"channel": "orders", "instId": "NEW-USDT-SWAP"},
+            })
+            asyncio.run_coroutine_threadsafe(cm._q.put(wrong), loop).result(timeout=2.0)
+            time.sleep(0.05)
+            self.assertFalse(session.coin_ready(bybit_symbol="NEWUSDT", okx_symbol="NEW-USDT-SWAP"))
+            self.assertTrue(session.is_ready())
+
+            # A late positive response cannot undo a NACK for that request/key.
+            for channel in ("orders", "positions"):
+                frame = json.dumps({
+                    "event": "subscribe", "id": request["id"], "code": "0",
+                    "arg": {"channel": channel, "instId": "NEW-USDT-SWAP"},
+                })
+                asyncio.run_coroutine_threadsafe(cm._q.put(frame), loop).result(timeout=2.0)
+            time.sleep(0.05)
+            self.assertFalse(session.coin_ready(bybit_symbol="NEWUSDT", okx_symbol="NEW-USDT-SWAP"))
+            self.assertTrue(session.is_ready())
+
+            no_arg_nack = json.dumps({
+                "event": "error", "id": request["id"], "code": "60000",
+                "msg": "subscribe denied", "arg": None,
+            })
+            asyncio.run_coroutine_threadsafe(cm._q.put(no_arg_nack), loop).result(timeout=2.0)
+            time.sleep(0.05)
+            self.assertTrue(session.is_ready(), "known subscription NACK must not un-auth the base pool")
+
+            cm.subscribe_ack_code = "0"
+            cm.auto_subscribe_ack = False
+            asyncio.run(
+                asyncio.to_thread(
+                    session.add_coin,
+                    "SECOND",
+                    bybit_symbol="SECONDUSDT",
+                    okx_symbol="SECOND-USDT-SWAP",
+                )
+            )
+            second_req = next(
+                json.loads(frame)
+                for frame in reversed(cm.outbox)
+                if frame.startswith("{")
+                and json.loads(frame).get("op") == "subscribe"
+                and any(a.get("instId") == "SECOND-USDT-SWAP" for a in json.loads(frame).get("args", []))
+            )
+            for arg in (
+                {"channel": "orders", "instId": "OTHER-USDT-SWAP"},
+                {"channel": "fills", "instId": "SECOND-USDT-SWAP"},
+            ):
+                frame = json.dumps({
+                    "event": "subscribe", "id": second_req["id"], "code": "0", "arg": arg,
+                })
+                asyncio.run_coroutine_threadsafe(cm._q.put(frame), loop).result(timeout=2.0)
+            time.sleep(0.05)
+            self.assertFalse(session.coin_ready(
+                bybit_symbol="SECONDUSDT", okx_symbol="SECOND-USDT-SWAP"
+            ))
+            for channel in ("positions", "orders"):
+                frame = json.dumps({
+                    "event": "subscribe", "id": second_req["id"], "code": "0",
+                    "arg": {"channel": channel, "instId": "SECOND-USDT-SWAP"},
+                })
+                asyncio.run_coroutine_threadsafe(cm._q.put(frame), loop).result(timeout=2.0)
+            deadline = time.monotonic() + 1.0
+            while time.monotonic() < deadline and not session.coin_ready(
+                bybit_symbol="SECONDUSDT", okx_symbol="SECOND-USDT-SWAP"
+            ):
+                time.sleep(0.01)
+            self.assertTrue(session.coin_ready(
+                bybit_symbol="SECONDUSDT", okx_symbol="SECOND-USDT-SWAP"
+            ), "reordered matching channel ACKs should ready the coin")
+            session.stop()
+
+    def test_old_okx_request_id_cannot_advance_new_generation_readiness(self) -> None:
+        from app.bot.private.selftest import W2PrivateWsTests
+        from app.bot.private.ws_private import RestReseedResult, SubscriptionReadiness
+        from app.bot.private.ws_warm_session import start_warm_private_session
+
+        warm_loop, cms, _ = self._factory()
+        with tempfile.TemporaryDirectory() as td:
+            env = self._live_env(td)
+            Path(env["BBOT_PRIVATE_DATA_ROOT"]).mkdir(parents=True, exist_ok=True)
+            session = start_warm_private_session(
+                env=env,
+                bybit_credentials=W2PrivateWsTests()._creds(),
+                okx_credentials=W2PrivateWsTests()._creds(okx=True),
+                socket_provider=self._provider(warm_loop),
+                rest_probe_fn=lambda **_: RestReseedResult(matched=True),
+                attach=True,
+                keepalive=True,
+                heartbeat_every_sec=3600.0,
+                silence_timeout_sec=30.0,
+            )
+            cm = cms["ws://okx/private"][0]
+            rt = session.okx_runtime
+            old = next(
+                json.loads(frame)
+                for frame in cm.outbox
+                if frame.startswith("{")
+                and json.loads(frame).get("op") == "subscribe"
+            )
+            cm.auto_subscribe_ack = False
+            rt.mark_reconnect()
+            rt.authenticated = True  # isolate subscription correlation from login
+            rt.send_subscribe()
+            current = next(
+                json.loads(frame)
+                for frame in reversed(cm.outbox)
+                if frame.startswith("{")
+                and json.loads(frame).get("op") == "subscribe"
+            )
+            self.assertNotEqual(old["id"], current["id"])
+
+            loop = warm_loop.loop
+            assert loop is not None and cm._q is not None
+            stale = json.dumps({
+                "event": "subscribe", "id": old["id"], "code": "0",
+                "arg": {"channel": "orders", "instId": "TRUMP-USDT-SWAP"},
+            })
+            asyncio.run_coroutine_threadsafe(cm._q.put(stale), loop).result(timeout=2.0)
+            time.sleep(0.05)
+            self.assertEqual(rt.subscription_readiness, SubscriptionReadiness.NOT_READY)
+
+            fresh = json.dumps({
+                "event": "subscribe", "id": current["id"], "code": "0",
+                "arg": {"channel": "orders", "instId": "TRUMP-USDT-SWAP"},
+            })
+            asyncio.run_coroutine_threadsafe(cm._q.put(fresh), loop).result(timeout=2.0)
+            deadline = time.monotonic() + 1.0
+            while time.monotonic() < deadline and rt.subscription_readiness != SubscriptionReadiness.READY:
+                time.sleep(0.01)
+            self.assertEqual(rt.subscription_readiness, SubscriptionReadiness.READY)
             session.stop()
 
     def test_place_send_not_blocked_by_recv(self) -> None:

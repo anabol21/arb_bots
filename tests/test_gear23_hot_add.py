@@ -2,10 +2,13 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 import sys
 import tempfile
 import types
 import unittest
+from dataclasses import replace
+from decimal import Decimal
 from pathlib import Path
 from unittest.mock import patch
 
@@ -25,10 +28,12 @@ from app.bot.floor_watcher import LiveFloorObserver
 from app.bot.hot_add_warm import warm_floor_from_history
 from app.bot.runtime import BotRuntime
 from app.bot.stub_broker import InstrumentMeta
+from app.bot.theta_screener import ThetaSnapshot
 from app.bot.theta_screener import LiveThetaScreener
 from app.bot.tw_p50_watcher import LiveTwP50Observer
 from app.utils.task_supervisor import TaskSupervisor
 from app.utils.universe_delta import read_delta_rows, write_delta_atomic
+from app.utils.tick_validity import TickValidityGate
 
 
 def _row(coin: str) -> dict[str, str]:
@@ -117,6 +122,10 @@ class Gear23HotAddTests(unittest.TestCase):
             runtime.coins = ["BASE"]
             runtime._gear23_base_coins = ("BASE",)
             runtime._gear23_hot_add_enabled = True
+            runtime._gear23_pool_started = True
+            runtime._gear23_floor_warm = {}
+            runtime._gear23_last_status = {}
+            runtime._gear23_confirmed_1x = frozenset()
             runtime._hot_add_supervisor = TaskSupervisor()
             runtime.stop_event = asyncio.Event()
             runtime.data_root = self.root
@@ -142,6 +151,8 @@ class Gear23HotAddTests(unittest.TestCase):
             runtime.theta_screener = LiveThetaScreener(
                 ["BASE"], floor_observer=floor, tw_p50_observer=tw
             )
+            runtime.theta_trade = None
+            runtime._private_warm = None
             runtime.floor_observer = floor
             runtime.tw_p50_observer = tw
 
@@ -170,6 +181,121 @@ class Gear23HotAddTests(unittest.TestCase):
         asyncio.run(exercise())
         self.assertEqual(len(stopped), 2)
 
+    def test_extra_entry_waits_for_every_gate_and_held_coin_stays_pinned(self) -> None:
+        now = __import__("time").time() * 1000.0
+        runtime = object.__new__(BotRuntime)
+        runtime.coins = ["BASE", "NEWONE"]
+        runtime._gear23_base_coins = ("BASE",)
+        runtime._gear23_hot_add_enabled = True
+        runtime._gear23_floor_warm = {"NEWONE": True}
+        runtime._gear23_last_status = {}
+        runtime._gear23_confirmed_1x = frozenset({"NEWONE"})
+        runtime.log = logging.getLogger("test-gear23-gates")
+        runtime._terminal_private_execution = True
+        runtime._okx_ct_vals = {"NEWONE-USDT-SWAP": 0.01}
+        runtime._okx_inst_id_codes = {"NEWONE-USDT-SWAP": 42}
+        runtime._leverage_one = {
+            ("okx", "NEWONE-USDT-SWAP"): "1",
+            ("bybit", "NEWONEUSDT"): "1",
+        }
+        runtime.gate = TickValidityGate(skew_max_ms=100, age_max_ms=1000)
+        runtime.gate.coin_generation["NEWONE"] = 1
+        runtime.gate.leg_generation[("NEWONE", "okx")] = 1
+        runtime.gate.leg_generation[("NEWONE", "bybit")] = 1
+        runtime.universe = {
+            "NEWONE": InstrumentMeta(
+                base_coin="NEWONE", okx_symbol="NEWONE-USDT-SWAP",
+                bybit_symbol="NEWONEUSDT", okx_lot_size=1, okx_min_size=1,
+                bybit_qty_step=1, bybit_min_order_qty=1,
+                okx_tick_size=0.01, bybit_tick_size=0.01,
+            )
+        }
+        runtime.quotes = {
+            "NEWONE": {
+                "okx": {"bid_price": 10, "bid_size": 1, "ask_price": 11,
+                        "ask_size": 1, "ts_exchange": now, "local_recv_ts_ms": now},
+                "bybit": {"bid_price": 10, "bid_size": 1, "ask_price": 11,
+                          "ask_size": 1, "ts_exchange": now, "local_recv_ts_ms": now},
+            }
+        }
+        runtime._private_warm = types.SimpleNamespace(
+            coin_ready=lambda **_: False
+        )
+        snap = ThetaSnapshot(
+            base_coin="NEWONE", side="long", ts_ms=int(now), p50_1m=1,
+            p50_5m=1, floor_tf_select_a25=0, theta_1m=1, theta_5m=1,
+            computed_at_ms=int(now),
+        )
+        self.assertFalse(runtime._gear23_candidate_ready("NEWONE", [snap]))
+        runtime._private_warm = types.SimpleNamespace(coin_ready=lambda **_: True)
+        self.assertTrue(runtime._gear23_candidate_ready("NEWONE", [snap]))
+
+        cases = (
+            ("warm", lambda: runtime._gear23_floor_warm.update({"NEWONE": False}),
+             lambda: runtime._gear23_floor_warm.update({"NEWONE": True}), [snap]),
+            ("freshness", lambda: runtime.quotes["NEWONE"]["okx"].update({"local_recv_ts_ms": now - 5000}),
+             lambda: runtime.quotes["NEWONE"]["okx"].update({"local_recv_ts_ms": now}), [snap]),
+            ("generation", lambda: runtime.gate.leg_generation.pop(("NEWONE", "bybit")),
+             lambda: runtime.gate.leg_generation.update({("NEWONE", "bybit"): 1}), [snap]),
+            ("theta", lambda: None, lambda: None, [replace(snap, theta_1m=math.nan)]),
+            ("instrument lot", lambda: runtime.universe.update({"NEWONE": replace(runtime.universe["NEWONE"], okx_lot_size=0)}),
+             lambda: runtime.universe.update({"NEWONE": replace(runtime.universe["NEWONE"], okx_lot_size=1)}), [snap]),
+            ("ctVal", lambda: runtime._okx_ct_vals.update({"NEWONE-USDT-SWAP": Decimal("NaN")}),
+             lambda: runtime._okx_ct_vals.update({"NEWONE-USDT-SWAP": Decimal("0.01")}), [snap]),
+            ("instIdCode", lambda: runtime._okx_inst_id_codes.update({"NEWONE-USDT-SWAP": 0}),
+             lambda: runtime._okx_inst_id_codes.update({"NEWONE-USDT-SWAP": 42}), [snap]),
+            ("one-x", lambda: setattr(runtime, "_gear23_confirmed_1x", frozenset()),
+             lambda: setattr(runtime, "_gear23_confirmed_1x", frozenset({"NEWONE"})), [snap]),
+            ("private ACK", lambda: setattr(runtime, "_private_warm", types.SimpleNamespace(coin_ready=lambda **_: False)),
+             lambda: setattr(runtime, "_private_warm", types.SimpleNamespace(coin_ready=lambda **_: True)), [snap]),
+        )
+        for name, invalidate, restore, snapshots in cases:
+            with self.subTest(gate=name):
+                invalidate()
+                self.assertFalse(runtime._gear23_candidate_ready("NEWONE", snapshots))
+                restore()
+                self.assertTrue(runtime._gear23_candidate_ready("NEWONE", [snap]))
+
+        runtime.theta_trade = types.SimpleNamespace(
+            slot=types.SimpleNamespace(
+                position=types.SimpleNamespace(base_coin="NEWONE")
+            )
+        )
+        runtime._private_warm = types.SimpleNamespace(coin_ready=lambda **_: False)
+        self.assertEqual(runtime._gear23_trade_coin_order([snap]), ("NEWONE", "BASE"))
+
+    def test_gear22_trade_pool_default_is_unchanged(self) -> None:
+        runtime = object.__new__(BotRuntime)
+        runtime.coins = ["BASE", "EXTRA"]
+        runtime._gear23_hot_add_enabled = False
+        self.assertEqual(runtime._gear23_trade_coin_order(), ("BASE", "EXTRA"))
+
+    def test_synthetic_roll_loop_uses_current_trade_pool_callback(self) -> None:
+        async def exercise() -> None:
+            runtime = object.__new__(BotRuntime)
+            runtime.stop_event = asyncio.Event()
+            runtime.quotes = {}
+            runtime._theta_trade_warned = False
+            runtime._synthetic_roll_halt_reason = None
+            runtime._synthetic_roll_halted = False
+            runtime._gear23_trade_coin_order = lambda: ("BASE",)
+
+            class Trade:
+                slot = types.SimpleNamespace(pending=False)
+                execution_halt_reason = None
+
+                async def on_theta_snapshots_async(self, _snapshots, **kwargs) -> None:
+                    self.coin_order = kwargs["coin_order"]
+                    runtime.stop_event.set()
+
+            trade = Trade()
+            runtime.theta_trade = trade
+            with patch.object(runtime_module, "EMIT_INTERVAL_SEC", 0.001):
+                await asyncio.wait_for(runtime._synthetic_roll_loop(), timeout=0.2)
+            self.assertEqual(trade.coin_order, ("BASE",))
+
+        asyncio.run(exercise())
+
     def test_patch_a_constructor_refuses_private_broker(self) -> None:
         env = {
             "BBOT_MODE": "probe",
@@ -181,7 +307,18 @@ class Gear23HotAddTests(unittest.TestCase):
         }
         with patch.dict("os.environ", env, clear=True), patch(
             "app.bot.sentry_setup.init_sentry", return_value=False
-        ), self.assertRaisesRegex(ValueError, "BBOT_HOT_ADD Patch A"):
+            ), self.assertRaisesRegex(ValueError, "BBOT_HOT_ADD requires"):
+            BotRuntime()
+
+    def test_terminal_private_constructor_checks_configuration_before_metadata(self) -> None:
+        env = {
+            "BBOT_MODE": "probe",
+            "BBOT_PROFILE": "gear1",
+            "BBOT_THETA_EXECUTION": "terminal_private",
+        }
+        with patch.dict("os.environ", env, clear=True), self.assertRaisesRegex(
+            ValueError, "requires gear22_live_canary"
+        ):
             BotRuntime()
 
 
