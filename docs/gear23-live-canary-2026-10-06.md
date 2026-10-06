@@ -2,7 +2,7 @@
 
 ## Deployment result
 
-The Gear 2.3 B2.3 canary is running as PID `2343195` from immutable commit
+The Gear 2.3 B2.3 canary is running as PID `2354286` from immutable commit
 `e2e134ca54731af95f1a8ea9594372e872fda025` (branch `B2.3`). The B2.3 branch
 includes the validated preB2.2 contour, Gear 2.3 patches A/B, and the reviewed
 close-PnL correction. `main` is `1d43137d208d4921ddafb406e6d267c861b3d318`;
@@ -75,8 +75,9 @@ currently reports `position={}`, `pending=false`, `halt=null`, and
 `completed_cycles=0`. The configured limits remain K=1, notional 10 USDT,
 policy `gear22_frozen_v1`, `canary_max_cycles=0`, and 72 hours. It uses the
 existing natural signal and halt rules; no synthetic signal or forced order was
-issued. The process starts with the original 29 coins carrying existing
-confirmed-1x evidence. No leverage or account settings were changed.
+issued. The initial process started with the original 29 coins carrying
+existing confirmed-1x evidence. The later user-authorized 1x preparation is
+recorded below; no other account or strategy settings were changed.
 
 ## Readiness evidence at initial review
 
@@ -86,31 +87,72 @@ both Bybit and OKX trade sockets continued after warm readiness. After the
 snapshot was linked, all 25 extras were registered. Public ACKs were observed
 for all 54 coins on both venues: 54 Bybit `orderbook.1` and 54 OKX `books5`
 subscriptions. Observer warm events covered 25 extra coins. Candidate gate
-events showed all 25 extras blocked for missing prep-confirmed 1x; per the
-runtime gate ordering, an extra reaching this reason has passed its
+events initially showed all 25 extras blocked for missing prep-confirmed 1x;
+per the runtime gate ordering, an extra reaching this reason has passed its
 instrument-scoped private readiness checks at that evaluation. Public
-`stale`/`incomplete` reasons were also present while books were settling, so
-this report does not claim all extras are currently entry-ready. The 25 extras
-remain entry-ineligible until every gate passes. No per-coin raw private ACK
-count is claimed because those ACKs are tracked in memory rather than journaled
-as an independent per-coin summary.
+`stale`/`incomplete` reasons were also present while books were settling. No
+per-coin raw private ACK count is claimed because those ACKs are tracked in
+memory rather than journaled as an independent per-coin summary.
 
-No order or leverage mutation was attempted. The live order path remains
-enabled only for natural policy decisions under the existing guards; no
-qualifying signal had been observed at this initial review. The standalone
-would-send process is separate and continues unchanged.
+No order or leverage mutation was attempted at this initial review. The live
+order path remains enabled only for natural policy decisions under the existing
+guards; no qualifying signal had been observed at this initial review. The
+standalone would-send process is separate and continues unchanged.
 
 ## Monitor and stop conditions
 
 Read the single PID, log, and state above for runtime health. Confirm state is
 flat and `pending=false` before any operator restart. A held position or
 pending terminal action must resolve through the existing natural close path;
-do not force-close or kill the process. Extra pool coins missing 1x evidence
-are expected to remain blocked. Do not set leverage or change profile, K,
-notional, selector, or halt settings as part of this canary.
+do not force-close or kill the process. Extra coins without matching 1x
+evidence or another required readiness gate remain blocked. Do not change
+profile, K, notional, selector, or halt settings as part of this canary.
 
 For rollback, first require the checkpoint to show `position={}` and
-`pending=false`, then stop PID `2343195` gracefully before deploying the prior
-source. If a position is held or an action is pending, preserve the current
-source and journal and use only a compatible handoff after the existing
+`pending=false`, then stop the currently recorded canary PID gracefully before
+deploying the prior source. If a position is held or an action is pending,
+preserve the current source and journal and use only a compatible handoff after the existing
 natural close completes. Never force-kill or auto-flatten during rollback.
+
+## 1x preparation and restarted run
+
+After explicit user authorization, the exact 25 extras in the cumulative
+production snapshot were prepared through the existing fixed-1x helpers. The
+snapshot was `/data/bbot-would-send-prod/hot_add_delta.csv`, SHA256
+`29d5f0024c25c120db3ec3edbf6315ddc4c7ceb1376b1b12be1dfd0dd11c80d5`. Every
+target passed both-venue symbol-scoped flat-position and open-order checks
+before settings calls. The runner made 50 fixed leverage-to-1 setting posts;
+25/25 Bybit and 25/25 OKX setter acknowledgements and matching 1x readbacks
+were confirmed. It sent zero orders. Non-secret evidence is at
+`/root/b-private-b-exp/response-manager/gear23-1x-prep-20261006-502ab09-r2/result.json`.
+The resulting confirmation records the 29 base coins unchanged and 54 total
+confirmed coins. No account-mode reads or unrelated settings changes were
+made.
+
+With the checkpoint flat, `pending=false`, and no halt, PID `2343195` received
+SIGTERM and exited. Its final checkpoint remained flat with no pending action.
+The same immutable runtime commit `e2e134ca54731af95f1a8ea9594372e872fda025`
+restarted as PID `2354286` at `2026-10-06T13:24:52.968Z`. It reuses the existing
+data, private-journal, and log roots and reads the production CSV directly via
+`BBOT_HOT_ADD_DELTA=/data/bbot-would-send-prod/hot_add_delta.csv`. The 29 base
+coins remain unchanged; the confirmed-1x list now contains 54 coins. The
+original open-window deadline is preserved as
+`2026-10-09T12:27:03.176Z`, about 0.239 seconds later than the previous
+checkpoint deadline due to floating-point hour conversion.
+
+The new process reported `private_warm_started ready=True` with one handshake,
+confirmed startup flat state for 54 coins, and emitted heartbeats. Its hot-add
+poll read 25 rows and retained 25 extras. The startup registration passed all
+54 coins to the private warm-session pool. A filtered readiness check observed
+warm events for all 25 extras and 25 candidate-gate records: 21 were blocked
+by `private_ack`, 4 by `public_book_stale`, and none were eligible at that
+check. The private journal contains one successful aggregate subscription ACK
+per venue and matched reseeds; that does not prove every OKX per-instrument
+orders/positions ACK required by the entry gate. Startup logs show no reconnect
+or NACK, and the existing logs do not expose per-instrument ACK outcomes, so
+the 21 `private_ack` gates remain unresolved and fail-closed. Confirmed 1x
+evidence removes only the leverage gate; private ACK, public-book, history, and
+policy gates still control entry. No synthetic signal, forced order,
+account-mode GET, or additional setting call was used after restart. Future
+new extras remain ineligible until the same explicit preparation and runtime
+readiness checks succeed.
