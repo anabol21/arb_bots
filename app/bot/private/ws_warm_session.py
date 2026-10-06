@@ -861,9 +861,7 @@ class PrivateWarmSession:
                 return
             if not self._send_runtime_heartbeats(rt, phase="post_handshake"):
                 return
-            for sock in (priv, trade):
-                if hasattr(sock, "handshake_done"):
-                    sock.handshake_done = True
+            self._mark_loop_handshake_done((rt,))
             reseed_ev = rt.run_rest_reseed()
             if (
                 reseed_ev.get("reconciliation_state") != "matched"
@@ -892,11 +890,21 @@ class PrivateWarmSession:
         finally:
             lock.release()
 
-    def _mark_loop_handshake_done(self) -> None:
-        """Enable owner receive/heartbeat work; readiness still requires matched REST reseeds."""
-        for rt in (self.bybit_runtime, self.okx_runtime):
+    def _mark_loop_handshake_done(
+        self, runtimes: Optional[Sequence[PrivateStreamRuntime]] = None
+    ) -> None:
+        """Enable owner receive work and hand off pre-auth queued frames atomically."""
+        targets = tuple(runtimes) if runtimes is not None else (
+            self.bybit_runtime,
+            self.okx_runtime,
+        )
+        for rt in targets:
             for sock in (rt.private_socket, rt.trade_socket):
-                if sock is not None and hasattr(sock, "handshake_done"):
+                if sock is None or not hasattr(sock, "handshake_done"):
+                    continue
+                if is_loop_owned_socket(sock):
+                    sock.activate_handshake()
+                else:
                     sock.handshake_done = True
 
     def connector(self) -> "WarmConnector":

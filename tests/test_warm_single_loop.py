@@ -444,6 +444,45 @@ class SingleLoopWarmTests(unittest.TestCase):
             session.stop()
 
 
+    def test_startup_okx_ack_burst_is_drained_at_handshake_handoff(self) -> None:
+        from app.bot.private.selftest import W2PrivateWsTests
+        from app.bot.private.ws_private import RestReseedResult
+        from app.bot.private.ws_warm_session import start_warm_private_session
+
+        warm_loop, _cms, _ = self._factory()
+        coins = ("BTC", "ETH", "SOL")
+        okx_symbols = tuple(f"{coin}-USDT-SWAP" for coin in coins)
+        bybit_symbols = tuple(f"{coin}USDT" for coin in coins)
+        with tempfile.TemporaryDirectory() as td:
+            env = self._live_env(td)
+            Path(env["BBOT_PRIVATE_DATA_ROOT"]).mkdir(parents=True, exist_ok=True)
+            session = start_warm_private_session(
+                env=env,
+                bybit_credentials=W2PrivateWsTests()._creds(),
+                okx_credentials=W2PrivateWsTests()._creds(okx=True),
+                socket_provider=self._provider(warm_loop),
+                rest_probe_fn=lambda **_: RestReseedResult(matched=True),
+                coins=coins,
+                bybit_symbols=bybit_symbols,
+                okx_symbols=okx_symbols,
+                attach=True,
+                keepalive=True,
+                heartbeat_every_sec=0.15,
+                silence_timeout_sec=2.0,
+            )
+            self.assertTrue(session.is_ready())
+            self.assertTrue(
+                all(
+                    session.okx_runtime.okx_symbol_ready(symbol)
+                    for symbol in okx_symbols
+                ),
+                "all startup orders/positions ACKs must survive the handshake queue handoff",
+            )
+            self.assertEqual(
+                len(session.okx_runtime._symbol_subscription_acks), 6  # noqa: SLF001
+            )
+            session.stop()
+
     def test_added_okx_coin_ack_is_instrument_scoped_on_owner_loop(self) -> None:
         from app.bot.private.selftest import W2PrivateWsTests
         from app.bot.private.ws_private import RestReseedResult
