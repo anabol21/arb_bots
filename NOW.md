@@ -9,8 +9,8 @@
 Симуляция гира 2.2, `would_send`, `send=false`. Живых ордеров нет.
 
 - Юнит `spread-bbot-would-send-prod`, данные `/data/bbot-would-send-prod`.
-- SHA checkout на хосте `3f9a1df` (код #71; tip main сдвинулся, контур не перекатывался под новый tip).
-- Статус 06.10 ~22:00 МСК: крутится после рестарта на flat book (orphan нет). AGE/SKEW freshness подняты 2s→10s через unit env `SPREAD_TICK_AGE_MAX_MS=10000` / `SPREAD_TICK_SKEW_MAX_MS=10000` (бэкап юнита `*.bak.20261006-age10s`), код/SHA без смены. Ротация expand-only в 10:00 МСК. Пул 54 = база 29 + 25 экстра (AEON, API3, ARX, BREV, CT, DGAI, ENJ, ESP, GMX, KGEN, LAB, LQTY, MANA, OPN, RECALL, RESOLV, RSR, SAND, SENT, SPACE, TRIA, TRUTH, UMA, WOO, YGG). Открытых θ нет. Канарейка theta-k1 остановлена.
+- SHA checkout на хосте `c3d3e5f` (код #74 size_check journal/tests; tip main).
+- Статус 07.10 ~00:24 МСК: выкатили `c3d3e5f` (detached) поверх `3f9a1df`, рестарт только `spread-bbot-would-send-prod` на flat book (orphan θ нет). В `size_check` — journal-поля + gear23-aligned путь `okx_ct_val` / contracts×ct_val; на stub без `ct_val` поведение как раньше (сырой L1). AGE/SKEW по-прежнему 10s через unit env `SPREAD_TICK_AGE_MAX_MS=10000` / `SPREAD_TICK_SKEW_MAX_MS=10000`, `BBOT_NOTIONAL_USDT=20`. Ротация expand-only в 10:00 МСК. Пул 54 = база 29 + 25 экстра (AEON, API3, ARX, BREV, CT, DGAI, ENJ, ESP, GMX, KGEN, LAB, LQTY, MANA, OPN, RECALL, RESOLV, RSR, SAND, SENT, SPACE, TRIA, TRUTH, UMA, WOO, YGG). Открытых θ нет. Канарейка theta-k1 остановлена. Канарейка после деплоя: смотреть rate `insufficient_size` (stub-path должен выглядеть так же).
 - Гейты: θ_open 0.50, p50_open 0.60, min_profit 0.20, fee 0.30, K=1; tick AGE/SKEW 10000 мс (unit env).
 - Следит Sentry (issue created) на открытиях.
 - Не трогать Contour B и `/data/live`. Шов рестарта: hot-add экстра прогревается из устаревшей history, floor прыгает.
