@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import asyncio
 import concurrent.futures
+import json
 import logging
 import queue
 import threading
@@ -52,10 +53,63 @@ def reconnect_sleep_sec(
     return min(float(cap), float(base) * (2**n))
 
 
+def _is_private_order_push(exchange: str, text: str) -> bool:
+    """OKX ``orders`` channel or Bybit order/execution topic. Not a place ack."""
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError:
+        return False
+    if not isinstance(data, dict):
+        return False
+    if str(exchange).strip().lower() == "bybit":
+        topic = str(data.get("topic") or "")
+        return topic.startswith("order") or topic.startswith("execution")
+    arg = data.get("arg")
+    if isinstance(arg, dict) and str(arg.get("channel") or "") == "orders":
+        return True
+    return False
+
+
 def _decode_ws_message(message: Any) -> str:
     if isinstance(message, bytes):
         return message.decode("utf-8", errors="replace")
     return str(message)
+
+
+def _record_owner_wire(
+    sock: "LoopOwnedSocket",
+    text: str,
+    *,
+    capture_stage: str,
+    wall_ms: int,
+    mono_ns: int,
+) -> None:
+    """Capture at the sole websocket reader, without exposing frame contents in logs."""
+    transcript = getattr(sock, "_wire_transcript", None)
+    runtime = sock.runtime
+    if transcript is None or runtime is None:
+        return
+    try:
+        transcript.record_io(
+            direction="in",
+            venue=sock.exchange,
+            socket=sock.channel,
+            text=text,
+            wall_ms=wall_ms,
+            mono_ns=mono_ns,
+            reconnect_generation=int(runtime.reconnect_generation),
+            run_id=str(transcript.run_id),
+            capture_stage=capture_stage,
+        )
+    except Exception as exc:  # noqa: BLE001 — capture loss is observed and halts the campaign
+        transcript.mark_unhealthy(type(exc).__name__)
+        LOG.error(
+            "warm_wire_capture_failed exchange=%s channel=%s gen=%s err=%s",
+            sock.exchange,
+            sock.channel,
+            runtime.reconnect_generation,
+            type(exc).__name__,
+        )
 
 
 def is_loop_owned_socket(sock: Any) -> bool:
@@ -136,6 +190,57 @@ class LoopOwnedSocket:
                 "use asend() from listen/heartbeat tasks"
             )
         fut = asyncio.run_coroutine_threadsafe(ws.send(text), loop)
+        try:
+            fut.result(timeout=_SEND_TIMEOUT_SEC)
+        except concurrent.futures.TimeoutError as exc:
+            fut.cancel()
+            raise TimeoutError("loop-owned send timeout") from exc
+
+    def send_text_timed(
+        self,
+        text: str,
+        *,
+        on_send_start: Optional[Callable[[int], None]] = None,
+        on_send_return: Optional[Callable[[int], None]] = None,
+    ) -> None:
+        """Send as usual while exposing owner-loop monotonic boundaries.
+
+        Hooks are optional and best-effort. Hook failures never change send
+        success, timeout, or exception behavior. ``send_text`` remains the
+        unchanged compatibility API for existing callers.
+        """
+        if not isinstance(text, str):
+            raise TypeError("send_text requires str")
+        ws = self._ws
+        loop = self._owner.loop
+        if ws is None or loop is None or not self._connected:
+            raise RuntimeError("loop-owned socket not connected")
+        try:
+            running = asyncio.get_running_loop()
+        except RuntimeError:
+            running = None
+        if running is loop:
+            raise RuntimeError(
+                "LoopOwnedSocket.send_text_timed cannot wait on the owner loop; "
+                "use asend() from listen/heartbeat tasks"
+            )
+
+        def _stamp(hook: Optional[Callable[[int], None]]) -> None:
+            if hook is None:
+                return
+            try:
+                hook(time.monotonic_ns())
+            except Exception:  # noqa: BLE001 — instrumentation cannot affect I/O
+                pass
+
+        async def _send_on_owner_loop() -> None:
+            _stamp(on_send_start)
+            try:
+                await ws.send(text)
+            finally:
+                _stamp(on_send_return)
+
+        fut = asyncio.run_coroutine_threadsafe(_send_on_owner_loop(), loop)
         try:
             fut.result(timeout=_SEND_TIMEOUT_SEC)
         except concurrent.futures.TimeoutError as exc:
@@ -490,8 +595,21 @@ class PrivateWarmLoop:
             if self._stop_requested() or sock._permanent_close:  # noqa: SLF001
                 return
             text = _decode_ws_message(message)
-            sock.last_recv_mono_ns = time.monotonic_ns()
+            arrival_mono_ns = time.monotonic_ns()
+            arrival_wall_ms = int(time.time() * 1000)
+            sock.last_recv_mono_ns = arrival_mono_ns
             runtime = sock.runtime
+            private_order = sock.channel == "private" and _is_private_order_push(
+                sock.exchange, text
+            )
+            if sock.channel == "trade" or private_order:
+                _record_owner_wire(
+                    sock,
+                    text,
+                    capture_stage="socket_arrival",
+                    wall_ms=arrival_wall_ms,
+                    mono_ns=arrival_mono_ns,
+                )
             if runtime is not None:
                 if sock.channel == "trade":
                     runtime.note_trade_activity()
@@ -526,6 +644,16 @@ class PrivateWarmLoop:
                         runtime.handle_inbound_text(text)
                     except Exception:  # noqa: BLE001
                         raise
+                    # Orders/execution pushes are not the op=order reply. While
+                    # a place is in flight, keep the raw frame for that wait.
+                    # No second socket and no REST query.
+                    inflight = slot.place_inflight_fn
+                    if (
+                        inflight is not None
+                        and inflight()
+                        and _is_private_order_push(sock.exchange, text)
+                    ):
+                        runtime.stash_trade_inbound(text)
                     continue
             sock.push_inbound(text)
 

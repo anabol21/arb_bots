@@ -212,6 +212,15 @@ flowchart TB
   mktDecide --> place
   thetaDec -->|stub: no broker.place| thetaJ["theta_trades.jsonl\nwould_send=true send=false"]
   thetaDec -->|live_send: broker.place now| place
+  thetaDec -->|BBOT_THETA_EXECUTION=terminal_private\ngear22_live_canary only| canaryGate["common K=1 size/freshness/held-depth gate"]
+  canaryGate -->|one prewarmed worker| privateSend["existing warmed dual sender"]
+  privateSend --> terminal["terminal order result\nACK is not fill"]
+  terminal -->|both exact fills| journal["intent StepChrono\nwall-ms + native monotonic signal"]
+  journal --> slot["single owner updates K=1 slot"]
+  slot --> flat{"close REST-flat confirmed?"}
+  flat -->|cycles < 10| observers
+  flat -->|cycle 10| stop["stop flat; no forced close"]
+  terminal -->|uncertain after send| halt["pending exposure + halt\nno retry or recovery"]
 
   place{BBOT_BROKER}
   place -->|stub / private_testnet| stub["StubBroker.place\npending + Trade_Lat fill"]
@@ -222,6 +231,8 @@ flowchart TB
   ack -->|ok| wire["private/wire/.../wire.jsonl"]
   live --> thetaLive["theta_trades.jsonl\nwould_send=true send=true/false"]
 ```
+
+The terminal-private Canary29 branch is an opt-in mode inside the existing `python -m app.bot` process; it does not introduce a second runner or change the systemd contours. On 2026-10-05, an isolated VPS-local run used this path for ten completed open→terminal close→REST-flat cycles, then exited flat at its configured cap. The source commit and actual VPS-local run artifacts are recorded in [the campaign report](docs/canary29-live-run-2026-10-05.md). The run did not validate mounted or remote-storage durability.
 
 Default live send path: Contour B `app/bot/private/ws_trivial_dual_leg.py` (W6 `build_trade_place` frames, then `ws.send`). Full W6 recover→approve→lease→preflight is **off** that path unless `BBOT_PRIVATE_SEND_PATH=w6` **and** `BBOT_PRIVATE_W6=1`. `BBOT_PRIVATE_W6=1` alone does not switch the manager.
 
@@ -268,6 +279,12 @@ Send: strategy filters in `LiveBroker.place` → Contour B dual `ws.send` → wa
 
 Journals for live: theta_trades `send` flag; private `events.jsonl` (`bbot.private.journal.v1`) when private writer is used; append-only `wire.jsonl` (`bbot.private.wire.v1`). Stub `legs.jsonl` `send` stays false by construction.
 
+Profile `synthetic_roll` keeps the gear 2.2 K=1 slot and size gate, and swaps in a synthetic pool roll (`app/bot/synthetic_policy.py`) instead of `decide_theta_k1`. Its place path is `app/bot/private/place_send.py` (not `LiveBroker.place`): shared coin qty near 10 USD, `send_long` / `send_short` only when both private legs are up, then a theta-trade journal chain `pending` → `open` / `closed`. Step stamps go to `{BBOT_DATA_ROOT}/theta_trades/event_date=*/step_chrono.jsonl` (not the canary chronometry dashboard) and refuse `/data/live`, `/data/bars`, `/data/compacted`, and `/data/spool`. Live exchange send for this profile runs only when `BBOT_BROKER=private_live`, `VENUE=live`, and `LIVE_ORDERS=1`; otherwise the process uses the local sender and does not open order sockets. After a successful send, the live wait drains each venue's warm trade inbound — private-runtime stash, then loop-owned `recv_text` (the listen queue, not a second `ws.recv`) — for about 5 seconds, skipping ping/pong. The place ack is classified before any price lookup: OKX is accepted when top-level `code` is `0` and `data[0].sCode` is `0` or absent; Bybit is accepted when `retCode` is `0`. That ack is journaled and does not finish the trade. The wait reads the already-subscribed private order updates (OKX `orders`; Bybit `order`) and correlates rows to this attempt's client order ID plus IDs returned by its matching ACK; identifiable responses from earlier attempts are ignored. A matching terminal OKX `state=filled` (`accFillSz`, positive finite `avgPx`) or Bybit `orderStatus=Filled` (`cumExecQty`, positive finite `avgPrice`) is complete only when its cumulative quantity equals the sized quantity sent for that venue. Execution fragments and working/partial states do not complete the trade. Both venues must satisfy the terminal, quantity, and price checks before the journal writes `open` or `closed`; arrival `wall_ms` remains separate from signal latency. Reject, terminal partial/cancel, quantity or price mismatch, and timeout stop the roll and leave possible exposure pending for review. This path sends no retry, recovery order, or REST query. On startup the manager restores the K=1 slot from the latest `bbot.synthetic_roll.v1` intent in `theta_trades`: a pending row with no later open or closed stays pending, and pending or open does not send a new open. OKX `instIdCode` and `ctVal` are prefetched per symbol at warm start and consumed from the cache; missing metadata blocks before `ws.send`. One shared coin qty is the amount nearest 10 USD; OKX `sz = coin_qty / ctVal` snapped to `lotSz`; Bybit `qty` is that same coin qty snapped to `qtyStep`. Unequal snapped coin amounts abort `qty_mismatch`. Warmup sets leverage to 1 once per configured coin on both venues; it does not market-close or flatten. The raw-OKX-contract-to-base-depth conversion marker is attached only for `synthetic_roll`; other theta live profiles retain their prior book context. See [the response handling and fill gate](docs/synthetic-roll-response-handling-2026-10-04.md), [the successful bounded size-gate/live experiment](docs/size-gate-live-experiment-2026-10-05.md), and the [handoff notes](docs/private-response-handler-handoff-2026-10-05.md). The older [first attempt report](docs/response-manager-live-experiment-2026-10-05.md) was blocked before place and is superseded by the successful report.
+
+`synthetic_roll` live startup imports `place_send` and `send_legs` after the private session is ready, then creates and caches its dual sender before starting signal-facing tasks. Readiness means both sender coroutines have reached their queues; startup logs zero queue depth and sends no dummy frame. The sender is bound to that same warm session, and shutdown closes it before stopping the session. The initial six-action timing evidence and the startup patch are recorded in [synthetic-roll send readiness](docs/synthetic-roll-send-readiness-2026-10-04.md).
+
+The same `terminal_private` path also supports the frozen `gear22` policy for the long-running live canary; policy and execution selectors remain independent. `BBOT_CANARY_MAX_CYCLES` defaults to 10, and `0` disables the cycle cap. `BBOT_CANARY_OPEN_WINDOW_HOURS` blocks new opens after its monotonic deadline; an existing position must reach its normal Gear 2.2 close and a confirmed REST-flat boundary before the runtime stops. There is no timed close, retry, reconciliation order, or automatic flatten. The terminal manager checkpoints `canary_state.json` atomically under the run data root on lifecycle changes and the 30-second heartbeat; the checkpoint includes policy/execution identity, open position, pending/halt state, cycle count, deadline, and the timestamp of the last policy evaluation. A failed checkpoint halts and retains pending state. Startup is flat-only by default. Explicit `BBOT_CANARY_RESUME_MANIFEST` is a narrow operator handoff for a known completed open: the source PID must be stopped, its safe-parsed heartbeat and fsynced terminal-open row must agree, full journal replay must show no later close/pending/abort/overlap, and one fresh accountwide Bybit linear-USDT and OKX SWAP positions/orders snapshot must match exact quantities and show no other position or order. Any mismatch refuses startup; uncertain outcomes are never adopted. This is not automatic crash recovery. See the [long-run canary handoff](docs/private-response-handler-handoff-2026-10-05.md).
+
 ### D. Offline model (not a VPS process)
 
 `model.ipynb` / `research/gear22_backtest/`: read parquet; `policy.decide`; dummy 1 Hz replay; fill = `spread_last`, not `Trade_Lat`. Gear 2.2 observation is **closed** and is not live-ready. The forward plan is `roadmap.md`, not a block on later patches. Host snapshot: `NOW.md`.
@@ -303,11 +320,14 @@ Local lean only: `SPREAD_LEAN_PARQUET_ROOT`, `SPREAD_LEAN_BARS_ROOT`, `SPREAD_LE
 | Name | Role |
 |---|---|
 | `BBOT_MODE` | `probe` \| `policy` |
-| `BBOT_PROFILE` | `gear1`, `signal_test`, `gear2_would_send` (`gear2`), `canary_wal_eden` (`canary`), `gear22_would_send` (`gear22`), `gear22_live_canary` (`gear22_live`) |
+| `BBOT_PROFILE` | `gear1`, `signal_test`, `gear2_would_send` (`gear2`), `canary_wal_eden` (`canary`), `gear22_would_send` (`gear22`), `gear22_live_canary` (`gear22_live`), `synthetic_roll` |
 | `BBOT_BROKER` | `stub` (default) \| `private_testnet` \| `private_live` (`live`) |
 | `BBOT_COINS`, `BBOT_NOTIONAL_USDT`, `BBOT_TRADE_LAT_MS` | universe / size / stub Trade_Lat |
 | `BBOT_DATA_ROOT`, `BBOT_LOG_PATH` | bot data + log (never `runtime.log`) |
 | `BBOT_THETA_TRADE`, `BBOT_THETA_LIVE_SEND` | gear22 trade / live arm |
+| `BBOT_THETA_EXECUTION`, `BBOT_THETA_POLICY` | opt-in `terminal_private` execution and `gear22` / `synthetic` policy; terminal mode requires `gear22_live_canary`, policy mode, live gates, and all watchers |
+| `BBOT_CONFIRMED_1X_COINS` | prep-verified active universe; terminal startup refuses a partial pool and performs no leverage setters |
+| `BBOT_CANARY_MAX_CYCLES`, `BBOT_CANARY_OPEN_WINDOW_HOURS`, `BBOT_CANARY_RESUME_MANIFEST` | terminal-only cycle cap (`0` unlimited), natural-close open window, explicit strict resume manifest |
 | `BBOT_THETA_OPEN`, `BBOT_P50_OPEN`, `BBOT_MIN_PROFIT_PP`, `BBOT_MIN_THETA_CLOSE`, `BBOT_FEE_RT_PP`, `BBOT_FILL_DELAY_MS`, `BBOT_SLOT_K`, `BBOT_THETA_THR` | frozen-knob overlays |
 | `BBOT_FLOOR_WATCH`, `BBOT_TW_P50_WATCH`, `BBOT_THETA_WATCH`, `BBOT_FLOOR_WARM`, `BBOT_FLOOR_BAR_SAMPLE_CAP` | observers |
 | `BBOT_CHRONOMETRY`, `BBOT_L1_RING` | live canary instrumentation |
@@ -368,7 +388,11 @@ Created by `resolve_data_root()`: `journal/`, `floor/`, `tw_p50/`, `theta/`, `th
 | `/data/bbot-gear22-live-canary` | theta_trades + floor/tw/theta metrics; `BBOT_PRIVATE_DATA_ROOT=.../private` |
 | `/data/bbot-theta-k1-canary` | claimed in docs for would_send canary; **unit not in this tree** — **TODO verify** |
 
-Also: `{root}/floor/event_date=*/metrics.jsonl` (`bbot.floor.v1`); `tw_p50/.../metrics.jsonl`; `theta/.../metrics.jsonl`; `theta_trades/.../trades.jsonl`; `{root}/state/pending.json`, `state/floor_warm.pkl`.
+Also: `{root}/floor/event_date=*/metrics.jsonl` (`bbot.floor.v1`); `tw_p50/.../metrics.jsonl`; `theta/.../metrics.jsonl`; `theta_trades/.../trades.jsonl`; `theta_trades/.../step_chrono.jsonl` (`synthetic_roll` place steps only); `{root}/state/pending.json`, `state/floor_warm.pkl`.
+
+The terminal live canary also writes `{root}/canary_state.json` as an atomic local checkpoint. It is operational state, not an exchange account ledger or proof of remote/mounted durability; a fresh startup REST snapshot remains authoritative for positions and active orders.
+
+`synthetic_roll` step chronometry also appends a `block=send_timing` row after `ws_send` exits when the dual sender returns timing markers. It carries `intent_id`, `signal_ts_ms`, and `phase`, plus `send_timing_monotonic_ns` keyed by `bybit` and `okx`: `queue_enqueued_ns`, `dequeued_ns`, `callback_started_ns`, `callback_returned_ns`, `owner_ws_send_started_ns`, and `owner_ws_send_returned_ns`. These are absolute process monotonic nanoseconds, with unavailable markers stored as null. The row excludes frames, credentials, and order/request ids, and uses the existing local JSONL flush/fsync; it does not establish a remote durable copy.
 
 ### B-private
 
@@ -471,6 +495,7 @@ Local fallback if `/data/bbot` not writable: `<repo>/output/bbot`.
 | Stub decide / would_send | `app/policy/trade_manager.py`, `app/bot/runtime.py`, `stub_broker.py`, `journal.py` |
 | Gear 2.2 theta / live canary knobs | `app/bot/theta_trade_manager.py`, `runtime.py`, `deploy/systemd/spread-bbot-gear22-live-canary.service` |
 | Live send path | `app/bot/broker.py`, `private/live_broker.py`, `private/ws_trivial_dual_leg.py`, `private/venue.py` — not `stub_broker.py` |
+| Synthetic-roll response/fill handling | `app/bot/runtime.py`, `app/bot/theta_trade_manager.py`, `app/bot/private/place_send.py`, `send_legs.py`, `ws_warm_loop.py`, `wire_transcript.py`, `coin_qty.py`; handoff: `docs/private-response-handler-handoff-2026-10-05.md` |
 | Private journal / wire | `app/bot/private/journal_v1.py`, `paths.py`, `wire_transcript.py` |
 | Secrets loading | `app/bot/private/secrets.py` (names/paths only in git) |
 | Historical gears | `docs/strategy-gears.md`, `model.ipynb`, `research/gear22_backtest/` |

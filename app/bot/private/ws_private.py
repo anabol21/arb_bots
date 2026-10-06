@@ -286,6 +286,18 @@ class PrivateStreamRuntime:
     # Keepalive may drain trade noise (pong); non-noise frames are stashed so
     # place/ack recv cannot lose them to the supervisor thread.
     _trade_inbound_stash: list[str] = field(default_factory=list)
+    # Base coins for ``private_leg_up``. Empty stays fail-closed.
+    base_coins: tuple[str, ...] = ()
+
+    def publish_private_leg_state(self) -> None:
+        """Login and subscription both up → True; otherwise the exchange is down."""
+        from app.bot.private.private_leg_up import set_exchange_coins
+
+        up = (
+            bool(self.authenticated)
+            and self.subscription_readiness == SubscriptionReadiness.READY
+        )
+        set_exchange_coins(self.exchange, self.base_coins, up)
 
     @property
     def sends_blocked(self) -> bool:
@@ -418,6 +430,7 @@ class PrivateStreamRuntime:
             recon_state="inconclusive",
         )
         _safe_log("reconnect", exchange=self.exchange, gen=self.reconnect_generation)
+        self.publish_private_leg_state()
 
     def build_auth_message(self) -> WsOutboundMessage:
         if self.exchange == "bybit":
@@ -483,6 +496,7 @@ class PrivateStreamRuntime:
         }
         ev = self.journal.append(partial)
         _safe_log("subscribe_sent", exchange=self.exchange, gen=self.reconnect_generation)
+        self.publish_private_leg_state()
         return ev
 
     def send_heartbeat(self) -> None:
@@ -598,6 +612,7 @@ class PrivateStreamRuntime:
         elif parsed.kind == "heartbeat":
             self.maybe_reply_okx_ping(text, trade=False)
             _safe_log("heartbeat_ack", exchange=self.exchange, gen=self.reconnect_generation)
+        self.publish_private_leg_state()
         return parsed
 
     def _on_subscribe_ack(self, *, ok: bool) -> None:
@@ -697,23 +712,27 @@ class PrivateStreamRuntime:
             self.sequence_state = SequenceHealth.HEALTHY
             self.subscription_readiness = SubscriptionReadiness.READY
             self._sends_blocked = False
-            return self._journal_stream_recon(
+            row = self._journal_stream_recon(
                 sequence_state=SequenceHealth.HEALTHY,
                 observation_source="rest_reconcile",
                 outcome="success",
                 recon_state="matched",
                 transport="rest",
             )
+            self.publish_private_leg_state()
+            return row
         self.sequence_state = SequenceHealth.RESEED_REQUIRED
         self.subscription_readiness = SubscriptionReadiness.NOT_READY
         self._sends_blocked = True
-        return self._journal_stream_recon(
+        row = self._journal_stream_recon(
             sequence_state=SequenceHealth.RESEED_REQUIRED,
             observation_source="rest_reconcile",
             outcome="observed",
             recon_state="inconclusive",
             transport="rest",
         )
+        self.publish_private_leg_state()
+        return row
 
     def run_rest_reseed(self) -> dict[str, Any]:
         if self.rest_reseed is None:

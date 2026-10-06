@@ -6,7 +6,11 @@ import ast
 import asyncio
 import json
 import tempfile
+import threading
+import time
+import sys
 import unittest
+from types import SimpleNamespace
 from pathlib import Path
 from unittest.mock import patch
 
@@ -26,6 +30,7 @@ from app.bot.theta_trade_manager import (
     ThetaTradeConfig,
     ThetaTradeJournalWriter,
     ThetaTradeManager,
+    build_feature_snapshot,
     decide_theta_k1,
     journal_close_pnl_spread,
     slip_spread,
@@ -103,6 +108,213 @@ class ThetaTradeFlagTests(unittest.TestCase):
         self.assertTrue(
             theta_trade_enabled("gear2_would_send", {"BBOT_THETA_TRADE": "1"})
         )
+
+
+class FeatureSnapshotTests(unittest.TestCase):
+    def test_finite_zero_values_remain_usable(self) -> None:
+        zero_book = _books(
+            okx_ask=100.0,
+            okx_bid=100.0,
+            bybit_ask=100.0,
+            bybit_bid=100.0,
+        )
+        snapshot = build_feature_snapshot(
+            coin="BTC",
+            ts_s=1,
+            snapshots=[
+                _snap("BTC", "long", 0.0, floor=0.0, p50_1m=0.0),
+                _snap("BTC", "short", 0.0, floor=0.0, p50_1m=0.0),
+            ],
+            quotes={"BTC": zero_book},
+        )
+        self.assertIsNotNone(snapshot)
+        assert snapshot is not None
+        self.assertTrue(snapshot.usable_long)
+        self.assertTrue(snapshot.usable_short)
+        self.assertEqual(snapshot.theta_1m_long, 0.0)
+        self.assertEqual(snapshot.spread_last_long, 0.0)
+
+
+class TerminalExecutionModeTests(unittest.IsolatedAsyncioTestCase):
+    async def test_possible_send_incomplete_latches_and_preserves_pending(self) -> None:
+        from app.bot.synthetic_policy import SyntheticDecision
+
+        calls: list[dict] = []
+
+        def place(**kwargs: object) -> SimpleNamespace:
+            calls.append(dict(kwargs))
+            return SimpleNamespace(
+                completed=False,
+                keep_pending=False,
+                send_attempted=True,
+                abort="terminal_timeout",
+            )
+
+        manager = ThetaTradeManager(
+            data_root=Path(tempfile.mkdtemp()),
+            config=ThetaTradeConfig(notional_usdt=10.0),
+            place_fn=place,
+            meta_fn=lambda _coin: object(),
+            decide_fn=lambda **_kwargs: SyntheticDecision(
+                action="open", coin="BTC", side="long", roll=17
+            ),
+            execution_mode="terminal_private",
+        )
+        snapshots = [_snap("BTC", "long", 0.6)]
+        kwargs = {"quotes": {"BTC": _books()}, "coin_order": ("BTC",), "now_ms": 1_700_000_000_000}
+        await manager.on_theta_snapshots_async(snapshots, **kwargs)
+        for _ in range(100):
+            if manager._terminal_place_task is None:
+                break
+            await asyncio.sleep(0.001)
+        self.assertTrue(manager.slot.pending)
+        self.assertEqual(manager.execution_halt_reason, "terminal_timeout")
+        await manager.on_theta_snapshots_async(snapshots, **kwargs)
+        self.assertEqual(len(calls), 1)
+
+    def test_pre_send_guard_rejects_old_book_generation(self) -> None:
+        from app.utils.tick_validity import TickValidityGate
+
+        with patch.dict(sys.modules, {"websockets": SimpleNamespace(connect=None)}):
+            from app.bot.runtime import BotRuntime
+
+        runtime = BotRuntime.__new__(BotRuntime)
+        runtime.gate = TickValidityGate()
+        runtime.gate.coin_generation["BTC"] = 2
+        runtime.gate.leg_generation[("BTC", "okx")] = 1
+        runtime.gate.leg_generation[("BTC", "bybit")] = 2
+        now_ms = time.time() * 1000
+        books = _books()
+        for book in books.values():
+            book["local_recv_ts_ms"] = now_ms
+            book["ts_exchange"] = now_ms
+
+        reason = runtime._canary29_pre_send_guard(
+            coin="BTC",
+            event="open",
+            okx_book=books["okx"],
+            bybit_book=books["bybit"],
+        )
+        self.assertEqual(reason, "book_generation")
+
+    def test_startup_flat_snapshot_rejects_api_error_and_malformed_shape(self) -> None:
+        with patch.dict(sys.modules, {"websockets": SimpleNamespace(connect=None)}):
+            from app.bot.runtime import (
+                _assert_bybit_account_snapshot,
+                _assert_okx_account_snapshot,
+            )
+
+        for payload in (
+            {"retCode": 10001, "result": {"list": []}},
+            {"retCode": 0, "result": {"list": None}},
+        ):
+            with self.assertRaises(RuntimeError):
+                _assert_bybit_account_snapshot(payload)
+        for payload in ({"code": "500", "data": []}, {"code": "0", "data": {}}):
+            with self.assertRaises(RuntimeError):
+                _assert_okx_account_snapshot(payload)
+
+    async def test_blocked_place_does_not_block_tick_or_queue_second_send(self) -> None:
+        from app.bot.synthetic_policy import SyntheticDecision
+
+        entered = threading.Event()
+        release = threading.Event()
+        calls: list[int] = []
+
+        def place(**_kwargs: object) -> SimpleNamespace:
+            calls.append(1)
+            entered.set()
+            release.wait(timeout=2)
+            return SimpleNamespace(
+                completed=True,
+                keep_pending=False,
+                fill_ts_ms=1_700_000_000_050,
+                okx_filled_qty="0.1",
+                bybit_filled_qty="0.1",
+                coin_qty="0.1",
+            )
+
+        manager = ThetaTradeManager(
+            data_root=Path(tempfile.mkdtemp()),
+            config=ThetaTradeConfig(notional_usdt=10.0),
+            place_fn=place,
+            meta_fn=lambda _coin: object(),
+            decide_fn=lambda **_kwargs: SyntheticDecision(
+                action="open", coin="BTC", side="long", roll=17
+            ),
+            execution_mode="terminal_private",
+        )
+        args = dict(quotes={"BTC": _books()}, coin_order=("BTC",), now_ms=1_700_000_000_000)
+        await manager.on_theta_snapshots_async([_snap("BTC", "long", 0.6)], **args)
+        self.assertTrue(await asyncio.to_thread(entered.wait, 1))
+        await asyncio.wait_for(manager.on_theta_snapshots_async([_snap("BTC", "long", 0.6)], **args), 0.1)
+        self.assertEqual(len(calls), 1)
+        release.set()
+        for _ in range(100):
+            if manager._terminal_place_task is None:
+                break
+            await asyncio.sleep(0.001)
+        self.assertIsNotNone(manager.slot.position)
+        self.assertEqual(len(calls), 1)
+
+    async def test_gear22_and_injected_policy_share_terminal_place_hook(self) -> None:
+        from app.bot.synthetic_policy import SyntheticDecision
+        from research.gear22_backtest.policy import PolicyParams
+
+        calls: list[dict] = []
+
+        def place(**kwargs: object) -> SimpleNamespace:
+            calls.append(dict(kwargs))
+            return SimpleNamespace(
+                completed=True,
+                keep_pending=False,
+                fill_ts_ms=1_700_000_000_050,
+                okx_filled_qty="0.1",
+                bybit_filled_qty="0.1",
+                coin_qty="0.1",
+            )
+
+        params = PolicyParams(
+            theta_open=0.50,
+            p50_open=0.60,
+            min_profit_pp=0.20,
+            min_theta_close=0.05,
+        )
+        policies = (
+            None,
+            lambda **_kwargs: SyntheticDecision(
+                action="open", coin="BTC", side="long", roll=17
+            ),
+        )
+        for decide_fn in policies:
+            manager = ThetaTradeManager(
+                data_root=Path(tempfile.mkdtemp()),
+                config=ThetaTradeConfig(notional_usdt=10.0, policy_params=params),
+                place_fn=place,
+                meta_fn=lambda _coin: object(),
+                decide_fn=decide_fn,
+                execution_mode="terminal_private",
+            )
+            snapshots = [
+                _snap("BTC", "long", 0.60, floor=0.20, p50_1m=0.80),
+                _snap("BTC", "short", 0.01),
+            ]
+            await manager.on_theta_snapshots_async(
+                snapshots,
+                quotes={"BTC": _books()},
+                coin_order=("BTC",),
+                now_ms=1_700_000_000_000,
+            )
+            for _ in range(100):
+                if manager._terminal_place_task is None:
+                    break
+                await asyncio.sleep(0.001)
+            self.assertIsNotNone(manager.slot.position)
+            self.assertFalse(manager.slot.pending)
+            self.assertIsInstance(calls[-1]["extra"]["signal_mono_ns"], int)
+        self.assertEqual(len(calls), 2)
+        self.assertEqual([call["base_coin"] for call in calls], ["BTC", "BTC"])
+
 
 
 class DecideK1Tests(unittest.TestCase):
@@ -376,6 +588,7 @@ class CloseSizeGateTests(unittest.TestCase):
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0]["event"], "skip")
         self.assertEqual(rows[0]["reject_reason"], "insufficient_size")
+        self.assertEqual(rows[0]["size_event"], "close")
         self.assertFalse(rows[0]["would_send"])
         self.assertFalse(rows[0]["send"])
         self.assertIsNotNone(mgr.slot.position)

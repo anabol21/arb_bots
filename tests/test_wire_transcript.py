@@ -39,13 +39,13 @@ from app.bot.stub_broker import InstrumentMeta as StubInstrumentMeta
 def _creds(*, okx: bool = False) -> LiveCredentials:
     if okx:
         return LiveCredentials(
-            api_key="okx-live-key-ABCDEF",
-            api_secret="okx-live-secret-XYZ",
-            passphrase="okx-passphrase-SECRET",
+            api_key="test-okx-key",
+            api_secret="test-okx-secret",
+            passphrase="test-okx-passphrase",
         )
     return LiveCredentials(
-        api_key="bybit-live-key-ABCDEF",
-        api_secret="bybit-live-secret-XYZ",
+        api_key="test-bybit-key",
+        api_secret="test-bybit-secret",
     )
 
 
@@ -233,6 +233,89 @@ class TranscriptAppendTests(unittest.TestCase):
             ),
             1_700_000_005_000,
         )
+
+    def test_owner_arrival_and_manager_consumption_keep_order_link_correlation(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            tr = WireTranscript(root, run_id="run_owner_capture", async_write=False)
+            intent = "50db25403a434bb999725beda0d6a5d0"
+            tr.bind_place_correlation(
+                req_id="o50db25403a434bb999725beda0d6a5d",
+                intent_id=intent,
+                signal_ts_ms=1_700_000_000_000,
+                venue="okx",
+                phase="close",
+            )
+            body = json.dumps(
+                {
+                    "arg": {"channel": "orders", "instId": "BTC-USDT-SWAP"},
+                    "data": [
+                        {
+                            "clOrdId": "o50db25403a434bb999725beda0d6a5d",
+                            "state": "filled",
+                            "accFillSz": "5",
+                            "avgPx": "4",
+                            "fillTime": "1700000001000",
+                        }
+                    ],
+                }
+            )
+            for stage, mono in (("socket_arrival", 10), ("manager_consume", 20)):
+                tr.record_io(
+                    direction="in",
+                    venue="okx",
+                    socket="private",
+                    text=body,
+                    wall_ms=1_700_000_001_000,
+                    mono_ns=mono,
+                    reconnect_generation=7,
+                    capture_stage=stage,
+                )
+            events = scan_all_wire_events(root)
+            self.assertEqual([ev["capture_stage"] for ev in events], [
+                "socket_arrival",
+                "manager_consume",
+            ])
+            self.assertTrue(all(ev["intent_id"] == intent for ev in events))
+            self.assertTrue(all(ev["phase"] == "close" for ev in events))
+            self.assertTrue(all(ev["reconnect_generation"] == 7 for ev in events))
+            self.assertTrue(all(ev["venue_ts_ms"] == 1_700_000_001_000 for ev in events))
+            tr.close()
+
+    def test_record_io_error_marks_transcript_unhealthy(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            tr = WireTranscript(root, run_id="run_capture_failure", async_write=False)
+            with patch(
+                "app.bot.private.wire_transcript.parse_wire_text",
+                side_effect=ValueError("synthetic parse failure"),
+            ):
+                with self.assertRaises(ValueError):
+                    tr.record_io(
+                        direction="in",
+                        venue="okx",
+                        socket="private",
+                        text='{"arg":{"channel":"orders"}}',
+                    )
+            self.assertFalse(tr.healthy)
+            tr.close()
+
+    def test_append_error_marks_transcript_unhealthy(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            tr = WireTranscript(root, run_id="run_write_failure", async_write=False)
+            wire_dir = root / "wire"
+            wire_dir.rmdir()
+            wire_dir.write_text("block", encoding="utf-8")
+            with self.assertRaises(OSError):
+                tr.record_io(
+                    direction="in",
+                    venue="okx",
+                    socket="private",
+                    text='{"arg":{"channel":"orders"}}',
+                )
+            self.assertFalse(tr.healthy)
+            tr.close()
 
     def test_timeout_recv_does_not_write(self) -> None:
         with tempfile.TemporaryDirectory() as td:

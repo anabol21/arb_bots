@@ -504,6 +504,32 @@ def fill_prices_from_markers(
     return prices
 
 
+def _send_timing_monotonic_ns(send_result: Any) -> dict[str, dict[str, Optional[int]]]:
+    """Copy only known numeric timing fields into the post-send artifact."""
+    raw_timings = getattr(send_result, "timings", None)
+    if not isinstance(raw_timings, Mapping):
+        return {}
+    fields = (
+        "queue_enqueued_ns",
+        "dequeued_ns",
+        "callback_started_ns",
+        "callback_returned_ns",
+        "owner_ws_send_started_ns",
+        "owner_ws_send_returned_ns",
+    )
+    out: dict[str, dict[str, Optional[int]]] = {}
+    for venue in ("bybit", "okx"):
+        source = raw_timings.get(venue)
+        if not isinstance(source, Mapping):
+            continue
+        copied: dict[str, Optional[int]] = {}
+        for name in fields:
+            value = source.get(name)
+            copied[name] = int(value) if value is not None else None
+        out[venue] = copied
+    return out
+
+
 @dataclass
 class ChronometryContext:
     intent_id: str
@@ -610,6 +636,9 @@ def build_chronometry_artifact(ctx: ChronometryContext) -> dict[str, Any]:
         "ticks_missing": len(ticks) == 0,
         "markers": markers,
         "latency_ms": latency_table(markers),
+        # Optional additive field; timestamps share the local monotonic clock
+        # and are intentionally separate from wall-clock signal_ts_ms.
+        "send_timing_monotonic_ns": _send_timing_monotonic_ns(ctx.send_result),
         "notes": notes,
     }
 

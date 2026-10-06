@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -24,6 +25,7 @@ from app.bot.private.ws_trivial_dual_leg import (
     build_signed_place_text,
     parse_inst_id_code_env,
     resolve_live_send_path,
+    warm_trade_send_fn,
     w6_manager_opt_in,
 )
 from app.bot.stub_broker import InstrumentMeta, StubBroker
@@ -196,13 +198,111 @@ class TrivialSenderTests(unittest.TestCase):
                 bybit_req_id=b_req,
                 okx_req_id=o_req,
                 phase="open",
+                intent_id="intent-timing",
+                dual_leg_id="dual-timing",
+                signal_ts_ms=1_700_000_000_000,
             )
             self.assertIsNone(result.error)
             self.assertIsNotNone(result.first_sent_ns)
             self.assertIsNotNone(result.second_sent_ns)
             self.assertEqual(set(sent), {"bybit", "okx"})
+            self.assertEqual({item.text for item in result.items}, {b_text, o_text})
+            self.assertEqual(
+                {item.venue: item.req_id for item in result.items},
+                {"bybit": b_req, "okx": o_req},
+            )
+            self.assertEqual(
+                {item.venue: item.intent_id for item in result.items},
+                {"bybit": "intent-timing", "okx": "intent-timing"},
+            )
+            self.assertEqual(
+                {item.venue: item.dual_leg_id for item in result.items},
+                {"bybit": "dual-timing", "okx": "dual-timing"},
+            )
+            self.assertEqual(
+                {item.venue: item.signal_ts_ms for item in result.items},
+                {"bybit": 1_700_000_000_000, "okx": 1_700_000_000_000},
+            )
+            self.assertEqual(set(result.timings), {"bybit", "okx"})
+            for item in result.items:
+                timing = result.timings[item.venue]
+                self.assertEqual(timing, item.timing.as_dict())
+                self.assertLessEqual(
+                    item.enqueued_ns,
+                    timing["queue_enqueued_ns"],
+                )
+                self.assertLessEqual(
+                    timing["queue_enqueued_ns"], timing["dequeued_ns"]
+                )
+                self.assertLessEqual(
+                    timing["dequeued_ns"], timing["callback_started_ns"]
+                )
+                self.assertLessEqual(
+                    timing["callback_started_ns"], timing["callback_returned_ns"]
+                )
+                self.assertIsNone(timing["owner_ws_send_started_ns"])
+                self.assertIsNone(timing["owner_ws_send_returned_ns"])
             skew_ns = abs(int(result.second_enqueued_ns) - int(result.first_enqueued_ns))
             self.assertLess(skew_ns, 50_000_000)  # 50 ms enqueue skew
+        finally:
+            loop.close()
+
+    def test_warm_send_fn_carries_owner_write_markers_into_result(self) -> None:
+        class _TimedSocket:
+            def __init__(self) -> None:
+                self.sent: list[str] = []
+
+            def send_text_timed(self, text, *, on_send_start, on_send_return) -> None:
+                on_send_start(time.monotonic_ns())
+                self.sent.append(text)
+                on_send_return(time.monotonic_ns())
+
+        class _Runtime:
+            def __init__(self) -> None:
+                self.trade_socket = _TimedSocket()
+                self.activity_count = 0
+
+            def note_trade_activity(self) -> None:
+                self.activity_count += 1
+
+        from types import SimpleNamespace
+
+        session = SimpleNamespace(bybit_runtime=_Runtime(), okx_runtime=_Runtime())
+        loop = TrivialDualSender(send_fn=warm_trade_send_fn(session))
+        try:
+            b_text, b_req, _ = build_signed_place_text(
+                venue="bybit", symbol="SOLUSDT", side="buy", qty="0.5", credentials=_creds()
+            )
+            o_text, o_req, _ = build_signed_place_text(
+                venue="okx", symbol="SOL-USDT-SWAP", side="sell", qty="1",
+                credentials=None, inst_id_code=99
+            )
+            result = loop.enqueue_dual(
+                bybit_text=b_text,
+                okx_text=o_text,
+                bybit_req_id=b_req,
+                okx_req_id=o_req,
+                phase="open",
+                intent_id="timed-intent",
+                dual_leg_id="timed-dual",
+                signal_ts_ms=123,
+            )
+            for item in result.items:
+                timing = result.timings[item.venue]
+                self.assertLessEqual(
+                    timing["callback_started_ns"], timing["owner_ws_send_started_ns"]
+                )
+                self.assertLessEqual(
+                    timing["owner_ws_send_started_ns"],
+                    timing["owner_ws_send_returned_ns"],
+                )
+                self.assertLessEqual(
+                    timing["owner_ws_send_returned_ns"], timing["callback_returned_ns"]
+                )
+            self.assertEqual(session.bybit_runtime.trade_socket.sent, [b_text])
+            self.assertEqual(session.okx_runtime.trade_socket.sent, [o_text])
+            self.assertEqual(session.bybit_runtime.activity_count, 1)
+            self.assertEqual(session.okx_runtime.activity_count, 1)
         finally:
             loop.close()
 

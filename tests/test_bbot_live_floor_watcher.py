@@ -357,6 +357,28 @@ class FloorRuntimeWireTests(unittest.TestCase):
         self.assertTrue(path.is_file())
         self.assertFalse(any(p.name.endswith(".parquet") for p in tmp.rglob("*")))
 
+    def test_non_synthetic_live_theta_does_not_attach_private_size_gate(self) -> None:
+        from types import SimpleNamespace
+
+        tmp = Path(tempfile.mkdtemp())
+        env = {
+            "BBOT_MODE": "policy",
+            "BBOT_PROFILE": "gear22_live_canary",
+            "BBOT_DATA_ROOT": str(tmp),
+            "BBOT_LOG_PATH": str(tmp / "bbot.log"),
+            "BBOT_COINS": "BTC",
+            "BBOT_BROKER": "stub",
+        }
+        with patch.dict(os.environ, env, clear=False):
+            from app.bot.runtime import BotRuntime
+
+            rt = BotRuntime()
+
+        rt.theta_trade = SimpleNamespace(live_send=True)
+        rt._handle_book_sync("BTC", "okx")  # noqa: SLF001
+        self.assertNotIn("_private_size_gate", rt.quotes["BTC"]["okx"])
+        self.assertNotIn("ct_val", rt.quotes["BTC"]["okx"])
+
 
 class FloorsModuleSmokeTests(unittest.TestCase):
     """Ported formula lock: compute_chosen_floor is tf-select α25."""

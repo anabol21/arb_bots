@@ -328,6 +328,16 @@ class PrivateWarmSession:
                 self.run_id,
             )
 
+    def _bind_base_coins(self) -> None:
+        coins = tuple(self.coins)
+        self.bybit_runtime.base_coins = coins
+        self.okx_runtime.base_coins = coins
+
+    def _publish_base_coins(self) -> None:
+        self._bind_base_coins()
+        self.bybit_runtime.publish_private_leg_state()
+        self.okx_runtime.publish_private_leg_state()
+
     def start(self) -> None:
         """Connect and handshake both venues. No-op when already ready."""
         with self._lock:
@@ -335,8 +345,10 @@ class PrivateWarmSession:
                 raise RuntimeError("warm session already stopped")
             if self.is_ready():
                 return
+            self._bind_base_coins()
             self._bind_fresh_sockets()
             self._handshake_both()
+            self._publish_base_coins()
             self._mark_loop_handshake_done()
             self._started = True
             self._last_hb_mono = time.monotonic()
@@ -381,8 +393,10 @@ class PrivateWarmSession:
                 return
             if self._started:
                 self.note_disconnect()
+            self._bind_base_coins()
             self._bind_fresh_sockets()
             self._handshake_both()
+            self._publish_base_coins()
             self._mark_loop_handshake_done()
             self._started = True
             self._last_hb_mono = time.monotonic()
@@ -769,6 +783,8 @@ class PrivateWarmSession:
                 rt = self.bybit_runtime if exchange == "bybit" else self.okx_runtime
                 if rt.authenticated:
                     rt.mark_reconnect()
+                else:
+                    rt.publish_private_leg_state()
                 LOG.info(
                     "warm_disconnect exchange=%s run_id=%s source=loop",
                     exchange,
@@ -823,6 +839,7 @@ class PrivateWarmSession:
             self._handshake_count += 1
             self._fail_attempt = 0
             self._last_hb_mono = time.monotonic()
+            self._publish_base_coins()
             LOG.info(
                 "warm_reconnected exchange=%s run_id=%s handshake_count=%s",
                 exchange,
@@ -915,6 +932,42 @@ class WarmConnector:
         if sock is None:
             raise RuntimeError("trade socket missing")
         sock.send_text(text)
+        note = getattr(runtime, "note_trade_activity", None)
+        if callable(note):
+            note()
+
+    def send_trade_timed(
+        self,
+        venue: str,
+        text: str,
+        *,
+        on_send_start: Optional[Callable[[int], None]] = None,
+        on_send_return: Optional[Callable[[int], None]] = None,
+    ) -> None:
+        """Use an optional socket timing API without changing send semantics.
+
+        Production ``LoopOwnedSocket`` stamps from its owner loop around
+        ``ws.send``. Other existing socket adapters retain their original
+        ``send_text`` behavior and leave those owner-loop markers absent.
+        """
+        key = str(venue).strip().lower()
+        if key not in {"bybit", "okx"}:
+            raise ValueError(f"send_trade venue must be bybit|okx, got {venue!r}")
+        runtime = (
+            self.session.bybit_runtime if key == "bybit" else self.session.okx_runtime
+        )
+        sock = runtime.trade_socket
+        if sock is None:
+            raise RuntimeError("trade socket missing")
+        timed_send = getattr(sock, "send_text_timed", None)
+        if callable(timed_send):
+            timed_send(
+                text,
+                on_send_start=on_send_start,
+                on_send_return=on_send_return,
+            )
+        else:
+            sock.send_text(text)
         note = getattr(runtime, "note_trade_activity", None)
         if callable(note):
             note()
@@ -1169,6 +1222,8 @@ def start_warm_private_session(
         rest_probe_fn=rest_probe_fn,
         profile_gate=gate,
     )
+    bybit_rt.base_coins = pool.coins
+    okx_rt.base_coins = pool.coins
     wire = WireTranscript(root, run_id=str(j.run_id), env=e)
     attach_process_wire_transcript(wire)
     session = PrivateWarmSession(
