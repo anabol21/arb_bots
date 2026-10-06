@@ -1,0 +1,316 @@
+#!/usr/bin/env python3
+"""Bounded Gear 2.3 public-only hot-add experiment; never loads secrets or sends orders."""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import signal
+import subprocess
+import sys
+import time
+from pathlib import Path
+from typing import Any
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+from app.bot.synthetic_policy import CANARY29_COINS
+from app.utils.universe_delta import read_delta_rows, write_delta_atomic
+
+
+def _read_json_rows(paths: list[Path]) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for path in paths:
+        try:
+            for line in path.read_text(encoding="utf-8").splitlines():
+                if not line.strip():
+                    continue
+                item = json.loads(line)
+                if isinstance(item, dict):
+                    rows.append(item)
+        except OSError:
+            continue
+    return rows
+
+
+def _read_metrics(data_root: Path, name: str, coins: set[str]) -> dict[str, int]:
+    paths = sorted((data_root / name).glob("event_date=*/metrics.jsonl"))
+    counts = {coin: 0 for coin in coins}
+    for row in _read_json_rows(paths):
+        coin = str(row.get("base_coin") or "").upper()
+        if coin not in counts:
+            continue
+        if name == "tw_p50":
+            observed = int(row.get("n_1m") or 0) > 0 or float(row.get("coverage_5m") or 0) > 0
+        else:
+            observed = row.get("p50_1m") is not None or row.get("p50_5m") is not None
+        if observed:
+            counts[coin] += 1
+    return counts
+
+
+def _wait_for(
+    predicate,
+    *,
+    label: str,
+    proc: subprocess.Popen[bytes],
+    deadline: float,
+) -> None:
+    while time.monotonic() < deadline:
+        if proc.poll() is not None:
+            raise RuntimeError(f"bot exited before {label}: rc={proc.returncode}")
+        if predicate():
+            return
+        time.sleep(0.25)
+    raise TimeoutError(f"timed out waiting for {label}")
+
+
+def _stop(proc: subprocess.Popen[bytes]) -> int:
+    if proc.poll() is None:
+        proc.send_signal(signal.SIGTERM)
+    try:
+        return int(proc.wait(timeout=20))
+    except subprocess.TimeoutExpired:
+        proc.kill()  # exact child PID started by this runner only
+        return int(proc.wait(timeout=5))
+
+
+def run(args: argparse.Namespace) -> dict[str, Any]:
+    data_root = Path(args.data_root).resolve()
+    if data_root.exists():
+        raise FileExistsError(f"experiment data root must be new: {data_root}")
+    source = Path(args.source_delta)
+    source_rows = {row["base_coin"].upper(): row for row in read_delta_rows(source)}
+    coins = [item.strip().upper() for item in args.coins.split(",") if item.strip()]
+    if len(coins) != 2 or len(set(coins)) != 2:
+        raise ValueError("--coins must name exactly two distinct symbols")
+    if set(coins) & set(CANARY29_COINS):
+        raise ValueError("experiment candidates must be outside the fixed Canary29 base")
+    missing = set(coins) - set(source_rows)
+    if missing:
+        raise ValueError(f"candidates absent from read-only source delta: {sorted(missing)}")
+    valid_rows = [dict(source_rows[coin]) for coin in coins]
+    invalid_row = dict(valid_rows[0])
+    invalid_row.update(
+        {
+            "base_coin": "G23BAD",
+            "okx_symbol": "G23BAD-USDT-SWAP",
+            "bybit_symbol": "G23BADUSDT",
+            "bybit_qty_step": "0",
+        }
+    )
+
+    data_root.mkdir(parents=True)
+    delta_path = data_root / "manual_delta.csv"
+    runtime_log = data_root / "gear23.log"
+    console_log = data_root / "console.log"
+    write_delta_atomic(delta_path, [valid_rows[0]])
+
+    clean_env = {
+        "PATH": "/root/venv/bin:/usr/bin:/bin",
+        "PYTHONPATH": str(Path(__file__).resolve().parents[1]),
+        "PYTHONUNBUFFERED": "1",
+        "VENUE": "testnet",
+        "LIVE_ORDERS": "0",
+        "BBOT_MODE": "probe",
+        "BBOT_PROFILE": "gear22_would_send",
+        "BBOT_BROKER": "stub",
+        "BBOT_THETA_EXECUTION": "inline",
+        "BBOT_THETA_LIVE_SEND": "0",
+        "BBOT_THETA_TRADE": "0",
+        "BBOT_COINS": ",".join(CANARY29_COINS),
+        "BBOT_DATA_ROOT": str(data_root),
+        "BBOT_LOG_PATH": str(runtime_log),
+        "BBOT_HOT_ADD": "1",
+        "BBOT_HOT_ADD_DELTA": str(delta_path),
+        "BBOT_HOT_ADD_MAX_EXTRA": "48",
+        "BBOT_HOT_ADD_POLL_SEC": "5",
+        "BBOT_HOT_ADD_WARM": "1",
+        "BBOT_HOT_ADD_HISTORY_ROOT": "/data/bbot-would-send-prod",
+        "BBOT_FLOOR_WATCH": "1",
+        "BBOT_TW_P50_WATCH": "1",
+        "BBOT_THETA_WATCH": "1",
+        "BBOT_L1_RING": "0",
+        "BBOT_CHRONOMETRY": "0",
+    }
+    summary: dict[str, Any] = {
+        "data_root": str(data_root),
+        "source_delta": str(source),
+        "base_coin_count": len(CANARY29_COINS),
+        "test_coins": coins,
+        "invalid_test_coin": "G23BAD",
+        "private_send": False,
+        "exchange_orders": False,
+        "poll_sec": 5,
+    }
+    proc: subprocess.Popen[bytes] | None = None
+    try:
+        with console_log.open("wb") as out:
+            proc = subprocess.Popen(
+                [sys.executable, "-m", "app.bot"],
+                cwd=Path(__file__).resolve().parents[1],
+                env=clean_env,
+                stdin=subprocess.DEVNULL,
+                stdout=out,
+                stderr=subprocess.STDOUT,
+            )
+            deadline = time.monotonic() + args.timeout_sec
+
+            def log_text() -> str:
+                try:
+                    return runtime_log.read_text(encoding="utf-8", errors="replace")
+                except OSError:
+                    return ""
+
+            first = coins[0]
+            second = coins[1]
+
+            def subscribed(coin: str) -> bool:
+                text = log_text()
+                return all(
+                    f"ws_subscribe_ok | coin={coin} | exchange={venue}" in text
+                    for venue in ("okx", "bybit")
+                )
+
+            def tw_seen(coin: str) -> bool:
+                return _read_metrics(data_root, "tw_p50", {coin})[coin] > 0
+
+            def theta_seen(coin: str) -> bool:
+                return _read_metrics(data_root, "theta", {coin})[coin] > 0
+
+            _wait_for(
+                lambda: f"bbot_hot_add_applied | base_coin={first}" in log_text()
+                and subscribed(first),
+                label=f"first candidate {first} public subscribe ACKs",
+                proc=proc,
+                deadline=deadline,
+            )
+            _wait_for(
+                lambda: "private_warm_skipped | live_private_send=false" in log_text()
+                and (
+                    f"gear23_observer_warm | base_coin={first}" in log_text()
+                    or f"gear23_observer_warm_failed | base_coin={first}" in log_text()
+                )
+                and tw_seen(first),
+                label=f"first candidate {first} warm result and accepted TW tick",
+                proc=proc,
+                deadline=deadline,
+            )
+            _wait_for(
+                lambda: theta_seen(first),
+                label=f"first candidate {first} theta row",
+                proc=proc,
+                deadline=deadline,
+            )
+
+            # Re-write identical snapshot: production parser must not spawn a duplicate.
+            write_delta_atomic(delta_path, [valid_rows[0]])
+            _wait_for(
+                lambda: "bbot_hot_add_delta_read | " in log_text()
+                and f"rows=1 | added=0 | extra=1" in log_text(),
+                label="duplicate snapshot no-op",
+                proc=proc,
+                deadline=deadline,
+            )
+
+            # Cumulative snapshot adds one more real metadata row.
+            write_delta_atomic(delta_path, valid_rows)
+            _wait_for(
+                lambda: f"bbot_hot_add_applied | base_coin={second}" in log_text()
+                and subscribed(second),
+                label=f"second candidate {second} public subscribe ACKs",
+                proc=proc,
+                deadline=deadline,
+            )
+            _wait_for(
+                lambda: tw_seen(second)
+                and (
+                    f"gear23_observer_warm | base_coin={second}" in log_text()
+                    or f"gear23_observer_warm_failed | base_coin={second}" in log_text()
+                ),
+                label=f"second candidate {second} warm result and accepted TW tick",
+                proc=proc,
+                deadline=deadline,
+            )
+            _wait_for(
+                lambda: theta_seen(second),
+                label=f"second candidate {second} theta row",
+                proc=proc,
+                deadline=deadline,
+            )
+
+            # Invalid instrument metadata remains in the snapshot but is fail-closed.
+            write_delta_atomic(delta_path, [*valid_rows, invalid_row])
+            _wait_for(
+                lambda: "bbot_hot_add_fail_closed | base_coin=G23BAD" in log_text(),
+                label="invalid metadata rejection",
+                proc=proc,
+                deadline=deadline,
+            )
+            text = log_text()
+            summary.update(
+                {
+                    "public_subscribe_ack": {
+                        coin: {venue: f"ws_subscribe_ok | coin={coin} | exchange={venue}" in text
+                               for venue in ("okx", "bybit")}
+                        for coin in coins
+                    },
+                    "accepted_tw_rows": _read_metrics(data_root, "tw_p50", set(coins)),
+                    "theta_rows": _read_metrics(data_root, "theta", set(coins)),
+                    "warm_results": {
+                        coin: (
+                            "ok" if f"gear23_observer_warm | base_coin={coin} | ok=true" in text
+                            else "not_ready_or_missing_history"
+                        )
+                        for coin in coins
+                    },
+                    "added_once": {
+                        coin: text.count(f"gear23_coin_added | base_coin={coin}") == 1
+                        for coin in coins
+                    },
+                    "invalid_metadata_rejected": "bbot_hot_add_fail_closed | base_coin=G23BAD" in text,
+                    "private_warm_skipped": "private_warm_skipped | live_private_send=false" in text,
+                    "trade_eligibility_logs": {
+                        coin: f"gear23_coin_added | base_coin={coin}" in text
+                             and "trade_eligible=false" in text
+                        for coin in coins
+                    },
+                    "theta_trade_journal_files": len(
+                        list((data_root / "theta_trades").glob("**/*.jsonl"))
+                    ),
+                }
+            )
+    finally:
+        if proc is not None:
+            summary["exit_code"] = _stop(proc)
+            final_log = runtime_log.read_text(encoding="utf-8", errors="replace") if runtime_log.exists() else ""
+            summary["sigterm_seen"] = "bbot_signal_received | signal=SIGTERM" in final_log
+            summary["supervised_tasks_drained"] = "gear23_tasks_drained |" in final_log
+        result_path = data_root / "experiment-summary.json"
+        result_path.write_text(json.dumps(summary, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    return summary
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--data-root", required=True)
+    parser.add_argument(
+        "--source-delta",
+        default="/data/bbot-would-send-prod/hot_add_delta.csv",
+        help="read-only active would-send cumulative snapshot used only for real metadata",
+    )
+    parser.add_argument("--coins", default="CT,AEON", help="two source-delta candidates")
+    parser.add_argument("--timeout-sec", type=int, default=180)
+    args = parser.parse_args()
+    if not 30 <= args.timeout_sec <= 300:
+        parser.error("--timeout-sec must be between 30 and 300")
+    summary = run(args)
+    print(json.dumps(summary, indent=2, sort_keys=True))
+    return 0 if summary.get("exit_code") == 0 and summary.get("sigterm_seen") else 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

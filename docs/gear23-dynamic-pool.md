@@ -21,6 +21,15 @@ The snapshot uses the existing `app/utils/universe_delta.py` columns. A candidat
 
 ## Patch A checks
 
-Offline checks are `python3 -m unittest tests.test_gear23_hot_add` and `python3 -m py_compile app/bot/runtime.py app/bot/hot_add.py app/bot/hot_add_warm.py`. The bounded runtime experiment, after review, should use a dedicated run directory and a manually written CSV with one new candidate, then a second candidate. Confirm two public subscriptions per accepted candidate, duplicate snapshot no-ops, invalid metadata skip, explicit observer warm result, and unchanged trade-eligible base pool. Keep `LIVE_ORDERS=0`; no private session or exchange order is part of A.
+Offline checks are `python3 -m unittest tests.test_gear23_hot_add tests.test_hot_add_supervisor` and `python3 -m py_compile app/bot/runtime.py app/bot/hot_add.py app/bot/hot_add_warm.py app/utils/task_supervisor.py`. The bounded runtime experiment, after review, should use a dedicated run directory and a manually written CSV with one new candidate, then a second candidate. Confirm two public subscriptions per accepted candidate, duplicate snapshot no-ops, invalid metadata skip, explicit observer warm result, and unchanged trade-eligible base pool. Keep `LIVE_ORDERS=0`; no private session or exchange order is part of A.
+
+The runner `validation/gear23_public_stub_experiment.py` reads two selected metadata rows from the would-send snapshot without changing it, writes manual snapshots only under a new Gear 2.3 data root, starts the bot with a scrubbed public/stub-only environment, executes the one/duplicate/two/invalid sequence, and stops only its own child PID. Example:
+
+```bash
+/root/venv/bin/python validation/gear23_public_stub_experiment.py \
+  --data-root /data/bbot-gear23-patch-a-<new-run-id> \
+  --source-delta /data/bbot-would-send-prod/hot_add_delta.csv \
+  --coins CT,AEON
+```
 
 Patch B must separately validate private subscription readiness, candidate metadata/1x preparation, fresh public generations, observer warm state, held/pending coin retention, and trade eligibility. It must reuse the active would-send selector's existing cumulative snapshot rather than run a second selector.
