@@ -922,18 +922,24 @@ class PrivateStreamRuntime:
         return row
 
     def run_rest_reseed(self) -> dict[str, Any]:
+        """Retry each native up to three times; persistent failure blocks the pool."""
         if self.rest_reseed is None:
             raise RuntimeError("REST reseed port unbound")
         last: Optional[RestReseedResult] = None
         natives = self.subscribed_natives or (self.symbol_alias,)
         for native in natives:
-            last = self.rest_reseed.reseed(
-                venue=self.exchange,
-                environment=self.environment,
-                reconnect_generation=self.reconnect_generation,
-                symbol_alias=native,
-            )
-            if last is None or not last.matched:
+            for attempt in range(3):
+                last = self.rest_reseed.reseed(
+                    venue=self.exchange,
+                    environment=self.environment,
+                    reconnect_generation=self.reconnect_generation,
+                    symbol_alias=native,
+                )
+                if last is not None and last.matched and not last.inconclusive:
+                    break
+                if attempt < 2:
+                    time.sleep(1.0)
+            if last is None or not last.matched or last.inconclusive:
                 return self.confirm_rest_reseed(
                     last if last is not None else RestReseedResult(matched=False, inconclusive=True)
                 )

@@ -411,6 +411,8 @@ The terminal live canary also writes `{root}/canary_state.json` as an atomic loc
 
 Default `BBOT_PRIVATE_DATA_ROOT=/data/bbot/private` (or `<repo>/output/bbot/private` if default not writable).
 
+Private REST reseed retries each subscribed native up to three times, with a one-second wait after an inconclusive attempt. A persistent failure keeps reconciliation blocked and aborts the remaining native pool; a matched native proceeds to the next one.
+
 | Path | Schema |
 |---|---|
 | `{private}/journal/event_date=*/events.jsonl` | `bbot.private.journal.v1` |
