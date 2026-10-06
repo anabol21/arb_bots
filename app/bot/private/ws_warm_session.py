@@ -845,6 +845,7 @@ class PrivateWarmSession:
                 rt,
                 exchange=exchange,
                 ack_timeout_sec=float(self.ack_timeout_sec),
+                defer_reseed=True,
             )
             if err is not None:
                 LOG.warning(
@@ -863,6 +864,21 @@ class PrivateWarmSession:
             for sock in (priv, trade):
                 if hasattr(sock, "handshake_done"):
                     sock.handshake_done = True
+            reseed_ev = rt.run_rest_reseed()
+            if (
+                reseed_ev.get("reconciliation_state") != "matched"
+                or rt.reseed_required
+            ):
+                LOG.warning(
+                    "warm_loop_reseed_failed exchange=%s run_id=%s",
+                    exchange,
+                    self.run_id,
+                )
+                for sock in (priv, trade):
+                    drop = getattr(sock, "drop_connection", None)
+                    if callable(drop):
+                        drop()
+                return
             self._handshake_count += 1
             self._fail_attempt = 0
             self._last_hb_mono = time.monotonic()
@@ -877,6 +893,7 @@ class PrivateWarmSession:
             lock.release()
 
     def _mark_loop_handshake_done(self) -> None:
+        """Enable owner receive/heartbeat work; readiness still requires matched REST reseeds."""
         for rt in (self.bybit_runtime, self.okx_runtime):
             for sock in (rt.private_socket, rt.trade_socket):
                 if sock is not None and hasattr(sock, "handshake_done"):
@@ -906,14 +923,19 @@ class PrivateWarmSession:
         return True
 
     def _handshake_both(self) -> None:
-        for runtime, exchange in (
+        venues = (
             (self.bybit_runtime, "bybit"),
             (self.okx_runtime, "okx"),
-        ):
+        )
+        # Authenticate both trade sockets before any potentially slow account
+        # reseed. The loop may now receive and heartbeat, but sends remain
+        # blocked by each runtime's reseed_required state until both match.
+        for runtime, exchange in venues:
             err = _handshake_private_and_trade(
                 runtime,
                 exchange=exchange,
                 ack_timeout_sec=float(self.ack_timeout_sec),
+                defer_reseed=True,
             )
             if err is not None:
                 raise RuntimeError(f"warm handshake failed exchange={exchange} err={err}")
@@ -923,6 +945,19 @@ class PrivateWarmSession:
                 raise RuntimeError(
                     f"warm post-handshake heartbeat failed exchange={exchange}"
                 )
+        self._mark_loop_handshake_done()
+        for runtime, exchange in venues:
+            reseed_ev = runtime.run_rest_reseed()
+            if (
+                reseed_ev.get("reconciliation_state") != "matched"
+                or runtime.reseed_required
+            ):
+                LOG.warning(
+                    "warm_reseed_failed exchange=%s run_id=%s",
+                    exchange,
+                    self.run_id,
+                )
+                raise RuntimeError(f"warm reseed failed exchange={exchange}")
         self._handshake_count += 1
         self._last_hb_mono = time.monotonic()
 

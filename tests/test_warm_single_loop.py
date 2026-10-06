@@ -443,6 +443,7 @@ class SingleLoopWarmTests(unittest.TestCase):
             )
             session.stop()
 
+
     def test_added_okx_coin_ack_is_instrument_scoped_on_owner_loop(self) -> None:
         from app.bot.private.selftest import W2PrivateWsTests
         from app.bot.private.ws_private import RestReseedResult
@@ -752,6 +753,174 @@ class SingleLoopWarmTests(unittest.TestCase):
                 "reconnect must not inherit old silence clock and storm",
             )
             session.stop()
+
+
+class WarmHandshakeReseedOrderingTests(unittest.TestCase):
+    def test_all_trade_auth_precedes_slow_reseed_and_failure_stays_blocked(self) -> None:
+        from types import SimpleNamespace
+
+        from app.bot.private.ws_private import SequenceHealth, SubscriptionReadiness
+        from app.bot.private.ws_warm_session import PrivateWarmSession
+
+        events: list[tuple[str, str]] = []
+
+        class Socket:
+            connected = True
+            handshake_done = False
+
+            def drop_connection(self) -> None:
+                self.connected = False
+
+        class Runtime:
+            def __init__(self, exchange: str, fail_reseed: bool = False) -> None:
+                self.exchange = exchange
+                self.private_socket = Socket()
+                self.trade_socket = Socket()
+                self.authenticated = False
+                self.trade_authenticated = False
+                self.sequence_state = SequenceHealth.RESEED_REQUIRED
+                self.subscription_readiness = SubscriptionReadiness.NOT_READY
+                self.sends_blocked = True
+                self.reseed_required = True
+                self.fail_reseed = fail_reseed
+                self.base_coins: tuple[str, ...] = ()
+
+            def send_auth(self) -> None:
+                events.append(("private_auth", self.exchange))
+
+            def recv_private_handshake_event(self, *, expect_kinds, timeout_sec):
+                del timeout_sec
+                if "auth_ack" in expect_kinds:
+                    self.authenticated = True
+                    events.append(("private_auth_ack", self.exchange))
+                    return SimpleNamespace(kind="auth_ack", ack_ok=True)
+                self.subscription_readiness = SubscriptionReadiness.READY
+                events.append(("private_sub_ack", self.exchange))
+                return SimpleNamespace(kind="sub_ack", ack_ok=True)
+
+            def send_subscribe(self) -> None:
+                events.append(("private_subscribe", self.exchange))
+
+            def send_trade_auth(self) -> None:
+                events.append(("trade_auth", self.exchange))
+
+            def recv_trade_auth_ack(self, *, timeout_sec: float) -> bool:
+                del timeout_sec
+                self.trade_authenticated = True
+                events.append(("trade_auth_ack", self.exchange))
+                return True
+
+            def send_heartbeat(self) -> None:
+                events.append(("private_ping", self.exchange))
+
+            def send_trade_heartbeat(self) -> None:
+                events.append(("trade_ping", self.exchange))
+
+            def publish_private_leg_state(self) -> None:
+                return None
+
+            def run_rest_reseed(self) -> dict[str, str]:
+                # Model the 54-symbol startup/reconnect pool while keeping the
+                # test offline and proving no REST phase starts before both
+                # trade sockets are authenticated and owner heartbeats enabled.
+                self.assert_two_phase_ready()
+                events.append(("reseed_start", self.exchange))
+                for _ in range(54):
+                    time.sleep(0.001)
+                if self.fail_reseed:
+                    events.append(("reseed_failed", self.exchange))
+                    return {"reconciliation_state": "inconclusive"}
+                self.sequence_state = SequenceHealth.HEALTHY
+                self.sends_blocked = False
+                self.reseed_required = False
+                events.append(("reseed_matched", self.exchange))
+                return {"reconciliation_state": "matched"}
+
+            def assert_two_phase_ready(self) -> None:
+                self_outer = session
+                assert self_outer is not None
+                if not all(
+                    rt.trade_authenticated
+                    and rt.private_socket.handshake_done
+                    and rt.trade_socket.handshake_done
+                    for rt in (self_outer.bybit_runtime, self_outer.okx_runtime)
+                ):
+                    raise AssertionError("reseed began before all four socket handshakes")
+                if self_outer.is_ready():
+                    raise AssertionError("send readiness opened during REST reseed")
+
+        def make_session(*, fail_okx_reseed: bool = False):
+            nonlocal session
+            session = object.__new__(PrivateWarmSession)
+            session.bybit_runtime = Runtime("bybit")
+            session.okx_runtime = Runtime("okx", fail_reseed=fail_okx_reseed)
+            session.journal = SimpleNamespace(run_id="offline-run")
+            session.coins = ("C0", "C1")
+            session.bybit_symbols = ("C0USDT", "C1USDT")
+            session.okx_symbols = ("C0-USDT-SWAP", "C1-USDT-SWAP")
+            session.bybit_symbol = "C0USDT"
+            session.okx_symbol = "C0-USDT-SWAP"
+            session.ack_timeout_sec = 0.1
+            session._started = True
+            session._stopped = False
+            session._handshake_count = 0
+            session._last_hb_mono = 0.0
+            session._fail_attempt = 0
+            session._venue_hs_lock = {
+                "bybit": threading.Lock(),
+                "okx": threading.Lock(),
+            }
+            return session
+
+        session = None
+        session = make_session()
+        session._handshake_both()
+        self.assertTrue(session.is_ready())
+        first_reseed = next(i for i, event in enumerate(events) if event[0] == "reseed_start")
+        self.assertEqual(
+            [event for event in events[:first_reseed] if event[0] == "trade_auth_ack"],
+            [("trade_auth_ack", "bybit"), ("trade_auth_ack", "okx")],
+        )
+        self.assertEqual(session._handshake_count, 1)
+
+        # A single-venue reconnect follows the same auth/heartbeat-before-REST
+        # order while the healthy venue remains unchanged.
+        events.clear()
+        rt = session.okx_runtime
+        rt.authenticated = False
+        rt.trade_authenticated = False
+        rt.sequence_state = SequenceHealth.RESEED_REQUIRED
+        rt.subscription_readiness = SubscriptionReadiness.NOT_READY
+        rt.sends_blocked = True
+        rt.reseed_required = True
+        rt.private_socket.handshake_done = False
+        rt.trade_socket.handshake_done = False
+        rt.private_socket.connected = True
+        rt.trade_socket.connected = True
+        session._handshake_venue_if_ready("okx")
+        self.assertTrue(session.is_ready())
+        self.assertEqual(session._handshake_count, 2)
+
+        # Reseed failure cannot make the session send-ready even though the
+        # loop handshake flags are true for receive/heartbeat work.
+        events.clear()
+        rt.authenticated = False
+        rt.trade_authenticated = False
+        rt.sequence_state = SequenceHealth.RESEED_REQUIRED
+        rt.subscription_readiness = SubscriptionReadiness.NOT_READY
+        rt.sends_blocked = True
+        rt.reseed_required = True
+        rt.fail_reseed = True
+        rt.private_socket.handshake_done = False
+        rt.trade_socket.handshake_done = False
+        rt.private_socket.connected = True
+        rt.trade_socket.connected = True
+        session._handshake_venue_if_ready("okx")
+        self.assertFalse(session.is_ready())
+        self.assertTrue(rt.reseed_required)
+        self.assertTrue(rt.sends_blocked)
+        self.assertTrue(rt.private_socket.handshake_done)
+        self.assertTrue(rt.trade_socket.handshake_done)
 
 
 if __name__ == "__main__":
