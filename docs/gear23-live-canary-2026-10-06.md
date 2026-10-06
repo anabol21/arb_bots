@@ -199,7 +199,7 @@ be claimed from this log. No orders were sent, and no leverage/account settings
 were changed.
 
 PID `2360461` was gracefully stopped from a fresh flat checkpoint before the
-f9e801d attempt; PID `2362496` exited on the reseed failure. The checkpoint
+final `57477ea` attempt; PID `2362496` exited on the reseed failure. The checkpoint
 remains flat and pending-free but names the now-stopped PID `2360461`, so it is
 stale process identity, not proof of a running canary. The preserved open-window
 deadline is `2026-10-09T12:27:03.428000Z`. No further startup retry was made.
