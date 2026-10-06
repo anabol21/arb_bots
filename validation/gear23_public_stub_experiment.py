@@ -7,6 +7,7 @@ import argparse
 import json
 import math
 import os
+import re
 import signal
 import subprocess
 import sys
@@ -74,11 +75,14 @@ def _wait_for(
     label: str,
     proc: subprocess.Popen[bytes],
     deadline: float,
+    progress: list[dict[str, str]],
 ) -> None:
+    progress.append({"step": label, "state": "waiting"})
     while time.monotonic() < deadline:
         if proc.poll() is not None:
             raise RuntimeError(f"bot exited before {label}: rc={proc.returncode}")
         if predicate():
+            progress.append({"step": label, "state": "passed"})
             return
         time.sleep(0.25)
     raise TimeoutError(f"timed out waiting for {label}")
@@ -161,12 +165,14 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         "private_send": False,
         "exchange_orders": False,
         "poll_sec": 5,
+        "progress": [],
     }
     proc: subprocess.Popen[bytes] | None = None
+    phase = "startup"
     try:
         with console_log.open("wb") as out:
             proc = subprocess.Popen(
-                [sys.executable, "-m", "app.bot"],
+                [sys.executable, "validation/gear23_public_stub_child.py"],
                 cwd=Path(__file__).resolve().parents[1],
                 env=clean_env,
                 stdin=subprocess.DEVNULL,
@@ -196,18 +202,37 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             def theta_seen(coin: str) -> bool:
                 return _count_theta_rows(data_root, {coin})[coin] > 0
 
+            def base_public_ready() -> bool:
+                text = log_text()
+                has_base_pair_ack = any(
+                    all(
+                        f"ws_subscribe_ok | coin={coin} | exchange={venue}" in text
+                        for venue in ("okx", "bybit")
+                    )
+                    for coin in CANARY29_COINS
+                )
+                has_accepted_books = any(
+                    (match := re.search(r"heartbeat \|[^\n]*accepted=(\d+)", line))
+                    and int(match.group(1)) > 0
+                    for line in text.splitlines()
+                )
+                return has_base_pair_ack and has_accepted_books
+
+            phase = "base public runtime readiness"
             _wait_for(
                 lambda: "bbot_start |" in log_text()
                 and "private_warm_skipped | live_private_send=false" in log_text()
-                and "bbot_hot_add_delta_read |" in log_text()
-                and subscribed("KAITO")
-                and tw_seen("KAITO"),
+                and "hot_add_delta_read |" in log_text()
+                and "validation_no_orders | callbacks=probe,policy" in log_text()
+                and base_public_ready(),
                 label="base public runtime readiness before manual add",
                 proc=proc,
                 deadline=deadline,
+                progress=summary["progress"],
             )
 
             # First external manual addition happens only after the base pool is live.
+            phase = f"first candidate {first} public subscribe ACKs"
             write_delta_atomic(delta_path, [valid_rows[0]])
 
             _wait_for(
@@ -216,7 +241,9 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                 label=f"first candidate {first} public subscribe ACKs",
                 proc=proc,
                 deadline=deadline,
+                progress=summary["progress"],
             )
+            phase = f"first candidate {first} warm result and accepted TW tick"
             _wait_for(
                 lambda: "private_warm_skipped | live_private_send=false" in log_text()
                 and (
@@ -227,15 +254,19 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                 label=f"first candidate {first} warm result and accepted TW tick",
                 proc=proc,
                 deadline=deadline,
+                progress=summary["progress"],
             )
+            phase = f"first candidate {first} theta row"
             _wait_for(
                 lambda: theta_seen(first),
                 label=f"first candidate {first} theta row",
                 proc=proc,
                 deadline=deadline,
+                progress=summary["progress"],
             )
 
             # Re-write identical snapshot: production parser must not spawn a duplicate.
+            phase = "duplicate snapshot no-op"
             duplicate_log_offset = len(log_text())
             write_delta_atomic(delta_path, [valid_rows[0]])
             _wait_for(
@@ -243,9 +274,11 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                 label="duplicate snapshot no-op",
                 proc=proc,
                 deadline=deadline,
+                progress=summary["progress"],
             )
 
             # Cumulative snapshot adds two more real metadata rows.
+            phase = "two additional candidates public subscribe ACKs"
             write_delta_atomic(delta_path, valid_rows)
             _wait_for(
                 lambda: all(
@@ -256,7 +289,9 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                 label="two additional candidates public subscribe ACKs",
                 proc=proc,
                 deadline=deadline,
+                progress=summary["progress"],
             )
+            phase = "additional candidates warm results and accepted TW ticks"
             _wait_for(
                 lambda: all(tw_seen(coin) for coin in coins[1:])
                 and all(
@@ -267,22 +302,27 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                 label="additional candidates warm results and accepted TW ticks",
                 proc=proc,
                 deadline=deadline,
+                progress=summary["progress"],
             )
             for coin in coins[1:]:
+                phase = f"candidate {coin} theta row"
                 _wait_for(
                     lambda coin=coin: theta_seen(coin),
                     label=f"candidate {coin} usable theta row",
                     proc=proc,
                     deadline=deadline,
+                    progress=summary["progress"],
                 )
 
             # Invalid instrument metadata remains in the snapshot but is fail-closed.
+            phase = "invalid metadata rejection"
             write_delta_atomic(delta_path, [*valid_rows, invalid_row])
             _wait_for(
                 lambda: "bbot_hot_add_fail_closed | base_coin=G23BAD" in log_text(),
                 label="invalid metadata rejection",
                 proc=proc,
                 deadline=deadline,
+                progress=summary["progress"],
             )
             text = log_text()
             warm_ok = {
@@ -324,6 +364,15 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                         for line in text.splitlines()
                     ),
                     "private_warm_skipped": "private_warm_skipped | live_private_send=false" in text,
+                    "validation_no_orders": "validation_no_orders | callbacks=probe,policy" in text,
+                    "simulated_order_entry_events": sum(
+                        text.count(marker)
+                        for marker in ("probe_placed |", "stub_broker | would_send")
+                    ),
+                    "simulated_trade_journal_rows": sum(
+                        len(path.read_text(encoding="utf-8").splitlines())
+                        for path in (data_root / "journal").glob("**/legs.jsonl")
+                    ),
                     "trade_eligibility_logs": {
                         coin: any(
                             f"gear23_coin_added | base_coin={coin}" in line
@@ -337,6 +386,9 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                     ),
                 }
             )
+    except Exception as exc:
+        summary["error"] = f"{phase}: {type(exc).__name__}: {exc}"
+        summary["progress"].append({"step": phase, "state": "failed"})
     finally:
         if proc is not None:
             summary["exit_code"] = _stop(proc)
@@ -351,6 +403,9 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                     summary.get("invalid_metadata_rejected", False),
                     summary.get("invalid_candidate_not_added", False),
                     summary.get("private_warm_skipped", False),
+                    summary.get("validation_no_orders", False),
+                    summary.get("simulated_order_entry_events") == 0,
+                    summary.get("simulated_trade_journal_rows") == 0,
                     summary.get("theta_trade_journal_files") == 0,
                     all(summary.get("added_once", {}).values()),
                     all(
