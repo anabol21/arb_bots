@@ -15,6 +15,7 @@ Environment=BBOT_MODE=policy
 Environment=BBOT_PROFILE=gear22_would_send
 Environment=BBOT_BROKER=stub
 Environment=BBOT_NOTIONAL_USDT=20
+Environment=BBOT_SIZE_GATE=0
 Environment=BBOT_TRADE_LAT_MS=100
 Environment=BBOT_FLOOR_WATCH=1
 Environment=BBOT_TW_P50_WATCH=1
@@ -41,6 +42,8 @@ Environment=BBOT_HOT_ADD_POLL_SEC=30
 Environment=BBOT_HOT_ADD_DELTA=/data/bbot-would-send-prod/hot_add_delta.csv
 Environment=BBOT_HOT_ADD_DROP=/data/bbot-would-send-prod/hot_add_drop.csv
 Environment=BBOT_COINS=KAITO,HOME,WAL,RVN,ONT,2Z,BICO,HMSTR,CAP,BLEND,EDEN,KMNO,GPS,ME,ZBT,MOVE,COAI,AZTEC,APR,YB,AT,H,MUBARAK,ACU,LA,BEAT,PARTI,SIGN,GIGGLE
+Environment=SPREAD_TICK_AGE_MAX_MS=10000
+Environment=SPREAD_TICK_SKEW_MAX_MS=10000
 ExecStart=/root/venv/bin/python -m app.bot
 Restart=on-failure
 RestartSec=10

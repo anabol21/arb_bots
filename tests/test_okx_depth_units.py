@@ -1,4 +1,8 @@
-from app.bot.theta_trade_manager import size_check
+from app.bot.theta_trade_manager import (
+    ThetaTradeConfig,
+    size_check,
+    size_gate_enabled,
+)
 
 
 def _books():
@@ -113,3 +117,47 @@ def test_non_private_okx_depth_keeps_existing_contract_behavior():
     )
     assert result["okx_available_size"] == 2
     assert result["okx_ct_val"] is None
+
+
+def test_size_gate_disabled_forces_size_ok_keeps_sizes():
+    """BBOT_SIZE_GATE=0 / size_gate=False: always size_ok, sizes still logged."""
+    okx, bybit = _books()
+    # Thin book would fail the live gate.
+    okx = {**okx, "ask_size": 0.01, "bid_size": 0.01}
+    bybit = {**bybit, "ask_size": 0.01, "bid_size": 0.01}
+    blocked = size_check(
+        okx=okx, bybit=bybit, side="long", event="open", notional_usdt=20
+    )
+    assert not blocked["size_ok"]
+    assert blocked["size_gate"] is True
+    assert blocked["size_ok_raw"] is False
+
+    forced = size_check(
+        okx=okx,
+        bybit=bybit,
+        side="long",
+        event="open",
+        notional_usdt=20,
+        size_gate=False,
+    )
+    assert forced["size_ok"] is True
+    assert forced["size_gate"] is False
+    assert forced["size_ok_raw"] is False
+    assert forced["okx_available_size"] == blocked["okx_available_size"]
+    assert forced["bybit_available_size"] == blocked["bybit_available_size"]
+    assert forced["okx_planned_qty"] == blocked["okx_planned_qty"]
+
+
+def test_size_gate_enabled_env_flags():
+    assert size_gate_enabled({}) is True
+    assert size_gate_enabled({"BBOT_SIZE_GATE": "1"}) is True
+    assert size_gate_enabled({"BBOT_SIZE_GATE": "0"}) is False
+    assert size_gate_enabled({"BBOT_SKIP_SIZE_CHECK": "1"}) is False
+    assert size_gate_enabled({"BBOT_SKIP_SIZE_CHECK": "0"}) is True
+    # SKIP=1 wins over SIZE_GATE=1
+    assert size_gate_enabled({"BBOT_SIZE_GATE": "1", "BBOT_SKIP_SIZE_CHECK": "1"}) is False
+    cfg = ThetaTradeConfig.from_env({"BBOT_SIZE_GATE": "0", "BBOT_NOTIONAL_USDT": "20"})
+    assert cfg.size_gate is False
+    assert cfg.notional_usdt == 20.0
+    cfg_live = ThetaTradeConfig.from_env({})
+    assert cfg_live.size_gate is True

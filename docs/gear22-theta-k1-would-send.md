@@ -60,6 +60,10 @@ No second observer process. No Contour B / collector / WAL-EDEN / private path c
   `okx_available_contracts` / `okx_ct_val` when the private gate is active.
 - Signal insufficient → skip, log `reject_reason=insufficient_size` + available sizes.
 - Signal OK but fill size bad → still log would_fill with `fill_size_ok=false` (do not erase).
+- **Disable gate (stub would_send only):** `BBOT_SIZE_GATE=0` or `BBOT_SKIP_SIZE_CHECK=1`.
+  Default is on (live / gear23 unchanged). When off, `size_check` still logs available /
+  planned sizes (`size_ok_raw`) but always returns `size_ok=true` so opens/closes are
+  not blocked. Prod would_send unit sets `BBOT_SIZE_GATE=0`.
 
 ### Slip metric
 
@@ -149,6 +153,8 @@ Prefer **`BBOT_PROFILE=gear22_would_send`** (alias `gear22`).
 | `BBOT_FILL_DELAY_MS` | `70` | fill_ts − signal_ts |
 | `BBOT_SLOT_K` | `1` | global slots |
 | `BBOT_NOTIONAL_USDT` | `100` | size gate + PnL proxy |
+| `BBOT_SIZE_GATE` | `1` (on) | `0` disables liquidity size gate (stub would_send); live stays on |
+| `BBOT_SKIP_SIZE_CHECK` | unset | `1` same as `BBOT_SIZE_GATE=0` |
 | `BBOT_BOOK_DEPTH` | `1` | L1; >1 uses depth lists if present |
 | `BBOT_FLOOR_WATCH` | on | keep on |
 | `BBOT_TW_P50_WATCH` | on | keep on |

@@ -445,6 +445,43 @@ class DecideK1Tests(unittest.TestCase):
         self.assertEqual(d.reject_reason, "insufficient_size")
         self.assertEqual(d.size_event, "open")
 
+    def test_size_gate_off_allows_thin_book_open(self) -> None:
+        from research.gear22_backtest.policy import PolicyParams
+
+        snaps = [
+            _snap("BTC", "long", 0.60, p50_1m=0.80, floor=0.20),
+            _snap("BTC", "short", 0.01),
+        ]
+        quotes = {"BTC": _books(okx_ask_sz=0.01, bybit_bid_sz=0.01)}
+        params = PolicyParams(
+            theta_open=0.50, p50_open=0.60, min_profit_pp=0.20, min_theta_close=0.05
+        )
+        blocked = decide_theta_k1(
+            snaps,
+            slot=SlotState(),
+            thr=0.2,
+            quotes=quotes,
+            notional_usdt=100.0,
+            policy_params=params,
+            size_gate=True,
+        )
+        self.assertEqual(blocked.action, "skip")
+        self.assertEqual(blocked.reject_reason, "insufficient_size")
+        d = decide_theta_k1(
+            snaps,
+            slot=SlotState(),
+            thr=0.2,
+            quotes=quotes,
+            notional_usdt=100.0,
+            policy_params=params,
+            size_gate=False,
+        )
+        self.assertEqual(d.action, "open")
+        self.assertEqual(d.side, "long")
+        self.assertTrue(d.size_info["size_ok"])
+        self.assertFalse(d.size_info["size_gate"])
+        self.assertFalse(d.size_info["size_ok_raw"])
+
     def test_close_size_reject_uses_flatten_legs(self) -> None:
         slot = SlotState(position=_held_long())
         params = _close_params()
