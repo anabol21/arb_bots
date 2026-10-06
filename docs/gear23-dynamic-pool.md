@@ -132,6 +132,6 @@ extras (54 total) under a 48-extra cap. B2.3 consumes the complete snapshot at
 startup and polls every 30 seconds, warming extras from
 `/data/bbot-would-send-prod-history`. Extra entries stay blocked without
 prep-confirmed 1x on both venues; dynamic pool refresh never changes leverage.
-The existing 72-hour canary window ends at 2026-10-08 22:57:02 UTC;
-restart must preserve its data/private journal roots and pass the state/pending
-shutdown gate before replacing the process.
+The current canary window began flat at 2026-10-06 12:27:02 UTC and ends at
+2026-10-09 12:27:02 UTC. Full launch and validation chronology is in
+[`docs/gear23-live-canary-2026-10-06.md`](gear23-live-canary-2026-10-06.md).
