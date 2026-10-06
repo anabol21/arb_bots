@@ -50,8 +50,14 @@ No second observer process. No Contour B / collector / WAL-EDEN / private path c
 
 ### Book size gate
 
-- Notional (`BBOT_NOTIONAL_USDT`, default 100) must fit available size on chosen legs
-  (L1 min; optional `BBOT_BOOK_DEPTH` for top-N when depth lists are present).
+- Notional (`BBOT_NOTIONAL_USDT`, default 100; prod would_send keeps **20**) must fit
+  available size on chosen legs (L1 min; `BBOT_BOOK_DEPTH` default **1**; optional
+  top-N when depth lists are present).
+- **OKX units:** when `ct_val` / `_private_size_gate` is present (private path),
+  available OKX = contracts × `ct_val` (base). would_send stub has no `ct_val` →
+  raw L1 size (backward compatible). Close may pass `required_okx_contracts` /
+  `required_bybit_qty` from filled position. Journal may include
+  `okx_available_contracts` / `okx_ct_val` when the private gate is active.
 - Signal insufficient → skip, log `reject_reason=insufficient_size` + available sizes.
 - Signal OK but fill size bad → still log would_fill with `fill_size_ok=false` (do not erase).
 
@@ -92,7 +98,7 @@ Minimum fields on open/close:
 | `leg_buy_ex` / `leg_sell_ex` | okx \| bybit |
 | `spread_signal` / `spread_fill` | edge % |
 | `slip_spread` / `slip_leg_bps` | see above |
-| size fields | `signal_size_ok`, `fill_size_ok`, available / planned qty |
+| size fields | `signal_size_ok`, `fill_size_ok`, available / planned qty; `okx_available_contracts` / `okx_ct_val` when private gate active |
 | `notional_usdt` | |
 | `book_signal` / `book_fill` | structured okx/bybit bid/ask + size |
 | flat `signal_*` / `fill_*` bid/ask/size | convenience |

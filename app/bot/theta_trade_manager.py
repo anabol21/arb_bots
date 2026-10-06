@@ -347,7 +347,15 @@ def size_check(
     required_okx_contracts: Any = None,
     required_bybit_qty: Any = None,
 ) -> dict[str, Any]:
-    """Notional must fit available size on both chosen legs."""
+    """Notional must fit available size on both chosen legs.
+
+    When OKX ``ct_val`` / ``_private_size_gate`` is present, available OKX size
+    is ``contracts × ct_val`` (base). Optional ``required_okx_contracts`` /
+    ``required_bybit_qty`` override planned qty for close-from-fill. Without
+    ``ct_val`` (would_send stub), OKX size stays raw L1 — backward compatible.
+    Journal may carry ``okx_available_contracts`` / ``okx_ct_val`` when the
+    private gate is active.
+    """
     spread_side = spread_side_for(side, event=event)
     okx_leg, bybit_leg = legs_for_spread_side(spread_side)
     okx_px = signal_price_for_leg(dict(okx), okx_leg)
@@ -1165,6 +1173,9 @@ class ThetaTradeManager:
             "fill_bybit_available_size": fill_size.get("bybit_available_size"),
             "signal_okx_planned_qty": signal_size.get("okx_planned_qty"),
             "signal_bybit_planned_qty": signal_size.get("bybit_planned_qty"),
+            # Present when private OKX size gate / ct_val is active; None on would_send stub.
+            "okx_available_contracts": signal_size.get("okx_available_contracts"),
+            "okx_ct_val": signal_size.get("okx_ct_val"),
             "book_signal": {
                 "okx": snapshot_book(signal_okx),
                 "bybit": snapshot_book(signal_bybit),
@@ -1256,6 +1267,8 @@ class ThetaTradeManager:
                     "signal_bybit_available_size": size_info.get("bybit_available_size"),
                     "okx_planned_qty": size_info.get("okx_planned_qty"),
                     "bybit_planned_qty": size_info.get("bybit_planned_qty"),
+                    "okx_available_contracts": size_info.get("okx_available_contracts"),
+                    "okx_ct_val": size_info.get("okx_ct_val"),
                     "book_signal": {
                         "okx": snapshot_book(okx),
                         "bybit": snapshot_book(bybit),
