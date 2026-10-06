@@ -3116,10 +3116,9 @@ class BotRuntime:
             raise
         finally:
             if supervisor is not None:
-                supervised_count = len(supervisor)
                 await supervisor.drain()
                 self._hot_add_supervisor = None
-                self.log.info("gear23_tasks_drained | count=%s", supervised_count)
+                self.log.info("gear23_tasks_drained | remaining=%s", len(supervisor))
             for task in (stop_wait, wait_task):
                 if task is not None and not task.done():
                     task.cancel()

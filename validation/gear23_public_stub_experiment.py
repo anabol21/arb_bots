@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import signal
 import subprocess
@@ -46,8 +47,23 @@ def _read_metrics(data_root: Path, name: str, coins: set[str]) -> dict[str, int]
         if name == "tw_p50":
             observed = int(row.get("n_1m") or 0) > 0 or float(row.get("coverage_5m") or 0) > 0
         else:
-            observed = row.get("p50_1m") is not None or row.get("p50_5m") is not None
+            observed = all(
+                isinstance(row.get(field), (int, float))
+                and math.isfinite(float(row[field]))
+                for field in ("floor_tf_select_a25", "theta_1m", "theta_5m")
+            )
         if observed:
+            counts[coin] += 1
+    return counts
+
+
+def _count_theta_rows(data_root: Path, coins: set[str]) -> dict[str, int]:
+    counts = {coin: 0 for coin in coins}
+    for row in _read_json_rows(
+        sorted((data_root / "theta").glob("event_date=*/metrics.jsonl"))
+    ):
+        coin = str(row.get("base_coin") or "").upper()
+        if coin in counts:
             counts[coin] += 1
     return counts
 
@@ -85,8 +101,8 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     source = Path(args.source_delta)
     source_rows = {row["base_coin"].upper(): row for row in read_delta_rows(source)}
     coins = [item.strip().upper() for item in args.coins.split(",") if item.strip()]
-    if len(coins) != 2 or len(set(coins)) != 2:
-        raise ValueError("--coins must name exactly two distinct symbols")
+    if len(coins) != 3 or len(set(coins)) != 3:
+        raise ValueError("--coins must name exactly three distinct symbols")
     if set(coins) & set(CANARY29_COINS):
         raise ValueError("experiment candidates must be outside the fixed Canary29 base")
     missing = set(coins) - set(source_rows)
@@ -107,7 +123,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     delta_path = data_root / "manual_delta.csv"
     runtime_log = data_root / "gear23.log"
     console_log = data_root / "console.log"
-    write_delta_atomic(delta_path, [valid_rows[0]])
+    write_delta_atomic(delta_path, [])
 
     clean_env = {
         "PATH": "/root/venv/bin:/usr/bin:/bin",
@@ -129,7 +145,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         "BBOT_HOT_ADD_MAX_EXTRA": "48",
         "BBOT_HOT_ADD_POLL_SEC": "5",
         "BBOT_HOT_ADD_WARM": "1",
-        "BBOT_HOT_ADD_HISTORY_ROOT": "/data/bbot-would-send-prod",
+        "BBOT_HOT_ADD_HISTORY_ROOT": args.history_root,
         "BBOT_FLOOR_WATCH": "1",
         "BBOT_TW_P50_WATCH": "1",
         "BBOT_THETA_WATCH": "1",
@@ -166,7 +182,6 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                     return ""
 
             first = coins[0]
-            second = coins[1]
 
             def subscribed(coin: str) -> bool:
                 text = log_text()
@@ -179,7 +194,21 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                 return _read_metrics(data_root, "tw_p50", {coin})[coin] > 0
 
             def theta_seen(coin: str) -> bool:
-                return _read_metrics(data_root, "theta", {coin})[coin] > 0
+                return _count_theta_rows(data_root, {coin})[coin] > 0
+
+            _wait_for(
+                lambda: "bbot_start |" in log_text()
+                and "private_warm_skipped | live_private_send=false" in log_text()
+                and "bbot_hot_add_delta_read |" in log_text()
+                and subscribed("KAITO")
+                and tw_seen("KAITO"),
+                label="base public runtime readiness before manual add",
+                proc=proc,
+                deadline=deadline,
+            )
+
+            # First external manual addition happens only after the base pool is live.
+            write_delta_atomic(delta_path, [valid_rows[0]])
 
             _wait_for(
                 lambda: f"bbot_hot_add_applied | base_coin={first}" in log_text()
@@ -207,40 +236,45 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             )
 
             # Re-write identical snapshot: production parser must not spawn a duplicate.
+            duplicate_log_offset = len(log_text())
             write_delta_atomic(delta_path, [valid_rows[0]])
             _wait_for(
-                lambda: "bbot_hot_add_delta_read | " in log_text()
-                and f"rows=1 | added=0 | extra=1" in log_text(),
+                lambda: f"rows=1 | added=0 | extra=1" in log_text()[duplicate_log_offset:],
                 label="duplicate snapshot no-op",
                 proc=proc,
                 deadline=deadline,
             )
 
-            # Cumulative snapshot adds one more real metadata row.
+            # Cumulative snapshot adds two more real metadata rows.
             write_delta_atomic(delta_path, valid_rows)
             _wait_for(
-                lambda: f"bbot_hot_add_applied | base_coin={second}" in log_text()
-                and subscribed(second),
-                label=f"second candidate {second} public subscribe ACKs",
-                proc=proc,
-                deadline=deadline,
-            )
-            _wait_for(
-                lambda: tw_seen(second)
-                and (
-                    f"gear23_observer_warm | base_coin={second}" in log_text()
-                    or f"gear23_observer_warm_failed | base_coin={second}" in log_text()
+                lambda: all(
+                    f"bbot_hot_add_applied | base_coin={coin}" in log_text()
+                    and subscribed(coin)
+                    for coin in coins[1:]
                 ),
-                label=f"second candidate {second} warm result and accepted TW tick",
+                label="two additional candidates public subscribe ACKs",
                 proc=proc,
                 deadline=deadline,
             )
             _wait_for(
-                lambda: theta_seen(second),
-                label=f"second candidate {second} theta row",
+                lambda: all(tw_seen(coin) for coin in coins[1:])
+                and all(
+                    f"gear23_observer_warm | base_coin={coin}" in log_text()
+                    or f"gear23_observer_warm_failed | base_coin={coin}" in log_text()
+                    for coin in coins[1:]
+                ),
+                label="additional candidates warm results and accepted TW ticks",
                 proc=proc,
                 deadline=deadline,
             )
+            for coin in coins[1:]:
+                _wait_for(
+                    lambda coin=coin: theta_seen(coin),
+                    label=f"candidate {coin} usable theta row",
+                    proc=proc,
+                    deadline=deadline,
+                )
 
             # Invalid instrument metadata remains in the snapshot but is fail-closed.
             write_delta_atomic(delta_path, [*valid_rows, invalid_row])
@@ -251,6 +285,10 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                 deadline=deadline,
             )
             text = log_text()
+            warm_ok = {
+                coin: f"bbot_hot_add_warm_ok | base_coin={coin} | ok=true" in text
+                for coin in coins
+            }
             summary.update(
                 {
                     "public_subscribe_ack": {
@@ -259,23 +297,39 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                         for coin in coins
                     },
                     "accepted_tw_rows": _read_metrics(data_root, "tw_p50", set(coins)),
-                    "theta_rows": _read_metrics(data_root, "theta", set(coins)),
+                    "theta_rows": _count_theta_rows(data_root, set(coins)),
+                    "usable_theta_rows": _read_metrics(data_root, "theta", set(coins)),
                     "warm_results": {
                         coin: (
-                            "ok" if f"gear23_observer_warm | base_coin={coin} | ok=true" in text
-                            else "not_ready_or_missing_history"
+                            "ok" if warm_ok[coin]
+                            else next(
+                                (
+                                    line.split("reason=", 1)[1].split(" |", 1)[0]
+                                    for line in text.splitlines()
+                                    if f"gear23_observer_warm | base_coin={coin}" in line
+                                ),
+                                "warm_result_missing",
+                            )
                         )
                         for coin in coins
                     },
+                    "floor_warm_ok_coins": [coin for coin, ok in warm_ok.items() if ok],
                     "added_once": {
                         coin: text.count(f"gear23_coin_added | base_coin={coin}") == 1
                         for coin in coins
                     },
                     "invalid_metadata_rejected": "bbot_hot_add_fail_closed | base_coin=G23BAD" in text,
+                    "invalid_candidate_not_added": not any(
+                        "gear23_coin_added | base_coin=G23BAD" in line
+                        for line in text.splitlines()
+                    ),
                     "private_warm_skipped": "private_warm_skipped | live_private_send=false" in text,
                     "trade_eligibility_logs": {
-                        coin: f"gear23_coin_added | base_coin={coin}" in text
-                             and "trade_eligible=false" in text
+                        coin: any(
+                            f"gear23_coin_added | base_coin={coin}" in line
+                            and "trade_eligible=false" in line
+                            for line in text.splitlines()
+                        )
                         for coin in coins
                     },
                     "theta_trade_journal_files": len(
@@ -289,6 +343,32 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             final_log = runtime_log.read_text(encoding="utf-8", errors="replace") if runtime_log.exists() else ""
             summary["sigterm_seen"] = "bbot_signal_received | signal=SIGTERM" in final_log
             summary["supervised_tasks_drained"] = "gear23_tasks_drained |" in final_log
+            summary["pass"] = all(
+                [
+                    summary["exit_code"] == 0,
+                    summary["sigterm_seen"],
+                    summary["supervised_tasks_drained"],
+                    summary.get("invalid_metadata_rejected", False),
+                    summary.get("invalid_candidate_not_added", False),
+                    summary.get("private_warm_skipped", False),
+                    summary.get("theta_trade_journal_files") == 0,
+                    all(summary.get("added_once", {}).values()),
+                    all(
+                        venue_ok
+                        for per_coin in summary.get("public_subscribe_ack", {}).values()
+                        for venue_ok in per_coin.values()
+                    ),
+                    all(summary.get("trade_eligibility_logs", {}).values()),
+                    all(count > 0 for count in summary.get("accepted_tw_rows", {}).values()),
+                    all(count > 0 for count in summary.get("theta_rows", {}).values()),
+                    any(
+                        summary.get("warm_results", {}).get(coin) == "ok"
+                        and summary.get("usable_theta_rows", {}).get(coin, 0) > 0
+                        for coin in coins
+                    ),
+                ]
+            )
+            summary["status"] = "PASS" if summary["pass"] else "PARTIAL"
         result_path = data_root / "experiment-summary.json"
         result_path.write_text(json.dumps(summary, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     return summary
@@ -302,14 +382,19 @@ def main() -> int:
         default="/data/bbot-would-send-prod/hot_add_delta.csv",
         help="read-only active would-send cumulative snapshot used only for real metadata",
     )
-    parser.add_argument("--coins", default="CT,AEON", help="two source-delta candidates")
+    parser.add_argument("--coins", default="CT,AEON,ARX", help="three source-delta candidates")
+    parser.add_argument(
+        "--history-root",
+        default="/data/bbot-would-send-prod-history",
+        help="existing would-send history, read-only source",
+    )
     parser.add_argument("--timeout-sec", type=int, default=180)
     args = parser.parse_args()
     if not 30 <= args.timeout_sec <= 300:
         parser.error("--timeout-sec must be between 30 and 300")
     summary = run(args)
     print(json.dumps(summary, indent=2, sort_keys=True))
-    return 0 if summary.get("exit_code") == 0 and summary.get("sigterm_seen") else 1
+    return 0 if summary.get("pass") else (2 if summary.get("status") == "PARTIAL" else 1)
 
 
 if __name__ == "__main__":
