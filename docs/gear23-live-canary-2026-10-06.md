@@ -55,6 +55,14 @@ roots:
 - `/root/b-private-b-exp/response-manager/20261005T194200Z-gear22-longrun/data/`
 - `/root/b-private-b-exp/response-manager/20261005T194200Z-gear22-longrun/private/`
 
+The checkpoint reviewed for position/pending state is
+`/root/b-private-b-exp/response-manager/20261005T194200Z-gear22-longrun/data/canary_state.json`.
+The old `spread-bbot-gear22-live-canary` systemd unit is expected to remain
+inactive. PID `2343195` is a standalone process, not managed by that unit, and
+no reboot autostart is configured. Monitor the PID and `/proc/2343195/cwd`,
+this log, and heartbeat/state evidence; systemd status does not report this
+canary's health.
+
 The hot-add path in the data root is a symlink to
 `/data/bbot-would-send-prod/hot_add_delta.csv`. The bot reads the production
 snapshot; the would-send process owns and updates it. History is read from
@@ -100,3 +108,9 @@ pending terminal action must resolve through the existing natural close path;
 do not force-close or kill the process. Extra pool coins missing 1x evidence
 are expected to remain blocked. Do not set leverage or change profile, K,
 notional, selector, or halt settings as part of this canary.
+
+For rollback, first require the checkpoint to show `position={}` and
+`pending=false`, then stop PID `2343195` gracefully before deploying the prior
+source. If a position is held or an action is pending, preserve the current
+source and journal and use only a compatible handoff after the existing
+natural close completes. Never force-kill or auto-flatten during rollback.
