@@ -2,11 +2,16 @@
 
 ## Deployment result
 
-The Gear 2.3 B2.3 canary is running as PID `2354286` from immutable commit
-`e2e134ca54731af95f1a8ea9594372e872fda025` (branch `B2.3`). The B2.3 branch
-includes the validated preB2.2 contour, Gear 2.3 patches A/B, and the reviewed
-close-PnL correction. `main` is `1d43137d208d4921ddafb406e6d267c861b3d318`;
-it retains the separate collector and would-send production contour.
+The latest B2.3 startup attempts ended before the signal loop, so no canary
+process is currently running. The last successful rollback-health run was PID
+`2360461` from immutable commit `e2e134ca54731af95f1a8ea9594372e872fda025`;
+that PID was gracefully stopped before deploying the ACK-handoff fix. The
+current checkpoint retains `source_pid=2360461`, but that PID is no longer
+running. The checkpoint is flat with `pending=false`, no halt, and deadline
+`2026-10-09T12:27:03.428000Z`. The B2.3 branch includes the validated preB2.2
+contour, Gear 2.3 patches A/B, and the reviewed close-PnL correction. `main` is
+`1d43137d208d4921ddafb406e6d267c861b3d318`; it retains the separate collector
+and would-send production contour.
 
 The current process is a standalone terminal-private canary. The separate
 would-send process (PID `1938088`) remains the source of the cumulative pool
@@ -69,10 +74,12 @@ snapshot; the would-send process owns and updates it. History is read from
 `/data/bbot-would-send-prod-history`. Files are materialized on the VPS data
 volume; no remote-upload or remote-durability claim was tested.
 
-The run started at `2026-10-06T12:27:02.937Z` and its 72-hour open window ends
-at `2026-10-09T12:27:02.937Z` (15:27:02 MSK). The persistent canary state
-currently reports `position={}`, `pending=false`, `halt=null`, and
-`completed_cycles=0`. The configured limits remain K=1, notional 10 USDT,
+The first B2.3 process started at `2026-10-06T12:27:02.937Z`. After the
+flat-only recovery restart, the preserved open-window deadline is
+`2026-10-09T12:27:03.428000Z` (15:27:03 MSK); this is the deadline retained
+through the failed startup attempts. The last successful process checkpoint reported `position={}`, `pending=false`,
+`halt=null`, and `completed_cycles=0`; it is not a live health check after
+process exit. The configured limits remain K=1, notional 10 USDT,
 policy `gear22_frozen_v1`, `canary_max_cycles=0`, and 72 hours. It uses the
 existing natural signal and halt rules; no synthetic signal or forced order was
 issued. The initial process started with the original 29 coins carrying
@@ -156,3 +163,46 @@ policy gates still control entry. No synthetic signal, forced order,
 account-mode GET, or additional setting call was used after restart. Future
 new extras remain ineligible until the same explicit preparation and runtime
 readiness checks succeed.
+
+## Per-instrument ACK handoff fix and failed startup — 2026-10-06
+
+The earlier startup log had an aggregate OKX subscription success but no
+per-instrument result. The bounded diagnostic run of PID `2357588` emitted one
+matched orders ACK (KAITO) out of 108 expected before Bybit REST reseed failed.
+The receive-path review found that the owner pump queued frames received before
+`handshake_done`; after the handshake consumer took its first subscription ACK,
+the remaining queued frames were not replayed to the private runtime.
+
+B2.3 commit `57477ea` changes the existing owner-loop handoff to atomically set
+`handshake_done` and drain only queued private frames through the existing
+`handle_inbound_text` parser. Trade frames remain queued for their existing
+consumer. The same handoff runs during reconnect. An offline three-coin startup
+ACK-burst regression passed with all six orders/positions keys ready; with the
+old boolean-only handoff restored temporarily, the test failed as expected.
+Scoped validation passed 25/25 across the warm-loop, handshake-reseed ordering,
+OKX subscribe, and Gear 2.3 hot-add tests. Syntax and diff checks passed. The
+full warm-loop module also ran 29 tests: 27 passed, while two unrelated
+websocket-connect tests errored because the local Python 3.14 `websockets`
+module lacks the `connect` attribute those tests patch.
+
+The f9e801d ACK-tracing deployment failed earlier at Bybit REST reseed. After
+the queue-handoff fix was deployed as immutable package
+`response-handler-20261006-gear23-B2.3-57477ea`, PID `2362496` produced 108/108
+OKX ACKs: 54 instruments each had one matched `orders` and one matched
+`positions` ACK, all `ack_ok=true`, request-correlated in generation 0. This
+confirms the queued ACKs now reach the existing parser and per-instrument map.
+The startup then failed at `warm_reseed_failed exchange=okx` before signal-loop
+start. The existing reseed adapter intentionally reduces signed account,
+position, and instrument GET outcomes to matched/inconclusive and did not record
+the failing symbol, stage, HTTP status, or venue code. No underlying cause can
+be claimed from this log. No orders were sent, and no leverage/account settings
+were changed.
+
+PID `2360461` was gracefully stopped from a fresh flat checkpoint before the
+f9e801d attempt; PID `2362496` exited on the reseed failure. The checkpoint
+remains flat and pending-free but names the now-stopped PID `2360461`, so it is
+stale process identity, not proof of a running canary. The preserved open-window
+deadline is `2026-10-09T12:27:03.428000Z`. No further startup retry was made.
+The next required work is narrow, sanitized reseed-failure diagnostics (symbol,
+probe stage, HTTP status and venue code only; no response payload or credentials),
+then a reviewed, flat-guarded launch.
