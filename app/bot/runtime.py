@@ -57,6 +57,20 @@ from app.bot.floor_warm import (
     export_observer_warm_pickle,
     resolve_floor_warm_path,
 )
+from app.bot.hot_add import (
+    BotHotAddController,
+    bbot_hot_add_delta_path,
+    bbot_hot_add_enabled,
+    bbot_hot_add_max_extra,
+    bbot_hot_add_poll_sec,
+    run_hot_add_poller,
+)
+from app.bot.hot_add_warm import (
+    bbot_hot_add_warm_enabled,
+    resolve_hot_add_history_root,
+    warm_floor_from_history,
+    seed_tw_p50_from_slim_ticks,
+)
 from app.bot.stub_broker import InstrumentMeta
 from app.bot.ws_books import (
     books_ready,
@@ -69,6 +83,7 @@ from app.utils.tick_validity import (
     TickValidityGate,
     book_l1_complete,
 )
+from app.utils.task_supervisor import TaskSupervisor
 from app.utils.universe_csv import load_take_yes_base_coins, read_universe_dicts
 
 ensure_repo_on_syspath()
@@ -416,6 +431,19 @@ class BotRuntime:
         self.coins = parse_coins(coins_raw)
         if not self.coins:
             raise RuntimeError("BBOT_COINS empty after is_crypto filter")
+        self._gear23_base_coins = tuple(self.coins)
+        self._gear23_hot_add_enabled = bbot_hot_add_enabled()
+        self._hot_add_supervisor: TaskSupervisor | None = None
+        if self._gear23_hot_add_enabled:
+            broker_kind = (os.environ.get("BBOT_BROKER") or "stub").strip().lower()
+            live_orders = (os.environ.get("LIVE_ORDERS") or "0").strip().lower()
+            live_send = (os.environ.get("BBOT_THETA_LIVE_SEND") or "0").strip().lower()
+            if self.profile not in {"gear22_would_send", "gear22_live_canary"}:
+                raise ValueError("BBOT_HOT_ADD requires a gear22 profile")
+            if self._terminal_private_execution or broker_kind != "stub":
+                raise ValueError("BBOT_HOT_ADD Patch A requires non-private BBOT_BROKER=stub")
+            if live_orders in {"1", "true", "yes", "on"} or live_send in {"1", "true", "yes", "on"}:
+                raise ValueError("BBOT_HOT_ADD Patch A refuses live-order gates")
         if self._terminal_private_execution:
             from app.bot.synthetic_policy import CANARY29_COINS
 
@@ -1862,6 +1890,99 @@ class BotRuntime:
             raise KeyError(f"{coin} missing from bybit_okx_universe.csv")
         return self.universe[coin]
 
+    def _gear23_spawn_coin(self, row: Mapping[str, str]) -> None:
+        """Register one public-only hot-add coin; Patch A never admits it to trading."""
+        supervisor = self._hot_add_supervisor
+        if supervisor is None:
+            raise RuntimeError("hot-add supervisor is not ready")
+        coin = str(row["base_coin"]).strip().upper()
+        self.quotes[coin] = {"okx": empty_book(), "bybit": empty_book()}
+        self.coins.append(coin)
+        self._book_inflight[coin] = False
+        self._book_dirty[coin] = False
+        self._book_last_exchange[coin] = "okx"
+        self._ma_cache[coin] = (None, None)
+        if self.theta_screener is not None:
+            self.theta_screener.coins.append(coin)
+        meta = self._meta(coin)
+        supervisor.add(
+            run_okx_books5(
+                base_coin=coin,
+                okx_symbol=meta.okx_symbol,
+                book_store=self.quotes[coin]["okx"],
+                on_book=self._on_book,
+                on_lifecycle=self._on_lifecycle,
+                stop_event=self.stop_event,
+            ),
+            name=f"okx-{coin}",
+        )
+        supervisor.add(
+            run_bybit_orderbook1(
+                base_coin=coin,
+                bybit_symbol=meta.bybit_symbol,
+                book_store=self.quotes[coin]["bybit"],
+                on_book=self._on_book,
+                on_lifecycle=self._on_lifecycle,
+                stop_event=self.stop_event,
+            ),
+            name=f"bybit-{coin}",
+        )
+        if bbot_hot_add_warm_enabled() and self.floor_observer is not None:
+            supervisor.add(
+                self._gear23_warm_coin(coin), name=f"warm-{coin}"
+            )
+        self.log.info(
+            "gear23_coin_added | base_coin=%s | public_ws=starting | trade_eligible=false",
+            coin,
+        )
+
+    async def _gear23_warm_coin(self, coin: str) -> None:
+        history_root = resolve_hot_add_history_root(self.data_root) or self.data_root
+        try:
+            result = await asyncio.to_thread(
+                warm_floor_from_history,
+                self.floor_observer,
+                coin,
+                history_root,
+                logger=self.log,
+            )
+        except Exception as exc:  # noqa: BLE001 — observer warm never halts public feeds
+            self.log.error(
+                "gear23_observer_warm_failed | base_coin=%s | err=%s | trade_eligible=false",
+                coin,
+                type(exc).__name__,
+            )
+            return
+        ticks_fed = 0
+        if result.ok and self.tw_p50_observer is not None:
+            try:
+                ticks_fed = await asyncio.to_thread(
+                    seed_tw_p50_from_slim_ticks,
+                    self.tw_p50_observer,
+                    coin,
+                    history_root,
+                )
+            except Exception as exc:  # noqa: BLE001 — observability only in Patch A
+                self.log.warning(
+                    "gear23_tw_warm_failed | base_coin=%s | err=%s",
+                    coin,
+                    type(exc).__name__,
+                )
+        self.log.info(
+            "gear23_observer_warm | base_coin=%s | ok=%s | reason=%s | trade_eligible=false",
+            coin,
+            str(result.ok).lower(),
+            result.reason,
+        )
+        if ticks_fed:
+            self.log.info("gear23_tw_warm | base_coin=%s | ticks_fed=%s", coin, ticks_fed)
+
+    def _gear23_trade_coin_order(self) -> tuple[str, ...]:
+        """Patch A keeps the original pool as the only possible trade universe."""
+        if self._gear23_hot_add_enabled:
+            return self._gear23_base_coins
+        return tuple(self.coins)
+
     def _on_lifecycle(self, base_coin: str, exchange: str, event: str) -> None:
         channel = "books5" if exchange == "okx" else "orderbook.1"
         if event == "subscribe_ok":
@@ -2274,7 +2395,7 @@ class BotRuntime:
                 await self.theta_trade.on_theta_snapshots_async(
                     [],
                     quotes=self.quotes,
-                    coin_order=self.coins,
+                    coin_order=self._gear23_trade_coin_order(),
                 )
             except Exception as exc:  # noqa: BLE001
                 if not self._theta_trade_warned:
@@ -2375,7 +2496,7 @@ class BotRuntime:
             await self.theta_trade.on_theta_snapshots_async(
                 theta_snaps,
                 quotes=self.quotes,
-                coin_order=self.coins,
+                coin_order=self._gear23_trade_coin_order(),
             )
             if (
                 self._canary29_window_elapsed()
@@ -2765,6 +2886,8 @@ class BotRuntime:
             # WS tasks may not unwind to finally before systemd timeout.
             self._save_floor_warm_pickle()
             self.stop_event.set()
+            if self._hot_add_supervisor is not None:
+                self._hot_add_supervisor.cancel_all()
         
         for sig in (signal.SIGTERM, signal.SIGHUP):
             loop.add_signal_handler(
@@ -2803,6 +2926,11 @@ class BotRuntime:
             f"canary_open_window_hours={self._canary29_open_window_hours} | "
             f"floor_warm={'loaded' if self._floor_warm_loaded else 'off'}"
         )
+        if self._gear23_hot_add_enabled:
+            self.log.info(
+                "gear23_hot_add_enabled | source=%s | mode=public_only | extra_trade_eligible=false",
+                bbot_hot_add_delta_path(self.data_root),
+            )
         if self.mode == "policy" and self.policy is None:
             self.log.error(
                 "policy_missing | continuing WS-only; will not open intents"
@@ -2888,34 +3016,26 @@ class BotRuntime:
                 )
             raise
 
-        tasks: list[asyncio.Task] = [asyncio.create_task(self._heartbeat())]
+        tasks: list[tuple[Any, str]] = [(self._heartbeat(), "heartbeat")]
         # Periodic floor warm pickle save (if floor observer is enabled)
         if self.floor_observer is not None and (
             self.profile in {"gear22_would_send", "gear22_live_canary"}
             or self._floor_warm_loaded
         ):
             tasks.append(
-                asyncio.create_task(
-                    self._floor_warm_periodic_save(), name="floor-warm-save"
-                )
+                (self._floor_warm_periodic_save(), "floor-warm-save")
             )
         if self.tw_p50_enabled and self.tw_p50_observer is not None:
-            tasks.append(
-                asyncio.create_task(self._tw_p50_emit_loop(), name="tw-p50-emit")
-            )
+            tasks.append((self._tw_p50_emit_loop(), "tw-p50-emit"))
         elif self.theta_enabled and self.theta_screener is not None:
             # Theta alone (TW off): still emit ~1 Hz from last RAM snapshots.
-            tasks.append(
-                asyncio.create_task(self._theta_emit_loop(), name="theta-emit")
-            )
+            tasks.append((self._theta_emit_loop(), "theta-emit"))
         if self.profile == "synthetic_roll" and self.theta_trade is not None:
-            tasks.append(
-                asyncio.create_task(self._synthetic_roll_loop(), name="synthetic-roll")
-            )
+            tasks.append((self._synthetic_roll_loop(), "synthetic-roll"))
         for coin in self.coins:
             meta = self._meta(coin)
             tasks.append(
-                asyncio.create_task(
+                (
                     run_okx_books5(
                         base_coin=coin,
                         okx_symbol=meta.okx_symbol,
@@ -2924,11 +3044,11 @@ class BotRuntime:
                         on_lifecycle=self._on_lifecycle,
                         stop_event=self.stop_event,
                     ),
-                    name=f"okx-{coin}",
+                    f"okx-{coin}",
                 )
             )
             tasks.append(
-                asyncio.create_task(
+                (
                     run_bybit_orderbook1(
                         base_coin=coin,
                         bybit_symbol=meta.bybit_symbol,
@@ -2937,19 +3057,73 @@ class BotRuntime:
                         on_lifecycle=self._on_lifecycle,
                         stop_event=self.stop_event,
                     ),
-                    name=f"bybit-{coin}",
+                    f"bybit-{coin}",
                 )
             )
 
         self.log.info(
             f"ws_tasks_started | n={len(tasks) - 1} | expect={2 * len(self.coins)}"
         )
+        supervisor: TaskSupervisor | None = None
+        stop_wait: asyncio.Task[Any] | None = None
+        wait_task: asyncio.Task[Any] | None = None
         try:
-            await asyncio.gather(*tasks)
+            if self._gear23_hot_add_enabled:
+                supervisor = TaskSupervisor()
+                self._hot_add_supervisor = supervisor
+                for coro, name in tasks:
+                    supervisor.add(coro, name=name)
+                controller = BotHotAddController(
+                    quotes=self.quotes,
+                    universe=self.universe,
+                    spawn=self._gear23_spawn_coin,
+                    max_extra=bbot_hot_add_max_extra(),
+                    initial_pair_count=len(self._gear23_base_coins),
+                    logger=self.log,
+                )
+                supervisor.add(
+                    run_hot_add_poller(
+                        controller,
+                        bbot_hot_add_delta_path(self.data_root),
+                        interval_sec=bbot_hot_add_poll_sec(),
+                        reload_event=asyncio.Event(),
+                        logger=self.log,
+                        supervisor=supervisor,
+                    ),
+                    name="gear23-hot-add-poller",
+                )
+                stop_wait = asyncio.create_task(self.stop_event.wait(), name="gear23-stop-wait")
+                wait_task = asyncio.create_task(supervisor.wait(), name="gear23-supervisor-wait")
+                done, _pending = await asyncio.wait(
+                    {stop_wait, wait_task}, return_when=asyncio.FIRST_COMPLETED
+                )
+                if stop_wait in done:
+                    supervisor.cancel_all()
+                    await asyncio.gather(wait_task, return_exceptions=True)
+                else:
+                    await wait_task
+            else:
+                await asyncio.gather(
+                    *(asyncio.create_task(coro, name=name) for coro, name in tasks)
+                )
         except asyncio.CancelledError:
             self.stop_event.set()
             raise
+        except Exception:
+            self.stop_event.set()
+            if supervisor is not None:
+                supervisor.cancel_all()
+            raise
         finally:
+            if supervisor is not None:
+                await supervisor.drain()
+                self._hot_add_supervisor = None
+            for task in (stop_wait, wait_task):
+                if task is not None and not task.done():
+                    task.cancel()
+            cleanup_tasks = [task for task in (stop_wait, wait_task) if task is not None]
+            if cleanup_tasks:
+                await asyncio.gather(*cleanup_tasks, return_exceptions=True)
             # Persist floor warm pickle for next start (B path only).
             self._save_floor_warm_pickle()
             if await self._await_terminal_place_before_shutdown():
