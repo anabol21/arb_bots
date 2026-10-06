@@ -9,9 +9,9 @@
 Симуляция гира 2.2, `would_send`, `send=false`. Живых ордеров нет.
 
 - Юнит `spread-bbot-would-send-prod`, данные `/data/bbot-would-send-prod`.
-- SHA checkout на хосте `a12d593`, не tip main (в main #64 `426d689` и #68 `3cd1845`, контур не перекатывался).
-- Статус 03.10: крутится. Ротация expand-only в 10:00 МСК, дропов нет. Пул 42 = база 29 + 13 экстра (CT, AEON, OPN, ARX, RECALL, LQTY, SAND, MANA, ENJ, RESOLV, SENT, WOO, TRUTH; утром добавлены последние семь, 2Z уже в базе). Открыт SAND long с 12:59:55 МСК (`d0c91dee`). Канарейка theta-k1 остановлена. Рестарт со сбросом сделки не сделан.
-- Гейты: θ_open 0.50, p50_open 0.60, min_profit 0.20, fee 0.30, K=1.
+- SHA checkout на хосте `3f9a1df` (код #71; tip main сдвинулся, контур не перекатывался под новый tip).
+- Статус 06.10 ~22:00 МСК: крутится после рестарта на flat book (orphan нет). AGE/SKEW freshness подняты 2s→10s через unit env `SPREAD_TICK_AGE_MAX_MS=10000` / `SPREAD_TICK_SKEW_MAX_MS=10000` (бэкап юнита `*.bak.20261006-age10s`), код/SHA без смены. Ротация expand-only в 10:00 МСК. Пул 54 = база 29 + 25 экстра (AEON, API3, ARX, BREV, CT, DGAI, ENJ, ESP, GMX, KGEN, LAB, LQTY, MANA, OPN, RECALL, RESOLV, RSR, SAND, SENT, SPACE, TRIA, TRUTH, UMA, WOO, YGG). Открытых θ нет. Канарейка theta-k1 остановлена.
+- Гейты: θ_open 0.50, p50_open 0.60, min_profit 0.20, fee 0.30, K=1; tick AGE/SKEW 10000 мс (unit env).
 - Следит Sentry (issue created) на открытиях.
 - Не трогать Contour B и `/data/live`. Шов рестарта: hot-add экстра прогревается из устаревшей history, floor прыгает.
 
