@@ -33,3 +33,48 @@ The runner `validation/gear23_public_stub_experiment.py` reads three selected me
 ```
 
 Patch B must separately validate private subscription readiness, candidate metadata/1x preparation, fresh public generations, observer warm state, held/pending coin retention, and trade eligibility. It must reuse the active would-send selector's existing cumulative snapshot rather than run a second selector.
+
+## Patch A VPS result (2026-10-06)
+
+The bounded public/stub experiment passed. It read real metadata for CT, AEON,
+and ARX from the active would-send delta snapshot, then applied a manual
+cumulative CSV in an isolated Gear 2.3 data root. After the 29-coin base
+runtime was ready, the runner added CT, rewrote the same snapshot to test
+idempotence, then added AEON and ARX. Each coin received Bybit and OKX public
+subscription acknowledgements, accepted TW rows (CT 26, AEON 6, ARX 6), and
+usable theta rows (26, 6, 6). History warm succeeded for all three. Each was
+registered once and remained `trade_eligible=false`. A malformed G23BAD lot
+step was rejected and never added.
+
+The validation child disabled only the order-entry callbacks. Private warm was
+skipped, no simulated order or trade-journal row was recorded, and the process
+stopped on SIGTERM with all supervised tasks drained. No private credentials or
+exchange order APIs were used. The current live canary and would-send process
+were not changed.
+
+Artifacts are under `/data/bbot-gear23-patch-a-20261006-35d0f3c-r3/`; code is
+under `/root/b-private-b-exp/response-manager-code/response-handler-20261005/gear23-patch-a-35d0f3c-r3/`.
+The r1 packaging attempt omitted the tracked non-crypto denylist and failed
+before runtime startup. r2 waited for an incorrect log prefix
+(`bbot_hot_add_delta_read` instead of `hot_add_delta_read`), so it never wrote
+candidate rows. Those are validation setup failures, not hot-add runtime
+failures. r2's probe-mode stub fill stayed in its isolated data root and was
+not an exchange order.
+
+## Patch B implementation boundary
+
+Patch B extends the same cumulative snapshot into the existing private-session
+owner. It does not create per-coin sockets, another recv loop, or a second
+selector. OKX additions require current-generation `orders` and `positions`
+subscription acknowledgements matching instrument and channel. Bybit's
+account-wide private subscription plus the updated symbol allowlist covers new
+coins. Reconnect invalidates readiness until the new generation is authenticated,
+subscribed, and reseeded.
+
+An extra coin remains entry-ineligible until valid instrument metadata, current
+public books, required history warmup, both exchanges' private readiness, and
+existing preconfirmed 1x evidence are all present. Missing 1x confirmation for
+an extra does not stop the base contour; dynamic refresh never sets leverage.
+A held or pending coin stays available for close management. Gear 2.2 policy,
+quantity calculation, K1 slot and halt behavior, order parsing, and the validated
+send path remain unchanged.

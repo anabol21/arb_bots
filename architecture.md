@@ -39,6 +39,13 @@ HOT_ADD is in this tree: `app/discovery/`, `docs/hot-add-new-coins.md`, and `SPR
 | 2 Model | `model.ipynb`, `model_gear2.ipynb`, `docs/strategy-gears.md`, `research/gear22_backtest/` | Historical simulation only. No live orders. |
 | 3 Glue | `docs/b-v0-block-diagram.md`, `app/bot/**`, `app/policy/**`, `app/bot/private/**` | Live stub + B-private send. Isolated from D trees. |
 
+Gear 2.3 (opt-in via `BBOT_HOT_ADD=1`) reuses the Gear 2.2 process and the
+would-send cumulative coin snapshot. Patch A adds public book tasks and watcher
+state only; new coins are not trade entries. Patch B's private subscriptions
+remain on the existing Bybit/OKX private session sockets and recv owner; see
+`docs/gear23-dynamic-pool.md` for readiness gates and the bounded validation
+record. The Gear 2.2 process/service is unchanged when the flag is unset.
+
 Portable policy (pure function, no I/O): `app/policy/trade_manager.py`, `app/policy/gear2_market_manager.py`, `app/policy/features.py`. Model notebook still owns its own VARIATION/HYPER copy.
 
 ### Processes found in `deploy/systemd/` (templates in git)
