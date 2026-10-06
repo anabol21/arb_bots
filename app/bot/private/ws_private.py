@@ -700,6 +700,34 @@ class PrivateStreamRuntime:
                     )
                 )
             )
+            ack_trace_reason = "not_okx"
+            if self.exchange == "okx":
+                if parsed.req_id is None:
+                    ack_trace_reason = "missing_request_id"
+                elif request is None:
+                    ack_trace_reason = "unknown_request_id"
+                elif request[0] != self.reconnect_generation:
+                    ack_trace_reason = "stale_request_generation"
+                elif response_key is None:
+                    ack_trace_reason = (
+                        "matched_request_nack_without_arg"
+                        if not parsed.ack_ok
+                        else "missing_symbol_channel"
+                    )
+                elif response_key not in request[1]:
+                    ack_trace_reason = "unexpected_symbol_channel"
+                elif response_key not in self._symbol_subscription_acks:
+                    ack_trace_reason = "symbol_channel_not_registered"
+                elif not parsed.ack_ok:
+                    ack_trace_reason = "matched_nack"
+                elif (
+                    *response_key,
+                    self.reconnect_generation,
+                    parsed.req_id,
+                ) in self._symbol_subscription_rejected:
+                    ack_trace_reason = "positive_after_nack_ignored"
+                else:
+                    ack_trace_reason = "matched_ack"
             accept_global = self.exchange != "okx" or (
                 not self._okx_subscription_requests and not parsed.req_id
             ) or (
@@ -728,7 +756,12 @@ class PrivateStreamRuntime:
                         self.reconnect_generation,
                         bool(parsed.ack_ok),
                     )
-            elif self.exchange == "okx" and parsed.kind == "sub_ack" and parsed.req_id:
+            elif (
+                self.exchange == "okx"
+                and parsed.kind == "sub_ack"
+                and parsed.req_id
+                and not parsed.ack_ok
+            ):
                 if request is not None:
                     generation, keys = request
                     if generation == self.reconnect_generation:
@@ -740,6 +773,23 @@ class PrivateStreamRuntime:
                                 generation,
                                 False,
                             )
+            if self.exchange == "okx" and parsed.kind == "sub_ack":
+                accepted_keys = sum(
+                    generation == self.reconnect_generation and ok
+                    for generation, ok in self._symbol_subscription_acks.values()
+                )
+                _safe_log(
+                    "instrument_sub_ack",
+                    exchange=self.exchange,
+                    generation=self.reconnect_generation,
+                    req_id=parsed.req_id or "-",
+                    channel=parsed.subscription_channel or "-",
+                    inst_id=parsed.subscription_symbol or "-",
+                    ack_ok=bool(parsed.ack_ok),
+                    correlation=ack_trace_reason,
+                    expected_keys=len(self._symbol_subscription_acks),
+                    accepted_keys=accepted_keys,
+                )
         elif parsed.kind == "gap":
             self._on_sequence_gap()
         elif parsed.kind == "duplicate":

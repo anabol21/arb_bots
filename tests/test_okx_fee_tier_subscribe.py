@@ -151,7 +151,6 @@ class OkxFeeTierSubscribeTests(unittest.TestCase):
             self.assertEqual(rt.subscription_readiness, SubscriptionReadiness.READY)
             self.assertEqual(rt.sequence_state, SequenceHealth.HEALTHY)
             self.assertFalse(rt.sends_blocked)
-
             parsed = rt.handle_inbound_text(
                 json.dumps({"event": "error", "code": "64003", "arg": None})
             )
@@ -161,6 +160,61 @@ class OkxFeeTierSubscribeTests(unittest.TestCase):
             self.assertEqual(rt.subscription_readiness, SubscriptionReadiness.READY)
             self.assertEqual(rt.sequence_state, SequenceHealth.HEALTHY)
             self.assertFalse(rt.sends_blocked)
+
+    def test_instrument_ack_trace_distinguishes_match_wrong_id_and_incomplete_arg(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            rt = _okx_runtime(td)
+            priv = FakePrivateWsSocket(exchange="okx")
+            trade = FakePrivateWsSocket(exchange="okx")
+            rt.bind_sockets(private=priv, trade=trade, env=rt.gate_env)
+            rt.handle_inbound_text(json.dumps({"event": "login", "code": "0"}))
+            rt.send_subscribe()
+            request_id = json.loads(priv._outbox[-1])["id"]
+
+            with self.assertLogs("bbot.private.ws", level="INFO") as captured:
+                rt.handle_inbound_text(json.dumps({
+                    "id": request_id,
+                    "event": "subscribe",
+                    "code": "0",
+                    "arg": {"channel": "orders", "instId": "WAL-USDT-SWAP"},
+                }))
+                rt.handle_inbound_text(json.dumps({
+                    "id": "wrong-request",
+                    "event": "subscribe",
+                    "code": "0",
+                    "arg": {"channel": "positions", "instId": "WAL-USDT-SWAP"},
+                }))
+                rt.handle_inbound_text(json.dumps({
+                    "id": request_id,
+                    "event": "subscribe",
+                    "code": "0",
+                    "arg": {"channel": "positions"},
+                }))
+                self.assertFalse(rt.okx_symbol_ready("WAL-USDT-SWAP"))
+                rt.handle_inbound_text(json.dumps({
+                    "id": request_id,
+                    "event": "subscribe",
+                    "code": "0",
+                    "arg": {"channel": "positions", "instId": "WAL-USDT-SWAP"},
+                }))
+                self.assertTrue(rt.okx_symbol_ready("WAL-USDT-SWAP"))
+                rt.handle_inbound_text(json.dumps({
+                    "id": request_id,
+                    "event": "error",
+                    "code": "64003",
+                    "arg": None,
+                }))
+                self.assertFalse(rt.okx_symbol_ready("WAL-USDT-SWAP"))
+
+            trace = "\n".join(captured.output)
+            self.assertIn("correlation=matched_ack", trace)
+            self.assertIn("correlation=unknown_request_id", trace)
+            self.assertIn("correlation=missing_symbol_channel", trace)
+            self.assertIn("correlation=matched_request_nack_without_arg", trace)
+            self.assertIn("expected_keys=4", trace)
+            self.assertIn("accepted_keys=1", trace)
+            self.assertIn("accepted_keys=0", trace)
+            self.assertFalse(rt.okx_symbol_ready("WAL-USDT-SWAP"))
 
     def test_true_login_error_null_arg_still_auth_reject(self) -> None:
         with tempfile.TemporaryDirectory() as td:
