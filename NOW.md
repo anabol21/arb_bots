@@ -1,6 +1,6 @@
 # NOW
 
-Снимок на 2026-10-06 ~09:40 МСК. Каждая секция — зона своего агента, чужие секции не переписывать.
+Снимок на 2026-10-07 ~09:40 МСК. Каждая секция — зона своего агента, чужие секции не переписывать.
 
 Вектор развития: [roadmap.md](roadmap.md). Этот файл — снимок, не план.
 
@@ -22,10 +22,10 @@
 - Вектор: держать D зелёным (collector/compact/backup) как базу под would_send canary и 2.2 из [roadmap.md](roadmap.md); параллельно крутятся would_send-prod (стратег) и HL v2 (Старшой). Contour B live canary inactive — не заброс B. 2.5/3 / полный пул / bars on / live без команды — не трогаем.
 - Юнит `spread-collector-next`, код `/root/spread_staging`, данные `/data/live`.
 - SHA нет: `/root/spread_staging` не git-checkout, крутится задеплоенное дерево (последний деплой — cutover 22.09).
-- Статус 06.10 ~09:36 МСК: active с 22.09 14:07 МСК, NRestarts=0, MemoryCurrent ~1.8G (MemoryMax infinity), pairs=198, ws_subscribe_ok=7525, ws_reconnect_unplanned=1, collect_bars=false, failures=0, rejected=0, свежих файлов в `/data/live` за 5 мин ~760. Топ-10 volatile (OKX–Bybit, rolling 24ч) отработал 06.10 09:10–09:15 МСК (198 монет, слоты 287/289). θ-compact 03:15 МСК: 0 дней, 76 skip, 0 ошибок. Таймеры compact/backup/discovery/ops-metrics/top10 active.
-- Деплои за сутки (по юнитам на хосте): нет. would_send-prod с 04.10 14:31 МСК на `3f9a1df` (= код-tip main), HL v2 с 04.10 16:43 МСК, collector-next с 22.09. Ветки `preB2.2` и PR #72/#73 (Sentry на `terminal_private`) на хост не выкатывались, gear22-live-canary inactive.
-- Соседи на хосте (не веду): `spread-bbot-would-send-prod` active с 04.10 14:31 МСК, MemoryMax 2G / ~0.25G, SHA `3f9a1df`, пул 50 монет (база 29 + 21 экстра, ротация 05.10 добавила RSR/GMX/TRIA/BREV/SPACE); `spread-collector-hl-v2` active с 04.10 16:43 МСК, MemoryMax 6G / ~1.0G, heartbeat bybit/okx/hl 198/198/88, dropped=0, reconn=0. `spread-bbot-gear22-live-canary` и `theta-k1` inactive/disabled.
-- Лимиты collector: skew/age 2000 мс, HOT_ADD max_extra=8, bars off. Диск 41/79G, свободно ~36G (`/data/live` 1.8G, `live_hl_v2` ~0.64G, `bbot-would-send-prod` 13G и растёт ~3.5G/сутки, `compacted` 3.7G). Ops 24ч: CPU avg 21% / peak 52%, RAM 2.0/16G, egress 11.9 GiB / peak 4.5 Mbit/s.
+- Статус 07.10 ~09:38 МСК: active с 22.09 14:07 МСК, NRestarts=0, MemoryCurrent ~1.4G (MemoryMax infinity), pairs=198, ws_subscribe_ok=7835, ws_reconnect_unplanned=1, collect_bars=false, failures=0, rejected=0, свежих файлов в `/data/live` за 5 мин ~590. Топ-10 volatile (OKX–Bybit, rolling 24ч) отработал 07.10 09:10–09:16 МСК (198 монет, слоты 287/289). θ-compact 03:15 МСК: 0 дней, 76 skip, 0 ошибок. Compactor/backup идут, backlog 0. Таймеры compact/backup/discovery/ops-metrics/top10 active.
+- Деплои за сутки (по юнитам на хосте): `spread-bbot-would-send-prod` перезапущен 07.10 00:38 МСК на `8af4d52` (= tip кода main, #75 `BBOT_SIZE_GATE=0`). Ручной прогон gear23-live из `/root/b-private-b-exp` 06.10 16:54–17:07 МСК остановился на `private_or_synthetic_warm_failed` (signal loop не стартовал), юнита нет. HL v2 с 04.10 16:43 МСК, collector-next с 22.09 — без изменений.
+- Соседи на хосте (не веду): `spread-bbot-would-send-prod` active с 07.10 00:38 МСК, MemoryMax 2G / ~0.25G, SHA `8af4d52`, пул 54 монеты (база 29 + 25 экстра), `position=None`; `spread-collector-hl-v2` active с 04.10 16:43 МСК, MemoryMax 6G / ~1.1G, heartbeat bybit/okx/hl 198/198/88, dropped=0. `spread-bbot-gear22-live-canary`, `gear2` и `theta-k1` inactive/disabled. Старые failed-юниты (bars-compactor/backup с 13.08, ev2-10/11/12 с 21–23.09) — давний хвост, не новое.
+- Лимиты collector: skew/age 2000 мс, HOT_ADD max_extra=8, bars off. Диск 47/79G, свободно ~29G (`/data/live` 2.2G, `live_hl_v2` ~0.68G, `bbot-would-send-prod` 17G и растёт ~4G/сутки — при таком темпе ~7 суток до заполнения, `compacted` 3.9G). Ops 24ч: CPU avg 27% / peak 69%, load ~2.0, RAM 2.4/16G (peak 3.8G), egress 13.9 GiB / peak 9.0 Mbit/s.
 - Слежу я (голова), утренний дайджест ~9:32 МСК. @бот — Contour B (молчит), @стратег — would_send, @Старшой — HL. Sentry ops отдельно, не эта секция.
 - Не поднимать старый collector. Чужие data root не чищу без явного OK. Утренний ops-снимок NOW.md коммичу сразу в main. Прочий патч в NOW.md и на сервер — только после явного «да».
 
