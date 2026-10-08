@@ -1,6 +1,6 @@
 # NOW
 
-Снимок на 2026-10-07 ~09:40 МСК. Каждая секция — зона своего агента, чужие секции не переписывать.
+Снимок на 2026-10-08 ~09:50 МСК. Каждая секция — зона своего агента, чужие секции не переписывать.
 
 Вектор развития: [roadmap.md](roadmap.md). Этот файл — снимок, не план.
 
@@ -19,14 +19,14 @@
 
 Сервер, утренний снимок, скрипты юнитов. Живые ордера и would_send не веду. Архитектура: `docs/`.
 
-- Вектор: держать D зелёным (collector/compact/backup) как базу под would_send canary и 2.2 из [roadmap.md](roadmap.md); параллельно крутятся would_send-prod (стратег) и HL v2 (Старшой). Contour B live canary inactive — не заброс B. 2.5/3 / полный пул / bars on / live без команды — не трогаем.
+- Вектор: держать D зелёным (collector/compact/backup) как базу под would_send canary и 2.2/2.3 из [roadmap.md](roadmap.md); параллельно крутятся would_send-prod (стратег), HL v2 (Старшой) и ручной gear23 live-прогон (бот). 2.5/3 / полный пул / bars on / live без команды — не трогаем.
 - Юнит `spread-collector-next`, код `/root/spread_staging`, данные `/data/live`.
 - SHA нет: `/root/spread_staging` не git-checkout, крутится задеплоенное дерево (последний деплой — cutover 22.09).
-- Статус 07.10 ~09:38 МСК: active с 22.09 14:07 МСК, NRestarts=0, MemoryCurrent ~1.4G (MemoryMax infinity), pairs=198, ws_subscribe_ok=7835, ws_reconnect_unplanned=1, collect_bars=false, failures=0, rejected=0, свежих файлов в `/data/live` за 5 мин ~590. Топ-10 volatile (OKX–Bybit, rolling 24ч) отработал 07.10 09:10–09:16 МСК (198 монет, слоты 287/289). θ-compact 03:15 МСК: 0 дней, 76 skip, 0 ошибок. Compactor/backup идут, backlog 0. Таймеры compact/backup/discovery/ops-metrics/top10 active.
-- Деплои за сутки (по юнитам на хосте): `spread-bbot-would-send-prod` перезапущен 07.10 00:38 МСК на `8af4d52` (= tip кода main, #75 `BBOT_SIZE_GATE=0`). Ручной прогон gear23-live из `/root/b-private-b-exp` 06.10 16:54–17:07 МСК остановился на `private_or_synthetic_warm_failed` (signal loop не стартовал), юнита нет. HL v2 с 04.10 16:43 МСК, collector-next с 22.09 — без изменений.
-- Соседи на хосте (не веду): `spread-bbot-would-send-prod` active с 07.10 00:38 МСК, MemoryMax 2G / ~0.25G, SHA `8af4d52`, пул 54 монеты (база 29 + 25 экстра), `position=None`; `spread-collector-hl-v2` active с 04.10 16:43 МСК, MemoryMax 6G / ~1.1G, heartbeat bybit/okx/hl 198/198/88, dropped=0. `spread-bbot-gear22-live-canary`, `gear2` и `theta-k1` inactive/disabled. Старые failed-юниты (bars-compactor/backup с 13.08, ev2-10/11/12 с 21–23.09) — давний хвост, не новое.
-- Лимиты collector: skew/age 2000 мс, HOT_ADD max_extra=8, bars off. Диск 47/79G, свободно ~29G (`/data/live` 2.2G, `live_hl_v2` ~0.68G, `bbot-would-send-prod` 17G и растёт ~4G/сутки — при таком темпе ~7 суток до заполнения, `compacted` 3.9G). Ops 24ч: CPU avg 27% / peak 69%, load ~2.0, RAM 2.4/16G (peak 3.8G), egress 13.9 GiB / peak 9.0 Mbit/s.
-- Слежу я (голова), утренний дайджест ~9:32 МСК. @бот — Contour B (молчит), @стратег — would_send, @Старшой — HL. Sentry ops отдельно, не эта секция.
+- Статус 08.10 ~09:46 МСК: active с 22.09 14:07 МСК, NRestarts=0, MemoryCurrent ~2.1G (было ~1.4G, MemoryMax infinity), pairs=198, collect_bars=false, failures=0, rejected=0, свежих файлов в `/data/live` за 5 мин ~593. Топ-10 volatile (OKX–Bybit, rolling 24ч) отработал 08.10 09:10–09:16 МСК (198 монет, слоты 287/289). θ-compact 03:15 МСК прошёл без ошибок. Compactor/backup идут (top-level `/data/compacted` 2 файла, `sent/` 144). Таймеры compact/backup/discovery/ops-metrics/top10/would_send-rotate active.
+- Деплои за сутки (по процессам на хосте): юниты не перезапускались. Новое — ручной (вне systemd, session scope) live-прогон gear23 B2.3: PID 2581963 с 07.10 12:28 МСК, код `/root/b-private-b-exp/response-manager-code/response-handler-20261006-gear23-B2.3-f230345` (= tip `codex/gear23-dynamic-pool` `f230345`, не main), профиль `gear22_live_canary`, `BBOT_THETA_LIVE_SEND=1`, notional 10 USDT, K=1, пул 56, окно открытий до 09.10 15:27 МСК. На 09:44 МСК: `completed_cycles=0`, позиции нет, `no_signal`; периодические реконнекты OKX WS. would_send-prod (`8af4d52`, = tip кода main), HL v2 (с 04.10), collector-next (с 22.09) — без изменений. Ротация would_send 07.10 10:00 МСК добавила NMR/TRUST (history seed rc=1, TOCTOU на `/data/compacted` → `sent/`).
+- Соседи на хосте (не веду): `spread-bbot-would-send-prod` active с 07.10 00:38 МСК, ~0.25G, SHA `8af4d52`, пул 56 (база 29 + 27 экстра, +NMR, TRUST), `position=None`; `spread-collector-hl-v2` active с 04.10 16:43 МСК, ~1.3G / 6G, heartbeat 198/198/88, dropped=0. `spread-bbot-gear22-live-canary`, `gear2` и `theta-k1` inactive/disabled. 5 старых failed-юнитов (bars-compactor/backup, ev2-10/11/12) — давний хвост.
+- Лимиты collector: skew/age 2000 мс, HOT_ADD max_extra=8, bars off. Диск 54/79G, свободно ~23G (`/data/live` 2.1G, `live_hl_v2` ~0.69G, `bbot-would-send-prod` 20G и растёт ~3G/сутки — при таком темпе ~7 суток до заполнения, `compacted` 3.9G). Ops 24ч: CPU avg 32% / peak 62%, load ~1.9 (peak 3.6), RAM 2.8/16G (peak 3.8G), egress 14.8 GiB.
+- Слежу я (голова), утренний дайджест ~9:32 МСК. @бот — Contour B / gear23 live, @стратег — would_send, @Старшой — HL. Sentry ops отдельно, не эта секция.
 - Не поднимать старый collector. Чужие data root не чищу без явного OK. Утренний ops-снимок NOW.md коммичу сразу в main. Прочий патч в NOW.md и на сервер — только после явного «да».
 
 ## HL v2 (Старшой)
