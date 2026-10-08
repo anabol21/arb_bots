@@ -16,6 +16,21 @@
 - Следит Sentry (issue created) на открытиях.
 - Не трогать Contour B и `/data/live`. Шов рестарта: hot-add экстра прогревается из устаревшей history, floor прыгает.
 
+## Contour B (бот)
+
+Живой торговый контур гира 2.3 (динамический пул) на real net, `send=true`, номинал 10 USDT. Единственный процесс с живыми ордерами на хосте.
+
+- Вектор: довести 2.3 до «готово» по [roadmap.md](roadmap.md), то есть hot-add монеты торгуют наравне с базой. Ближайшее: (1) плечо 1x на hot-add (PR-патч `BBOT_HOT_ADD_SET_LEVERAGE`, default OFF); (2) подтвердить Sentry trade-события и пост-трейд дашборд (наши метки vs биржевые fill, PnL наш vs биржевой) на первой живой сделке; (3) решить, что делать с окном открытий после 09.10 15:27 МСК; (4) проредить запись theta/tw_p50 (~3,3 ГБ/сутки). Дальше 2.4: приват только по волатильному кластеру.
+- Процесс: standalone, не systemd. PID 2581963 с 07.10 12:28 МСК, `python -m app.bot.runtime`. Код `/root/b-private-b-exp/response-manager-code/response-handler-20261006-gear23-B2.3-f230345/gear23` (= `f230345`, ветка `codex/gear23-dynamic-pool`, не main). Runroot `/root/b-private-b-exp/response-manager/20261005T194200Z-gear22-longrun`, лог `bbot-gear23-b2.3.log`.
+- Лаунчер `/tmp/gear23_launch_f230345_tick10s_sentry_20261007T092728Z.py`, откат `/tmp/gear23_launch_f230345_tick10s_20261006T172222Z.py`. Гарды лаунчера: flat и без pending, совпадение дедлайна окна, confirmed 1x пул = 54. Юнит `spread-bbot-gear22-live-canary` disabled с 16.09 и к контуру не относится.
+- Статус 08.10 15:47 МСК: зелёный, flat, ошибок нет, приватные WS OKX/Bybit сами переподключаются. С рестарта сделок не было. Последняя: API3 long 07.10 03:33→06:41 МСК, net ≈ +$0.017.
+- Пул 59 = база 29 + 30 hot-add из `/data/bbot-would-send-prod/hot_add_delta.csv` (expand-only, опрос 30 с, max_extra 48, прогрев из `/data/bbot-would-send-prod-history`). Торгуют только монеты с подтверждённым 1x (54, `BBOT_CONFIRMED_1X_COINS` читается на старте). NMR, TRUST, CASHCAT, CP, MET висят на гейте `one_x_unconfirmed` до 1x-prep и рестарта.
+- Гейты: θ_open 0.50, p50_open 0.60, min_profit 0.20, fee 0.30, min_θ_close 0.05, K=1; tick AGE/SKEW 10000 мс; `terminal_private`, policy gear22; окно открытий до 09.10 15:27 МСК (`open_window_deadline_utc` в `canary_state.json`).
+- Последние патчи: 06.10 рестарт на `f230345` (hot-add динамического пула под TaskSupervisor, гейт `one_x_unconfirmed`); 06.10 AGE/SKEW 2 с → 10 с (hot-add duty ~37% → ~96%); 07.10 12:28 Sentry DSN в лаунчер (`SENTRY_*` из `/etc/spread/bbot-gear22-live-canary.env`, проект `arb-bots-contour-b`). В работе, не в проде: hot-add 1x патч у Codex; дизайн дашборда `/workspace/specs/post-trade-dashboard-design-2026-10-07.md` на боксе бота.
+- Диск: runroot 7,7 ГБ, растёт ~3,3 ГБ/сутки (`data/theta` и `data/tw_p50`), ротации нет.
+- Слежу я (бот): часовой тихий watch в :47 МСК, Sentry issue-триггер. Пишу Мише только о сделках и проблемах.
+- Не трогать без явного OK Миши: процесс, лаунчер, runroot, плечи на биржах, мёрж/деплой. Contour B не пишет в `/data/live` и в данные would_send-prod, оттуда только читает `hot_add_delta.csv` и history.
+
 ## Ops / collector (голова)
 
 Сервер, утренний снимок, скрипты юнитов. Живые ордера и would_send не веду. Архитектура: `docs/`.
