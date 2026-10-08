@@ -204,3 +204,34 @@ def capture_exception(exc: Exception, *, extras: Optional[Mapping[str, Any]] = N
         _log.info(f"sentry_exception | status=ok | exc={type(exc).__name__}")
     except Exception as e:
         _log.error(f"sentry_exception | status=fail | error={e}")
+
+
+def capture_ops_event(
+    message: str,
+    *,
+    kind: str,
+    level: str = "warning",
+    extras: Optional[Mapping[str, Any]] = None,
+) -> None:
+    """Emit a non-trade ops event (e.g. metrics compaction failure). Never raises."""
+    if not _lazy_init_if_needed():
+        return
+    sentry = _try_import_sentry()
+    if sentry is None:
+        return
+    try:
+        scope_fn = getattr(sentry, "new_scope", None) or sentry.push_scope
+        with scope_fn() as scope:
+            scope.set_tag("kind", kind)
+            scope.set_tag("contour", _sentry_tags.get("contour") or _contour_tag(_sentry_profile))
+            scope.set_tag("profile", _sentry_tags.get("profile") or _sentry_profile)
+            scope.fingerprint = [kind, message]
+            if extras:
+                for key, value in extras.items():
+                    if value is not None:
+                        scope.set_extra(key, value)
+            sentry.capture_message(message, level=level)
+        sentry.flush(timeout=5)
+        _log.info(f"sentry_ops_event | status=ok | kind={kind} | message={message}")
+    except Exception as e:  # noqa: BLE001
+        _log.error(f"sentry_ops_event | status=fail | kind={kind} | error={e}")

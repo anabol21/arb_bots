@@ -23,11 +23,12 @@ import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Mapping, Optional, Sequence
+from typing import Any, Callable, Mapping, Optional, Sequence
 
 from app.bot.floor_watcher import LiveFloorObserver
 from app.bot.fsadvise import advise_dontneed
 from app.bot.paths import theta_metrics_jsonl_path
+from app.bot.metrics_compact import MetricsDayCompactor, RotatingMetricsJsonl
 from app.bot.tw_p50_watcher import LiveTwP50Observer, TwP50Snapshot
 
 SCHEMA_VERSION = "bbot.theta.v1"
@@ -251,10 +252,27 @@ class LiveThetaScreener:
         return self._snapshots.get((str(base_coin).upper(), str(side)))
 
 
-class ThetaJournalWriter:
-    """Append-only metric JSONL under ``{data_root}/theta/`` (never D trees)."""
+def _dumps_row(rec: Mapping[str, Any]) -> str:
+    return json.dumps(dict(rec), separators=(",", ":"), ensure_ascii=False)
 
-    def __init__(self, data_root: Path) -> None:
+
+class ThetaJournalWriter:
+    """Append-only metric JSONL under ``{data_root}/theta/`` (never D trees).
+
+    ``rotate_compress=True`` (``BBOT_METRICS_ROTATE_COMPRESS=1``): on UTC
+    event_date rollover the closed day is zstd-compressed off the hot path
+    (see ``app.bot.metrics_compact``). Default off = legacy behaviour.
+    """
+
+    def __init__(
+        self,
+        data_root: Path,
+        *,
+        rotate_compress: bool = False,
+        compactor: Optional["MetricsDayCompactor"] = None,
+        grace_sec: Optional[float] = None,
+        clock: Optional[Callable[[], float]] = None,
+    ) -> None:
         self.data_root = Path(data_root)
         text = str(self.data_root.resolve())
         for bad in ("/data/live", "/data/bars", "/data/compacted", "/data/spool"):
@@ -262,29 +280,19 @@ class ThetaJournalWriter:
                 raise RuntimeError(
                     f"ThetaJournalWriter refuses D path: {self.data_root}"
                 )
+        self._rot = RotatingMetricsJsonl(
+            self.data_root / "theta",
+            lambda d: theta_metrics_jsonl_path(self.data_root, d),
+            rotate_compress=rotate_compress,
+            compactor=compactor,
+            grace_sec=grace_sec,
+            clock=clock or time.time,
+            dontneed=lambda fd: advise_dontneed(fd),
+        )
+
+    @property
+    def rollover(self):  # noqa: ANN201 — test/introspection hook
+        return self._rot.rollover
 
     def append_rows(self, rows: Sequence[Mapping[str, Any]]) -> list[Path]:
-        if not rows:
-            return []
-        by_date: dict[str, list[Mapping[str, Any]]] = {}
-        for row in rows:
-            ts_ms = int(row.get("ts_ms") or row.get("computed_at_ms") or 0)
-            event_date = datetime.fromtimestamp(
-                ts_ms / 1000.0, tz=timezone.utc
-            ).date().isoformat()
-            by_date.setdefault(event_date, []).append(row)
-        written: list[Path] = []
-        for event_date, batch in by_date.items():
-            path = theta_metrics_jsonl_path(self.data_root, event_date)
-            with path.open("a", encoding="utf-8") as fh:
-                for rec in batch:
-                    line = json.dumps(
-                        dict(rec), separators=(",", ":"), ensure_ascii=False
-                    )
-                    fh.write(line)
-                    fh.write("\n")
-                fh.flush()
-                os.fsync(fh.fileno())
-                advise_dontneed(fh.fileno())
-            written.append(path)
-        return written
+        return self._rot.append_rows(rows, _dumps_row)
