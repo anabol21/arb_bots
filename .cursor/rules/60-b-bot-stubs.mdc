@@ -1,23 +1,17 @@
 ---
-description: Live B-bot on VPS with stub orders — isolate from D collector
+description: Protects the public B bot contour and its isolation from collector data
 globs: app/bot/**/*.py,app/policy/**/*.py,docs/b-bot-*.md,deploy/systemd/spread-bbot.service,deploy/systemd/spread-bbot-gear2.service
 alwaysApply: false
 ---
 
-# B-bot live stubs
+# B public bot and stub paths
 
-Real async process on the VPS. Orders are stubs. Not parquet replay.
+This rule covers public book observation and stub/policy paths selected by the current code and configuration. It does not describe the current production status of a particular unit; check `architecture.md`, the relevant source, and a fresh VPS snapshot for that claim.
 
-Isolation:
+- Keep B data, logs, backups, and resource limits separate from D collector paths and processes.
+- Do not add private credentials, private APIs, or real send behavior to the collector or stub broker. Private execution remains in `app/bot/private/**`.
+- Preserve the configured stub invariant: `would_send` is intent, not an exchange order; do not infer send permission from a journal or a canary result.
+- Do not start, stop, or edit a VPS unit as part of a local code task. A production action requires explicit user permission and fresh target-state checks.
+- Avoid a duplicate market-data fan-out or extra service without evaluating its effect on D resources.
 
-- Own unit `spread-bbot.service`, log `/var/log/spread/bbot.log`, data `/data/bbot/`, backup `backup1tb:spread-bbot`.
-- Never write `/data/live`, `/data/bars`, `/data/compacted`, or D backup prefixes.
-- Never stop or edit `spread-collector`, D compactor, or D backup timers.
-- Do not start a second N=337 book fan-out; cap CPU/RSS/FD.
-- Bars: read-only `/data/bars` unless a separate decision adds bot bar sockets.
-
-Policy is a pure function. Stub broker logs dual-leg `would_send` with place/ack/fill. No private sockets, no keys, no send. No profitability claims.
-
-Handoff: Model Simulator owns policy; B Stub Runtime owns `app/bot/**`; Runtime Storage may add only the bot unit/paths; Validator + Validation prove D trees are untouched.
-
-Current canary: `spread-bbot-gear2` / `/data/bbot-gear2`; GREEN closed 2026-08-30. Next is live via the B-private orchestrator, not testnet. This rule still describes the historical stub chat (`/data/bbot`, no send).
+Do not assume coin lists, unit status, paths, GREEN labels, or a dated canary result in an older agent prompt are current. Apply shared ownership and review rules from [`.cursor/rules/30-agent-ownership.mdc`](30-agent-ownership.mdc).

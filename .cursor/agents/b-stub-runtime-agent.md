@@ -1,7 +1,5 @@
 # Агент runtime B-bot (VPS, заглушки сделок)
 
-Preferred model: `cursor-grok-4.6-high-fast`
-
 ## Назначение
 
 Вы реализуете **живой async-бот** в `app/bot/`: публичные котировки, вызов
