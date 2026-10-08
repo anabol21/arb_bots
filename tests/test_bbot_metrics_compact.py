@@ -71,6 +71,8 @@ class FlagTests(unittest.TestCase):
         self.assertFalse(rotate_compress_enabled({}))
         self.assertTrue(rotate_compress_enabled({"BBOT_METRICS_ROTATE_COMPRESS": "1"}))
         self.assertFalse(rotate_compress_enabled({"BBOT_METRICS_ROTATE_COMPRESS": "0"}))
+        self.assertEqual(mc.compress_rate_bytes({}), 24 * 1024 * 1024)
+        self.assertEqual(mc.compress_rate_bytes({"BBOT_METRICS_COMPRESS_MBPS": "0"}), 0)
 
     def test_legacy_writer_unchanged_when_off(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -148,9 +150,9 @@ class CompressFileTests(unittest.TestCase):
         fake.write_text(
             "#!/bin/sh\n"
             "if [ \"$1\" = \"-3\" ]; then\n"
-            "  for a; do last=$a; done\n"
-            f"  head -n 10 {self.src} | {real} -q -f -o \"$last\"\n"
-            "  exit $?\n"
+            f"  head -n 10 | {real} -q -c -\n"
+            "  cat >/dev/null\n"
+            "  exit 0\n"
             "fi\n"
             f"exec {real} \"$@\"\n"
         )
@@ -160,6 +162,31 @@ class CompressFileTests(unittest.TestCase):
         self.assertIn("verify_mismatch", res.reason)
         self.assertEqual(self.src.read_bytes(), self.orig)
         self.assertFalse((self.day / "metrics.jsonl.zst").exists())
+
+    def test_paced_rate_is_respected(self) -> None:
+        size = len(self.orig)
+        rate = size / 0.5  # whole file in >= ~0.5 s per pass
+        res = compress_day_file(self.src, rate_bytes=rate)
+        self.assertEqual(res.status, "ok", res.reason)
+        self.assertGreaterEqual(res.seconds, 0.9)  # two paced passes
+        self.assertEqual("".join(iter_lines(self.day / "metrics.jsonl.zst")).encode(), self.orig)
+
+    def test_corrupt_tmp_output_keeps_original(self) -> None:
+        fake = self.root / "corrupt_zstd"
+        real = shutil.which("zstd")
+        fake.write_text(
+            "#!/bin/sh\n"
+            "if [ \"$1\" = \"-3\" ]; then\n"
+            "  cat >/dev/null; printf 'not-a-zstd-frame'; exit 0\n"
+            "fi\n"
+            f"exec {real} \"$@\"\n"
+        )
+        fake.chmod(fake.stat().st_mode | stat.S_IEXEC)
+        res = compress_day_file(self.src, zstd_bin=str(fake))
+        self.assertEqual(res.status, "failed")
+        self.assertEqual(self.src.read_bytes(), self.orig)
+        self.assertFalse((self.day / "metrics.jsonl.zst").exists())
+        self.assertFalse((self.day / "metrics.jsonl.zst.tmp").exists())
 
     def test_missing_zstd(self) -> None:
         orig_which = mc.shutil.which

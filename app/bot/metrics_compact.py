@@ -14,8 +14,10 @@ No-gap rollover design (see ``DayRollover``):
   long-lived handle) and keeps the previous day *open for late rows* during a
   short grace window (``BBOT_METRICS_ROTATE_GRACE_SEC``, default 120 s).
 * After the grace window the previous day is *sealed*: the writer will never
-  open it again and a background worker thread compresses it (low CPU/IO
-  priority ``zstd`` subprocess), verifies (``zstd -t`` + line count + byte count
+  open it again and a background worker thread compresses it (nice/ionice
+  ``zstd -3 -T1`` subprocess fed at a paced rate, ``BBOT_METRICS_COMPRESS_MBPS``
+  default 24 MiB/s, because the unit has CPUQuota=100% shared with the bot),
+  verifies (paced ``zstd -dc`` with frame checksums + line count + byte count
   + sha256 of the decompressed stream vs. the original), fsyncs, atomically
   renames ``.zst.tmp`` -> ``.zst`` and only then deletes the original.
 * Late-row policy: a row whose own UTC date is older than the current day and
@@ -44,6 +46,7 @@ import os
 import queue
 import shutil
 import subprocess
+import tempfile
 import threading
 import time
 from dataclasses import dataclass, field
@@ -53,7 +56,12 @@ from typing import IO, Callable, Iterator, Mapping, Optional, Sequence
 
 ENV_FLAG = "BBOT_METRICS_ROTATE_COMPRESS"
 ENV_GRACE = "BBOT_METRICS_ROTATE_GRACE_SEC"
+ENV_RATE = "BBOT_METRICS_COMPRESS_MBPS"
 DEFAULT_GRACE_SEC = 120.0
+# The would_send unit runs with CPUQuota=100% and the bot itself uses ~70% of
+# it; compression shares that cgroup, so it is paced (MiB/s of *uncompressed*
+# data) to stay a few % of a core instead of bursting to the quota.
+DEFAULT_RATE_MBPS = 24.0
 METRICS_NAME = "metrics.jsonl"
 ZST_NAME = "metrics.jsonl.zst"
 TMP_NAME = "metrics.jsonl.zst.tmp"
@@ -79,6 +87,34 @@ def rotate_grace_sec(env: Optional[Mapping[str, str]] = None) -> float:
     except ValueError:
         return DEFAULT_GRACE_SEC
     return max(0.0, val)
+
+
+def compress_rate_bytes(env: Optional[Mapping[str, str]] = None) -> float:
+    """``BBOT_METRICS_COMPRESS_MBPS`` (MiB/s, default 24; 0 = unpaced)."""
+    e = env if env is not None else os.environ
+    raw = str(e.get(ENV_RATE) or "").strip()
+    try:
+        mbps = float(raw) if raw else DEFAULT_RATE_MBPS
+    except ValueError:
+        mbps = DEFAULT_RATE_MBPS
+    return max(0.0, mbps) * 1024 * 1024
+
+
+class _Pacer:
+    """Sleep so that consumed bytes never run ahead of ``rate`` bytes/s."""
+
+    def __init__(self, rate: float) -> None:
+        self.rate = float(rate)
+        self.t0 = time.monotonic()
+        self.n = 0
+
+    def consume(self, n: int) -> None:
+        if self.rate <= 0:
+            return
+        self.n += n
+        ahead = self.n / self.rate - (time.monotonic() - self.t0)
+        if ahead > 0.002:
+            time.sleep(ahead)
 
 
 def utc_date_of_ms(ts_ms: int | float) -> str:
@@ -166,10 +202,17 @@ class CompactResult:
         return self.status == "ok"
 
 
-def _digest_stream(fh: IO[bytes]) -> tuple[str, int, int]:
+def _digest_stream(
+    fh: IO[bytes],
+    *,
+    pacer: Optional[_Pacer] = None,
+    sink: Optional[IO[bytes]] = None,
+    dontneed_fd: Optional[int] = None,
+) -> tuple[str, int, int]:
     h = hashlib.sha256()
     lines = 0
     nbytes = 0
+    last_advise = 0
     while True:
         buf = fh.read(_CHUNK)
         if not buf:
@@ -177,25 +220,33 @@ def _digest_stream(fh: IO[bytes]) -> tuple[str, int, int]:
         h.update(buf)
         lines += buf.count(b"\n")
         nbytes += len(buf)
+        if sink is not None:
+            sink.write(buf)
+        if dontneed_fd is not None and nbytes - last_advise >= 64 * _CHUNK:
+            _dontneed(dontneed_fd)
+            last_advise = nbytes
+        if pacer is not None:
+            pacer.consume(len(buf))
     return h.hexdigest(), lines, nbytes
 
 
-def _digest_file(path: Path) -> tuple[str, int, int]:
+def _digest_file(path: Path, rate: float = 0.0) -> tuple[str, int, int]:
     with path.open("rb") as fh:
-        out = _digest_stream(fh)
+        out = _digest_stream(fh, pacer=_Pacer(rate), dontneed_fd=fh.fileno())
         _dontneed(fh.fileno())
     return out
 
 
-def _digest_zst(path: Path, zstd_bin: str) -> tuple[str, int, int]:
+def _digest_zst(path: Path, zstd_bin: str, rate: float = 0.0) -> tuple[str, int, int]:
+    """Decompress (frame checksums verified by zstd; rc!=0 => corrupt) + digest."""
     proc = subprocess.Popen(
-        [zstd_bin, "-dc", "-q", str(path)],
+        _low_prio_prefix() + [zstd_bin, "-dc", "-q", str(path)],
         stdout=subprocess.PIPE,
         stderr=subprocess.DEVNULL,
     )
     assert proc.stdout is not None
     try:
-        out = _digest_stream(proc.stdout)
+        out = _digest_stream(proc.stdout, pacer=_Pacer(rate))
     finally:
         proc.stdout.close()
         rc = proc.wait()
@@ -243,14 +294,19 @@ def compress_day_file(
     path: Path,
     *,
     level: int = 3,
-    threads: int = 2,
     zstd_bin: Optional[str] = None,
     min_free_bytes: int = 512 * 1024 * 1024,
+    rate_bytes: Optional[float] = None,
 ) -> CompactResult:
     """Compress one closed-day ``metrics.jsonl`` -> ``metrics.jsonl.zst``.
 
-    The original is deleted only after the ``.zst`` is verified, fsynced and
-    atomically renamed into place. On any failure the original is kept.
+    Pass 1 (paced): read the original once, hashing it while feeding a
+    nice/ionice ``zstd -<level> -T1`` on stdin -> ``.zst.tmp``.
+    Pass 2 (paced): ``zstd -dc .zst.tmp`` (frame checksum verified, rc==0 is the
+    ``zstd -t`` equivalent) -> sha256 + line count + byte count must equal the
+    original's; the original's size/mtime must be unchanged. Then fsync tmp,
+    atomic rename to ``.zst``, fsync dir, unlink original, fsync dir.
+    The original is deleted only after all of that; any failure keeps it.
     """
     t0 = time.monotonic()
     src = Path(path)
@@ -258,6 +314,7 @@ def compress_day_file(
     tmp = day / TMP_NAME
     dst = day / ZST_NAME
     res = CompactResult(path=src, status="failed")
+    rate = compress_rate_bytes() if rate_bytes is None else float(rate_bytes)
 
     def _done(status: str, reason: str = "") -> CompactResult:
         res.status = status
@@ -276,11 +333,11 @@ def compress_day_file(
 
         # Crash between rename and unlink: verify existing .zst, then unlink.
         if dst.is_file():
-            o_hash, o_lines, o_bytes = _digest_file(src)
-            z_hash, z_lines, z_bytes = _digest_zst(dst, binary)
-            res.lines = o_lines
+            o_dig = _digest_file(src, rate)
+            z_dig = _digest_zst(dst, binary, rate)
+            res.lines = o_dig[1]
             res.zst_bytes = dst.stat().st_size
-            if (o_hash, o_lines, o_bytes) != (z_hash, z_lines, z_bytes):
+            if o_dig != z_dig:
                 return _done("failed", "existing_zst_mismatch")
             if _stat_sig(src) != sig0:
                 return _done("failed", "source_changed")
@@ -294,44 +351,53 @@ def compress_day_file(
 
         if tmp.exists():
             tmp.unlink()  # stale from a crash; redo from the original
-        cmd = _low_prio_prefix() + [
-            binary,
-            f"-{int(level)}",
-            f"-T{int(threads)}",
-            "-q",
-            "-f",
-            str(src),
-            "-o",
-            str(tmp),
-        ]
-        proc = subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
-        if proc.returncode != 0:
+        cmd = _low_prio_prefix() + [binary, f"-{int(level)}", "-T1", "-q", "-c", "-"]
+        with tmp.open("wb") as out_fh, src.open("rb") as in_fh, tempfile.TemporaryFile() as err_fh:
+            proc = subprocess.Popen(
+                cmd, stdin=subprocess.PIPE, stdout=out_fh, stderr=err_fh
+            )
+            assert proc.stdin is not None
+            feed_err: Optional[BaseException] = None
+            try:
+                o_dig = _digest_stream(
+                    in_fh, pacer=_Pacer(rate), sink=proc.stdin, dontneed_fd=in_fh.fileno()
+                )
+            except BaseException as exc:  # noqa: BLE001 — e.g. BrokenPipe
+                feed_err = exc
+                o_dig = ("", 0, 0)
+            finally:
+                try:
+                    proc.stdin.close()
+                except OSError:
+                    pass
+            proc.wait()
+            err_fh.seek(0)
+            err_b = err_fh.read(400)
+            _dontneed(in_fh.fileno())
+            out_fh.flush()
+            os.fsync(out_fh.fileno())
+        if proc.returncode != 0 or feed_err is not None:
             _safe_unlink(tmp)
-            err = proc.stderr.decode("utf-8", "replace").strip()[:200]
-            return _done("failed", f"zstd_rc={proc.returncode} {err}")
-        test = subprocess.run(
-            [binary, "-t", "-q", str(tmp)],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
-        if test.returncode != 0:
-            _safe_unlink(tmp)
-            return _done("failed", f"zstd_test_rc={test.returncode}")
+            err = (err_b or b"").decode("utf-8", "replace").strip()[:200]
+            why = f"feed={type(feed_err).__name__}" if feed_err is not None else ""
+            return _done("failed", f"zstd_rc={proc.returncode} {why} {err}".strip())
 
-        o_hash, o_lines, o_bytes = _digest_file(src)
-        z_hash, z_lines, z_bytes = _digest_zst(tmp, binary)
-        res.lines = o_lines
-        if (o_hash, o_lines, o_bytes) != (z_hash, z_lines, z_bytes):
+        res.lines = o_dig[1]
+        try:
+            z_dig = _digest_zst(tmp, binary, rate)
+        except OSError as exc:
+            _safe_unlink(tmp)
+            return _done("failed", f"zstd_test_failed {exc}")
+        if o_dig != z_dig or o_dig[2] != sig0[0]:
             _safe_unlink(tmp)
             return _done(
                 "failed",
-                f"verify_mismatch lines={o_lines}/{z_lines} bytes={o_bytes}/{z_bytes}",
+                f"verify_mismatch lines={o_dig[1]}/{z_dig[1]} bytes={o_dig[2]}/{z_dig[2]}/{sig0[0]}",
             )
         if _stat_sig(src) != sig0:
             _safe_unlink(tmp)
             return _done("failed", "source_changed")
 
-        _fsync_path(tmp)
         os.replace(tmp, dst)
         _fsync_path(day)
         res.zst_bytes = dst.stat().st_size
