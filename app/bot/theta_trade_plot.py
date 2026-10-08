@@ -18,6 +18,8 @@ import json
 from pathlib import Path
 from typing import Any, Optional, Sequence
 
+from app.bot.metrics_compact import day_metrics_files, iter_lines
+
 
 def discover_trade_files(data_root: Path) -> list[Path]:
     root = Path(data_root) / "theta_trades"
@@ -30,17 +32,17 @@ def discover_theta_files(data_root: Path) -> list[Path]:
     root = Path(data_root) / "theta"
     if not root.is_dir():
         return []
-    return sorted(root.glob("event_date=*/metrics.jsonl"))
+    return day_metrics_files(root)  # metrics.jsonl or closed-day metrics.jsonl.zst
 
 
 def load_jsonl(paths: Sequence[Path]) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     for path in paths:
         try:
-            text = path.read_text(encoding="utf-8")
+            lines = list(iter_lines(path))
         except OSError:
             continue
-        for line in text.splitlines():
+        for line in lines:
             line = line.strip()
             if not line:
                 continue

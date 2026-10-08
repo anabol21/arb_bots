@@ -26,6 +26,7 @@ from app.bot.floor_watcher import (
     floor_watch_enabled,
 )
 from app.bot.journal import JournalWriter
+from app.bot.metrics_compact import rotate_compress_enabled
 from app.bot.paths import (
     ensure_repo_on_syspath,
     repo_root,
@@ -541,6 +542,12 @@ class BotRuntime:
         if self.floor_enabled:
             self.floor_observer = LiveFloorObserver(self.coins)
             self.floor_journal = FloorJournalWriter(self.data_root)
+        # Closed-day zstd compaction of theta/ + tw_p50/ metrics on UTC rollover
+        # (BBOT_METRICS_ROTATE_COMPRESS=1; background thread, never the hot path).
+        metrics_rotate_compress = rotate_compress_enabled()
+        self.log.info(
+            "metrics_rotate_compress | enabled=%s", int(metrics_rotate_compress)
+        )
         # Rolling TW p50 (1m/5m) observer — alongside floor, not instead of it.
         self.tw_p50_enabled = tw_p50_watch_enabled(self.profile)
         self.tw_p50_observer: LiveTwP50Observer | None = None
@@ -548,7 +555,9 @@ class BotRuntime:
         self._tw_p50_flush_warned = False
         if self.tw_p50_enabled:
             self.tw_p50_observer = LiveTwP50Observer(self.coins)
-            self.tw_p50_journal = TwP50JournalWriter(self.data_root)
+            self.tw_p50_journal = TwP50JournalWriter(
+                self.data_root, rotate_compress=metrics_rotate_compress
+            )
         # Theta = p50 − floor; ~1 Hz follow-on to tw_p50 emit (never ticks).
         self.theta_enabled = theta_watch_enabled(self.profile)
         if self._terminal_private_execution and not (
@@ -564,7 +573,9 @@ class BotRuntime:
                 floor_observer=self.floor_observer,
                 tw_p50_observer=self.tw_p50_observer,
             )
-            self.theta_journal = ThetaJournalWriter(self.data_root)
+            self.theta_journal = ThetaJournalWriter(
+                self.data_root, rotate_compress=metrics_rotate_compress
+            )
         # Gear 2.2 θ K=1 would_send (separate journal). Live canary injects
         # Contour B place_fn; stub would_send never calls broker.place.
         self.theta_trade_enabled = theta_trade_enabled(self.profile)
