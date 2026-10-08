@@ -6,11 +6,12 @@ alwaysApply: false
 
 # B public bot and stub paths
 
-This rule covers public book observation and stub/policy paths selected by the current code and configuration. It does not describe the current production status of a particular unit; check `architecture.md`, the relevant source, and a fresh VPS snapshot for that claim.
+This rule covers B-public: public books, state, hot-add, warmup, and policy integration. Stub is one B-public operating mode, not the contour's universal description. Private execution is B-execution in `app/bot/private/**`. This rule does not describe the current production status of a particular process; check `architecture.md`, relevant source/configuration, and a fresh VPS snapshot for that claim.
 
 - Keep B data, logs, backups, and resource limits separate from D collector paths and processes.
 - Do not add private credentials, private APIs, or real send behavior to the collector or stub broker. Private execution remains in `app/bot/private/**`.
-- Preserve the configured stub invariant: `would_send` is intent, not an exchange order; do not infer send permission from a journal or a canary result.
+- When the stub mode is in scope, preserve its invariant: `would_send` is intent, not an exchange order. Do not infer campaign authorization from a journal or canary result.
+- B-public owns its state, subscriptions, hot-add/warmup, and policy integration. It must not independently edit private execution, endpoints, order transport, or recovery.
 - Do not start, stop, or edit a VPS unit as part of a local code task. A production action requires explicit user permission and fresh target-state checks.
 - Avoid a duplicate market-data fan-out or extra service without evaluating its effect on D resources.
 

@@ -10,6 +10,7 @@ alwaysApply: false
 - Keep stub and private broker paths distinct. A stub setting or `would_send` record must not become an order transport by implication.
 - Do not assume data roots, unit names, coin pools, deployment status, or implementation details from an old prompt. Confirm the current code and `architecture.md`.
 - Preserve fail-closed behavior. Live send requires all code/config gates: `BBOT_BROKER=private_live`, `VENUE=live`, and `LIVE_ORDERS=1`. These flags do not grant user permission.
-- Do not perform a live action without explicit authorization for that action. Validate on testnet/demo first when supported; skipping that step requires explicit risk acceptance.
+- Require explicit user authorization to launch a new live campaign or materially change its scope, deploy/restart it, change configuration/risk limits, or alter the live execution contract. Individual orders may execute autonomously within the approved campaign under its policy and risk gates; do not require per-order authorization.
+- Prefer testnet/demo when available and compatible with the campaign. Honor a documented historical exception only for its named campaign and exact approved scope; it does not authorize a new campaign or expansion.
 - Keep credentials out of Git, docs, logs, journals, and chat. Keep B paths isolated from D data and services.
 - Before a permitted VPS change, follow the fresh-state, position/pending, canary, and rollback checks in [`../../docs/agent-architecture.md`](../../docs/agent-architecture.md).

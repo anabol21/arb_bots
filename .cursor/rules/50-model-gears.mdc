@@ -1,6 +1,6 @@
 ---
 description: Protects research reproducibility and separates historical modeling from live execution
-globs: model.ipynb,**/model/**/*.py,docs/strategy-gears.md,docs/data-format-model.md,gear*.svg
+globs: model.ipynb,model_gear*.ipynb,**/model/**/*.py,research/**/*.py,research/**/*.ipynb,docs/strategy-gears.md,docs/data-format-model.md,gear*.svg
 alwaysApply: false
 ---
 

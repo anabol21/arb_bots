@@ -12,5 +12,5 @@ Use [`../../docs/agent-architecture.md`](../../docs/agent-architecture.md) as th
 - For a small isolated patch, implementation plus a targeted check is enough.
 - Add independent review when a contract, cross-contour boundary, data integrity, private send path, or production conclusion makes the change high risk.
 - D↔B work must state which side owns each change and how the other side is protected.
-- Keep the required live-send gates and separate explicit permission for a live action. A testnet/demo run is the preferred staged check where supported; skipping it requires explicit risk acceptance.
+- Keep the required live-send gates and require explicit user approval to launch or materially change a campaign, deployment, risk limits, configuration, or live contract. Orders may execute autonomously within an approved campaign and its policy/risk gates; do not require per-order approval. Prefer testnet/demo when available and compatible. A previously approved exception applies only to its named campaign and scope, not to new campaigns.
 - Do not create permanent roles for a single task or start several agents on the same files.

@@ -17,7 +17,7 @@ Before a substantial change, identify its files, boundary, and proportionate che
 Preserve these boundaries:
 
 - Keep private APIs and keys out of the collector. Private execution stays within the current private boundary in `app/bot/private/**`.
-- Keep live send fail-closed. The code path, all three settings (`BBOT_BROKER=private_live`, `VENUE=live`, `LIVE_ORDERS=1`), and explicit user permission for a live action are required. A testnet/demo step is preferred where supported; skipping it requires explicit risk acceptance.
+- Keep live send fail-closed. The code path and all three settings (`BBOT_BROKER=private_live`, `VENUE=live`, `LIVE_ORDERS=1`) must match an explicitly approved campaign scope. User approval covers launching or materially changing a campaign, deployment/restart, risk limits, configuration, or the live contract; individual orders execute autonomously under the approved policy and risk gates. Approval does not extend to a new campaign or wider scope. Prefer testnet/demo where available and compatible; honor documented exceptions only for their named campaign and scope.
 - Distinguish local, VPS, and remote-storage evidence. Do not infer production status from a dated report or `NOW.md` alone.
 - Preserve behavior when a new option is disabled where applicable. Do not broaden one task into unrelated strategy, ingest, or operations changes.
 
