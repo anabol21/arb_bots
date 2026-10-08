@@ -80,8 +80,16 @@ Oneshot + timer (B, isolated prefixes):
 |---|---|---|
 | `spread-bbot-backup-transfer.service` + `.timer` | `python -m app.bot.backup` | `{BBOT_DATA_ROOT}/journal` → rclone `spread-bbot`. |
 | `spread-bbot-gear2-backup-transfer.service` + `.timer` | `python -m app.bot.backup` | same module, prefix `spread-bbot-gear2`. |
+| `spread-bbot-gear23-metrics-compact.service` + `.timer` | shared `compact_metrics_jsonl_to_parquet.py` | Gear 2.3 `theta`, `tw_p50`, `floor`, and `theta_trades` closed UTC-day JSONL → Parquet; keeps source JSONL. |
 
 No backup units in this tree for `/data/bbot-canary-wal-eden` or `/data/bbot-gear22-live-canary`.
+
+The Gear 2.3 live canary is launched as a standalone `python -m app.bot.runtime`
+child by its guarded `/tmp/gear23_launch_*.py` launcher, not by systemd. Its
+daily compaction timer is separate from the trading process and is scoped to
+that run's `data/` root; it excludes the sibling `private/` journal. It uses
+the VPS-installed theta-k1 compactor script and retains JSONL inputs while
+writing Parquet, so failed or malformed records remain available for review.
 
 ### Documented on VPS, **not** in `deploy/systemd/` this rev
 

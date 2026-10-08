@@ -1,0 +1,15 @@
+# Daily closed-UTC-day Gear 2.3 metrics/trade compaction (03:15 MSK).
+
+[Unit]
+Description=Daily Gear 2.3 canary JSONL compaction
+
+[Timer]
+OnCalendar=*-*-* 00:15:00 UTC
+# First execution is at the next scheduled UTC time; avoid a catch-up scan
+# competing with the live canary immediately after installation.
+Persistent=false
+AccuracySec=1min
+Unit=spread-bbot-gear23-metrics-compact.service
+
+[Install]
+WantedBy=timers.target

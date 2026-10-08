@@ -1,0 +1,25 @@
+# Compact closed Gear 2.3 canary metric/trade JSONL partitions to Parquet.
+# Runtime and private journals stay outside this compaction target.
+
+[Unit]
+Description=Compact Gear 2.3 canary metrics and trade JSONL
+After=local-fs.target
+
+[Service]
+Type=oneshot
+User=root
+WorkingDirectory=/root/spread_theta_k1_canary
+Environment=ARROW_DEFAULT_MEMORY_POOL=system
+ExecStartPre=/usr/bin/mkdir -p /var/log/spread
+ExecStart=/root/venv/bin/python /root/spread_theta_k1_canary/scripts/compact_metrics_jsonl_to_parquet.py --data-root /root/b-private-b-exp/response-manager/20261005T194200Z-gear22-longrun/data --streams theta,tw_p50,floor,theta_trades --keep-days 1 --min-age-hours 12 --no-delete-jsonl
+StandardOutput=append:/var/log/spread/bbot-gear23-metrics-compact.log
+StandardError=append:/var/log/spread/bbot-gear23-metrics-compact.log
+Nice=10
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7
+MemoryMax=1G
+OOMPolicy=stop
+ReadWritePaths=/root/b-private-b-exp/response-manager/20261005T194200Z-gear22-longrun/data /var/log/spread
+ProtectSystem=full
+PrivateTmp=true
+InaccessiblePaths=/data/live /data/bars /data/compacted /data/spool

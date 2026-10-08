@@ -130,11 +130,21 @@ B2.3 reads that contour's cumulative CSV as an input and does not deploy or
 start another selector. Main's collector and storage changes remain on main
 and are not part of this canary code archive.
 
-The active would-send snapshot currently contains 29 base coins and 25 unique
-extras (54 total) under a 48-extra cap. B2.3 consumes the complete snapshot at
+The active would-send snapshot contains 29 base coins and 30 unique extras
+(59 total) under a 48-extra cap. B2.3 consumes the complete snapshot at
 startup and polls every 30 seconds, warming extras from
-`/data/bbot-would-send-prod-history`. Extra entries stay blocked without
-prep-confirmed 1x on both venues; dynamic pool refresh never changes leverage.
-The current canary window began flat at 2026-10-06 12:27:02 UTC and ends at
-2026-10-09 12:27:02 UTC. Full launch and validation chronology is in
+`/data/bbot-would-send-prod-history`. Extras stay blocked without confirmed
+1x on both venues. Dynamic refresh does not change leverage by default; the
+opt-in `BBOT_HOT_ADD_SET_LEVERAGE=1` path prepares unconfirmed extras after
+flat/no-open-order checks. On 2026-10-08, five extras were newly confirmed at
+1x on both venues during the canary restart. The current canary window began
+flat at 2026-10-06 12:27:02 UTC and ends at 2026-10-09 12:27:04 UTC. Full
+launch and validation chronology is in
 [`docs/gear23-live-canary-2026-10-06.md`](gear23-live-canary-2026-10-06.md).
+
+The standalone live process is started by the guarded launcher in `/tmp` and
+retains its Sentry env-file policy. Daily compaction runs separately at 00:15
+UTC against only that run's `data/` event-date partitions for `theta`,
+`tw_p50`, `floor`, and `theta_trades`. The current compactor writes Parquet
+after the 12-hour age gate and keeps the source JSONL; the sibling `private/`
+journal and the process text log are outside its scope.
