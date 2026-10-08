@@ -1821,7 +1821,12 @@ class BotRuntime:
 
         # Holds place-inflight so reconnect does not drop the sockets and a
         # thread keepalive stashes trade frames instead of racing recv_text.
+        extra = kwargs.get("extra")
+        if isinstance(extra, dict) and isinstance(extra.get("pre_send_stamps"), dict):
+            extra["pre_send_stamps"]["place_io_requested"] = time.monotonic_ns()
         with session.place_io_section():
+            if isinstance(extra, dict) and isinstance(extra.get("pre_send_stamps"), dict):
+                extra["pre_send_stamps"]["place_io_acquired"] = time.monotonic_ns()
             result = place_live(
                 data_root=self.data_root,
                 sender=sender,

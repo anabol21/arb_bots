@@ -305,7 +305,6 @@ class TrivialDualSender:
 
     def __init__(self, *, send_fn: Optional[SendFn] = None) -> None:
         self._send_fn = send_fn
-        self._loop = asyncio.new_event_loop()
         self._ready = threading.Event()
         self._sender_ready = {
             "bybit": threading.Event(),
@@ -315,31 +314,51 @@ class TrivialDualSender:
         self._sent_ns: dict[str, int] = {}
         self._sent_lock = threading.Lock()
         self._errors: list[str] = []
-        self._bybit_q: Optional[asyncio.Queue[Optional[TrivialSendItem]]] = None
-        self._okx_q: Optional[asyncio.Queue[Optional[TrivialSendItem]]] = None
-        self._thread = threading.Thread(
-            target=self._run_loop, name="trivial-dual-sender", daemon=True
-        )
-        self._thread.start()
-        if not self._ready.wait(timeout=5.0):
+        self._loops: dict[str, asyncio.AbstractEventLoop] = {}
+        self._queues: dict[str, asyncio.Queue[Optional[TrivialSendItem]]] = {}
+        self._threads = {
+            venue: threading.Thread(
+                target=self._run_loop,
+                args=(venue,),
+                name=f"trivial-sender-{venue}",
+                daemon=True,
+            )
+            for venue in ("bybit", "okx")
+        }
+        try:
+            for thread in self._threads.values():
+                thread.start()
+        except Exception:
+            self.close()
+            raise
+        deadline = time.monotonic() + 5.0
+        if not all(
+            event.wait(max(0.0, deadline - time.monotonic()))
+            for event in self._sender_ready.values()
+        ):
             self.close()
             raise RuntimeError("trivial sender loop failed to start")
-
-    def _run_loop(self) -> None:
-        asyncio.set_event_loop(self._loop)
-        self._bybit_q = asyncio.Queue()
-        self._okx_q = asyncio.Queue()
-        self._loop.create_task(self._sender("bybit", self._bybit_q))
-        self._loop.create_task(self._sender("okx", self._okx_q))
-        self._loop.create_task(self._mark_ready())
-        self._loop.run_forever()
-
-    async def _mark_ready(self) -> None:
-        # The sender tasks run before this task. Wait until both are parked on
-        # their queues so startup readiness means the queues have consumers.
-        while not all(event.is_set() for event in self._sender_ready.values()):
-            await asyncio.sleep(0)
         self._ready.set()
+
+    def _run_loop(self, venue: str) -> None:
+        loop = asyncio.new_event_loop()
+        self._loops[venue] = loop
+        self._queues[venue] = asyncio.Queue()
+        asyncio.set_event_loop(loop)
+        if self._stop.is_set():
+            loop.close()
+            return
+        sender = loop.create_task(self._sender(venue, self._queues[venue]))
+        sender.add_done_callback(lambda _done: loop.stop())
+        try:
+            loop.run_forever()
+        finally:
+            pending = asyncio.all_tasks(loop)
+            for task in pending:
+                task.cancel()
+            if pending:
+                loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))
+            loop.close()
 
     async def _sender(
         self,
@@ -368,18 +387,18 @@ class TrivialDualSender:
         """Whether both sender tasks are live and have reached their queues."""
         return bool(
             self._ready.is_set()
-            and self._thread.is_alive()
-            and self._loop.is_running()
-            and self._bybit_q is not None
-            and self._okx_q is not None
+            and not self._stop.is_set()
+            and all(thread.is_alive() for thread in self._threads.values())
+            and all(loop.is_running() for loop in self._loops.values())
+            and all(venue in self._loops and venue in self._queues for venue in ("bybit", "okx"))
             and all(event.is_set() for event in self._sender_ready.values())
         )
 
     def queue_depths(self) -> dict[str, int]:
         """Return current queue depths for startup readiness diagnostics."""
         return {
-            "bybit": self._bybit_q.qsize() if self._bybit_q is not None else -1,
-            "okx": self._okx_q.qsize() if self._okx_q is not None else -1,
+            venue: self._queues[venue].qsize() if venue in self._queues else -1
+            for venue in ("bybit", "okx")
         }
 
     def enqueue_dual(
@@ -399,7 +418,7 @@ class TrivialDualSender:
         Does not wait for venue ack/fill. Second put does not wait on first
         send completing. Correlation ids are bound before the puts (no I/O).
         """
-        if self._bybit_q is None or self._okx_q is None:
+        if not self.is_ready():
             raise RuntimeError("trivial sender queues not ready")
         bind_place_on_process_transcript(
             req_ids=(("bybit", bybit_req_id), ("okx", okx_req_id)),
@@ -434,10 +453,10 @@ class TrivialDualSender:
         )
         t1 = o_item.enqueued_ns
         fut_b = asyncio.run_coroutine_threadsafe(
-            self._put_and_stamp(self._bybit_q, b_item), self._loop
+            self._put_and_stamp(self._queues["bybit"], b_item), self._loops["bybit"]
         )
         fut_o = asyncio.run_coroutine_threadsafe(
-            self._put_and_stamp(self._okx_q, o_item), self._loop
+            self._put_and_stamp(self._queues["okx"], o_item), self._loops["okx"]
         )
         fut_b.result(timeout=5.0)
         fut_o.result(timeout=5.0)
@@ -475,9 +494,9 @@ class TrivialDualSender:
         key = str(venue).strip().lower()
         if key not in {"bybit", "okx"}:
             raise TrivialSendError(f"enqueue_one venue must be bybit|okx, got {venue!r}")
-        queue = self._bybit_q if key == "bybit" else self._okx_q
-        if queue is None:
+        if self._stop.is_set() or key not in self._queues:
             raise RuntimeError("trivial sender queues not ready")
+        queue = self._queues[key]
         with self._sent_lock:
             self._sent_ns.pop(f"{phase}:{key}", None)
         t0 = time.monotonic_ns()
@@ -491,7 +510,9 @@ class TrivialDualSender:
             dual_leg_id=dual_leg_id,
             signal_ts_ms=signal_ts_ms,
         )
-        fut = asyncio.run_coroutine_threadsafe(self._put_and_stamp(queue, item), self._loop)
+        fut = asyncio.run_coroutine_threadsafe(
+            self._put_and_stamp(queue, item), self._loops[key]
+        )
         fut.result(timeout=5.0)
         sent = self._wait_sent(phase, key, timeout_sec=5.0)
         return TrivialSendResult(
@@ -521,23 +542,28 @@ class TrivialDualSender:
         if self._stop.is_set():
             return
         self._stop.set()
-        if self._bybit_q is not None and self._okx_q is not None:
+        for venue, queue in list(self._queues.items()):
             try:
-                asyncio.run_coroutine_threadsafe(self._bybit_q.put(None), self._loop).result(
-                    timeout=2.0
-                )
-                asyncio.run_coroutine_threadsafe(self._okx_q.put(None), self._loop).result(
+                asyncio.run_coroutine_threadsafe(queue.put(None), self._loops[venue]).result(
                     timeout=2.0
                 )
             except Exception:  # noqa: BLE001
-                pass
-        try:
-            self._loop.call_soon_threadsafe(self._loop.stop)
-        except Exception:  # noqa: BLE001
-            pass
-        self._thread.join(timeout=2.0)
-        if not self._loop.is_closed():
-            self._loop.close()
+                try:
+                    self._loops[venue].call_soon_threadsafe(self._loops[venue].stop)
+                except Exception:  # noqa: BLE001
+                    pass
+        for venue, thread in self._threads.items():
+            if thread.ident is None:
+                continue
+            thread.join(timeout=2.0)
+            if thread.is_alive():
+                loop = self._loops.get(venue)
+                if loop is not None:
+                    try:
+                        loop.call_soon_threadsafe(loop.stop)
+                    except RuntimeError:
+                        pass
+                thread.join(timeout=2.0)
 
 
 def send_signed_dual(

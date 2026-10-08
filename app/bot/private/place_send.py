@@ -549,6 +549,10 @@ def _place(
         signal_ts_ms=int(signal_ts_ms),
         signal_monotonic_ns=extra.get("signal_mono_ns"),
     )
+    pre_send_stamps = extra.get("pre_send_stamps")
+    if isinstance(pre_send_stamps, dict):
+        pre_send_stamps["chrono_created"] = time.monotonic_ns()
+        chrono.pre_send_timing(pre_send_stamps)
     send_attempted = False
     okx_side, bybit_side, pos_side, reduce_only = _sides(spread_side, close_of)
     event = "close" if reduce_only else "open"

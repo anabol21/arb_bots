@@ -5,14 +5,16 @@ from __future__ import annotations
 import ast
 import asyncio
 import json
+import sys
 import tempfile
 import threading
 import time
-import sys
 import unittest
 from types import SimpleNamespace
 from pathlib import Path
+from types import ModuleType
 from unittest.mock import patch
+from contextlib import nullcontext
 
 from app.bot.floor_warm import (
     build_warm_state_from_floor_journal,
@@ -314,6 +316,68 @@ class TerminalExecutionModeTests(unittest.IsolatedAsyncioTestCase):
             self.assertIsInstance(calls[-1]["extra"]["signal_mono_ns"], int)
         self.assertEqual(len(calls), 2)
         self.assertEqual([call["base_coin"] for call in calls], ["BTC", "BTC"])
+
+    async def test_terminal_pre_send_stamps_reach_runtime_place_boundary(self) -> None:
+        from app.bot.synthetic_policy import SyntheticDecision
+
+        websockets_stub = ModuleType("websockets")
+        websockets_stub.connect = None
+        with patch.dict(sys.modules, {"websockets": websockets_stub}):
+            from app.bot.runtime import BotRuntime
+
+        runtime = object.__new__(BotRuntime)
+        session = SimpleNamespace(
+            wire=SimpleNamespace(healthy=True),
+            bybit_credentials=None,
+            bybit_runtime=SimpleNamespace(exchange="bybit"),
+            okx_runtime=SimpleNamespace(exchange="okx"),
+            place_io_section=nullcontext,
+        )
+        runtime._private_warm = session
+        runtime._synthetic_sender = SimpleNamespace(is_ready=lambda: True)
+        runtime._synthetic_sender_session = session
+        runtime._terminal_private_execution = True
+        runtime._okx_ct_vals = {"BTC-USDT-SWAP": 1}
+        runtime._okx_inst_id_codes = {"BTC-USDT-SWAP": 7}
+        runtime._leverage_one = {("okx", "BTC-USDT-SWAP"): "1", ("bybit", "BTCUSDT"): "1"}
+        runtime.data_root = Path(tempfile.mkdtemp())
+        runtime._emit_terminal_private_trade_sentry = lambda *_args: None
+        captured = []
+
+        def place_live_mock(**kwargs):
+            captured.append(kwargs)
+            return SimpleNamespace(
+                completed=True, keep_pending=False, send_attempted=True,
+                fill_ts_ms=1_700_000_000_050, okx_filled_qty="0.1",
+                bybit_filled_qty="0.1", coin_qty="0.1", status="open",
+            )
+
+        manager = ThetaTradeManager(
+            data_root=Path(tempfile.mkdtemp()), config=ThetaTradeConfig(notional_usdt=10),
+            place_fn=runtime._synthetic_live_place, meta_fn=lambda _coin: SimpleNamespace(
+                okx_symbol="BTC-USDT-SWAP", bybit_symbol="BTCUSDT", okx_ct_val=1,
+            ),
+            decide_fn=lambda **_kwargs: SyntheticDecision(
+                action="open", coin="BTC", side="long", roll=17
+            ), execution_mode="terminal_private",
+        )
+        with patch("app.bot.private.place_send.place_live", side_effect=place_live_mock):
+            await manager.on_theta_snapshots_async(
+                [_snap("BTC", "long", 0.6)], quotes={"BTC": _books()},
+                coin_order=("BTC",), now_ms=1_700_000_000_000,
+            )
+            for _ in range(100):
+                if manager._terminal_place_task is None:
+                    break
+                await asyncio.sleep(0.001)
+        self.assertEqual(len(captured), 1)
+        stamps = captured[0]["extra"]["pre_send_stamps"]
+        for name in (
+            "decision_gates_done", "task_scheduled", "task_started",
+            "worker_thread_started", "meta_done", "guard_done", "place_io_requested",
+            "place_io_acquired",
+        ):
+            self.assertIsInstance(stamps[name], int, name)
 
 
 
