@@ -343,6 +343,7 @@ Local lean only: `SPREAD_LEAN_PARQUET_ROOT`, `SPREAD_LEAN_BARS_ROOT`, `SPREAD_LE
 | `BBOT_THETA_OPEN`, `BBOT_P50_OPEN`, `BBOT_MIN_PROFIT_PP`, `BBOT_MIN_THETA_CLOSE`, `BBOT_FEE_RT_PP`, `BBOT_FILL_DELAY_MS`, `BBOT_SLOT_K`, `BBOT_THETA_THR` | frozen-knob overlays |
 | `BBOT_FLOOR_WATCH`, `BBOT_TW_P50_WATCH`, `BBOT_THETA_WATCH`, `BBOT_FLOOR_WARM`, `BBOT_FLOOR_BAR_SAMPLE_CAP` | observers |
 | `BBOT_HOT_ADD`, `BBOT_HOT_ADD_DELTA`, `BBOT_HOT_ADD_MAX_EXTRA`, `BBOT_HOT_ADD_POLL_SEC`, `BBOT_HOT_ADD_WARM`, `BBOT_HOT_ADD_HISTORY_ROOT` | opt-in Gear 2.3 cumulative pool; private additions reuse the active owner session and entries require every readiness gate |
+| `BBOT_HOT_ADD_SET_LEVERAGE` | default-off Gear 2.3 private-extra setup; a supervised off-loop task requires flat positions/no open orders, sets only 1x, and requires matching OKX and Bybit readbacks before admission |
 | `BBOT_CHRONOMETRY`, `BBOT_L1_RING` | live canary instrumentation |
 | `BBOT_PRIVATE_DATA_ROOT`, `BBOT_PRIVATE_LOG_PATH`, `BBOT_PRIVATE_ENV_FILE` | private journal / secret **path** |
 | `BBOT_PRIVATE_SEND_PATH`, `BBOT_PRIVATE_W6`, `W6_DUAL_LEG`, `BBOT_PRIVATE_W4`/`W4_POST_ONLY`, `BBOT_PRIVATE_W5`/`W5_MARKET`, `BBOT_PRIVATE_W7`/`W7_PARALLEL_DUAL_LEG` | send-path / experiment flags |

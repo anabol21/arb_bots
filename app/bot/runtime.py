@@ -63,6 +63,7 @@ from app.bot.hot_add import (
     bbot_hot_add_enabled,
     bbot_hot_add_max_extra,
     bbot_hot_add_poll_sec,
+    bbot_hot_add_set_leverage_enabled,
     run_hot_add_poller,
 )
 from app.bot.hot_add_warm import (
@@ -434,6 +435,17 @@ class BotRuntime:
             raise RuntimeError("BBOT_COINS empty after is_crypto filter")
         self._gear23_base_coins = tuple(self.coins)
         self._gear23_hot_add_enabled = bbot_hot_add_enabled()
+        self._gear23_hot_add_set_leverage = bbot_hot_add_set_leverage_enabled()
+        if self._gear23_hot_add_set_leverage and not (
+            self._gear23_hot_add_enabled and self._terminal_private_execution
+        ):
+            raise ValueError(
+                "BBOT_HOT_ADD_SET_LEVERAGE requires Gear23 terminal_private"
+            )
+        self._gear23_leverage_scheduled: set[str] = set()
+        self._gear23_leverage_ready = False
+        self._gear23_leverage_lock = asyncio.Lock()
+        self._gear23_last_leverage_start = 0.0
         self._hot_add_supervisor: TaskSupervisor | None = None
         self._hot_add_controller: BotHotAddController | None = None
         self._gear23_pool_started = False
@@ -1951,6 +1963,7 @@ class BotRuntime:
         if self.theta_screener is not None:
             self.theta_screener.coins.append(coin)
         meta = self._meta(coin)
+        self._gear23_schedule_hot_add_leverage(coin)
         if getattr(self, "_gear23_pool_started", False):
             supervisor.add(
                 run_okx_books5(
@@ -1991,6 +2004,90 @@ class BotRuntime:
             "gear23_coin_added | base_coin=%s | public_ws=starting | trade_eligible=pending_gates",
             coin,
         )
+
+    def _gear23_schedule_hot_add_leverage(self, coin: str) -> None:
+        supervisor = self._hot_add_supervisor
+        if (
+            not getattr(self, "_gear23_hot_add_set_leverage", False)
+            or not getattr(self, "_gear23_leverage_ready", False)
+            or coin in self._gear23_base_coins
+            or coin in self._gear23_confirmed_1x
+            or coin in self._gear23_leverage_scheduled
+            or supervisor is None
+        ):
+            return
+        self._gear23_leverage_scheduled.add(coin)
+        supervisor.add(
+            self._gear23_set_hot_add_leverage(coin),
+            name=f"leverage-1x-{coin}",
+        )
+
+    async def _gear23_set_hot_add_leverage(self, coin: str) -> None:
+        """Prepare one hot-added extra off-loop; admission remains fail-closed."""
+        async with self._gear23_leverage_lock:
+            if coin in self._gear23_base_coins or coin in self._gear23_confirmed_1x:
+                return
+            if self.stop_event.is_set():
+                return
+            delay = 1.0 - (time.monotonic() - self._gear23_last_leverage_start)
+            if delay > 0:
+                await asyncio.sleep(delay)
+            if self.stop_event.is_set():
+                return
+            self._gear23_last_leverage_start = time.monotonic()
+            session = self._private_warm
+            if session is None:
+                self.log.warning(
+                    "gear23_leverage_one_failed | base_coin=%s | reason=private_session_unavailable",
+                    coin,
+                )
+                return
+            meta = self._meta(coin)
+            from app.bot.private.leverage_one import (
+                LeverageTarget,
+                set_and_verify_leverage_one,
+            )
+            from app.bot.private.venue import endpoints_for_venue
+
+            try:
+                await asyncio.to_thread(
+                    set_and_verify_leverage_one,
+                    LeverageTarget(coin, meta.okx_symbol, meta.bybit_symbol),
+                    okx_credentials=session.okx_credentials,
+                    bybit_credentials=session.bybit_credentials,
+                    endpoints=endpoints_for_venue("live"),
+                )
+            except RuntimeError as exc:
+                reason = str(exc)
+                if reason not in {
+                    "leverage_set_unconfirmed",
+                    "leverage_preflight_failed",
+                    "leverage_preflight_not_flat",
+                    "leverage_readback_unconfirmed",
+                    "leverage_readback_failed",
+                }:
+                    reason = "verification_error"
+                self.log.warning(
+                    "gear23_leverage_one_failed | base_coin=%s | reason=%s",
+                    coin,
+                    reason,
+                )
+                return
+            except Exception as exc:  # noqa: BLE001 — extra remains blocked
+                self.log.warning(
+                    "gear23_leverage_one_failed | base_coin=%s | reason=%s",
+                    coin,
+                    type(exc).__name__,
+                )
+                return
+
+            self._leverage_one[("okx", meta.okx_symbol)] = "1"
+            self._leverage_one[("bybit", meta.bybit_symbol)] = "1"
+            self._gear23_confirmed_1x = self._gear23_confirmed_1x | {coin}
+            self.log.info(
+                "gear23_leverage_one_confirmed | base_coin=%s | venue_count=2",
+                coin,
+            )
 
     async def _gear23_add_private_coin(self, coin: str) -> None:
         session = self._private_warm
@@ -3239,6 +3336,13 @@ class BotRuntime:
                     type(cleanup_exc).__name__,
                 )
             raise
+
+        # The startup snapshot is loaded before private startup checks. Only
+        # now may one-shot leverage tasks run for initially loaded extras.
+        if self._gear23_hot_add_set_leverage:
+            self._gear23_leverage_ready = True
+            for coin in self.coins:
+                self._gear23_schedule_hot_add_leverage(coin)
 
         tasks: list[tuple[Any, str]] = [(self._heartbeat(), "heartbeat")]
         # Periodic floor warm pickle save (if floor observer is enabled)

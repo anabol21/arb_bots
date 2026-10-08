@@ -2,15 +2,16 @@
 
 Gear 2.3 reuses would-send's cumulative hot-add CSV contract for the Gear 2.2 public market-data contour. The fixed configured pool remains the base. A delta snapshot can append candidates, starting one OKX books5 and one Bybit orderbook.1 public stream per accepted coin. Metadata is resolved through the same fail-closed lot/tick gate as would-send.
 
-Patch A added public book tasks and watcher state. Patch B reuses the existing private session: Bybit's account-wide subscription gains the added symbol in its inbound allowlist, and OKX subscribes `orders` and `positions` for each added instrument on the current owner socket. No extra socket, recv task, selector, leverage request, or exchange setting change is introduced. New entries require valid metadata, a successful history warm, fresh books in both current public generations, current private readiness (including per-instrument OKX ACKs), and prep-confirmed 1x on both venues. A missing 1x confirmation blocks only that candidate. Existing held coins remain in the manager's pool for close handling.
+Patch A added public book tasks and watcher state. Patch B reuses the existing private session: Bybit's account-wide subscription gains the added symbol in its inbound allowlist, and OKX subscribes `orders` and `positions` for each added instrument on the current owner socket. No extra socket, recv task, or selector is introduced. By default, dynamic refresh does not change leverage. The optional `BBOT_HOT_ADD_SET_LEVERAGE=1` path schedules one supervised task for each newly added extra; it requires instrument-scoped flat positions and no open orders on both venues before setting only 1x, then requires an instrument-matched OKX cross leverage-info readback and Bybit position readback at 1x before marking the coin confirmed. Any failed or incomplete preflight/readback leaves that candidate blocked without a setting POST on preflight failure. New entries also require valid metadata, a successful history warm, fresh books in both current public generations, and current private readiness (including per-instrument OKX ACKs). Existing held coins remain in the manager's pool for close handling.
 
 ## Opt-in configuration
 
-`BBOT_HOT_ADD=1` is off by default. Public/stub mode accepts a Gear 2.2 profile with `BBOT_BROKER=stub` and live gates off. Private mode is limited to the existing fully gated Gear 2.2 private-live contour. The enabled run reads the complete cumulative snapshot before private startup, then polls that same snapshot for additions. For a manual public experiment use an isolated `BBOT_DATA_ROOT` and delta snapshot. The private readonly experiment uses the approved VPS live environment only on that host; it must not invoke an order path or alter leverage/account settings.
+`BBOT_HOT_ADD=1` is off by default. Public/stub mode accepts a Gear 2.2 profile with `BBOT_BROKER=stub` and live gates off. Private mode is limited to the existing fully gated Gear 2.2 private-live contour. The enabled run reads the complete cumulative snapshot before private startup, then polls that same snapshot for additions. `BBOT_HOT_ADD_SET_LEVERAGE` defaults off and is accepted only with Gear 2.3 `terminal_private`; when enabled, its per-extra setter/readback worker runs off the bot loop and does not retry failed setup. For a manual public experiment use an isolated `BBOT_DATA_ROOT` and delta snapshot. The private readonly experiments described below did not enable this setting.
 
 | Variable | Default | Meaning |
 |---|---:|---|
 | `BBOT_HOT_ADD` | off | Enable the dynamic coin pool. |
+| `BBOT_HOT_ADD_SET_LEVERAGE` | off | For newly hot-added private extras only, set leverage to 1 and require both readbacks before admission. |
 | `BBOT_HOT_ADD_DELTA` | `hot_add_delta.csv` | Snapshot path; relative paths resolve under `BBOT_DATA_ROOT`. |
 | `BBOT_HOT_ADD_MAX_EXTRA` | 8 | Maximum added coins. The active would-send configuration uses a 48-extra cap; use that value for the bounded VPS comparison. |
 | `BBOT_HOT_ADD_POLL_SEC` | 30 | Snapshot poll interval. |
@@ -21,7 +22,7 @@ The snapshot uses the existing `app/utils/universe_delta.py` columns. A candidat
 
 ## Offline checks
 
-Offline checks are `python3 -m unittest tests.test_gear23_hot_add tests.test_hot_add_supervisor` and `python3 -m py_compile app/bot/runtime.py app/bot/hot_add.py app/bot/hot_add_warm.py app/utils/task_supervisor.py`. The bounded runtime experiment, after review, should use a dedicated run directory and a manually written CSV with one new candidate, then a second candidate. Confirm two public subscriptions per accepted candidate, duplicate snapshot no-ops, invalid metadata skip, explicit observer warm result, and unchanged trade-eligible base pool. Keep `LIVE_ORDERS=0`; no private session or exchange order is part of A.
+Offline checks include `python3 -m unittest tests.test_gear23_hot_add tests.test_gear23_hot_add_leverage tests.test_hot_add_supervisor` and scoped leverage-preparation tests. The bounded public runtime experiment, after review, should use a dedicated run directory and a manually written CSV with new candidates. Confirm public subscriptions, duplicate snapshot no-ops, invalid metadata skip, explicit observer warm result, and unchanged base pool. Keep `LIVE_ORDERS=0`; no private session or exchange order is part of A.
 
 The runner `validation/gear23_public_stub_experiment.py` reads three selected metadata rows from the would-send snapshot without changing it, waits until the original public pool is ready, then writes manual snapshots only under a new Gear 2.3 data root. It starts the bot with a scrubbed public/stub-only environment, executes the one/duplicate/two-additional/invalid sequence, and stops only its own child PID. A `PASS` requires subscribe ACKs and accepted ticks on both added symbols, usable theta rows for all three, duplicate idempotence, invalid metadata rejection, private/send paths skipped, no trade journal, clean task drain, and at least one successful history warm. If mechanics pass but no candidate fully warms, the result is `PARTIAL`, not `PASS`. Example:
 
@@ -111,11 +112,13 @@ subscribed, and reseeded.
 
 An extra coin remains entry-ineligible until valid instrument metadata, current
 public books, required history warmup, both exchanges' private readiness, and
-existing preconfirmed 1x evidence are all present. Missing 1x confirmation for
-an extra does not stop the base contour; dynamic refresh never sets leverage.
-A held position remains pinned for close management. Gear 2.2 policy, quantity
-calculation, global K=1 pending/halt behavior, order parsing, and the validated
-send path remain unchanged.
+confirmed 1x evidence are all present. Missing 1x confirmation for an extra
+does not stop the base contour. Optional dynamic 1x preparation applies only to
+new extras, runs once in a supervised worker, and marks confirmation only after
+both venue readbacks match; it is disabled by default. A held position remains
+pinned for close management. Gear 2.2 policy, quantity calculation, global K=1
+pending/halt behavior, order parsing, and the validated send path remain
+unchanged.
 
 ## B2.3 branch and runtime boundary
 
