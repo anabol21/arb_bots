@@ -9,9 +9,10 @@
 Симуляция гира 2.2, `would_send`, `send=false`. Живых ордеров нет.
 
 - Юнит `spread-bbot-would-send-prod`, данные `/data/bbot-would-send-prod`.
-- SHA checkout на хосте `8af4d52` (код #75 `BBOT_SIZE_GATE=0`; tip main).
+- SHA checkout на хосте `8f942d2` (код #75 `BBOT_SIZE_GATE=0` + #76/#77 zstd-компактор; tip main).
 - Статус 07.10 ~00:39 МСК: выкатили `8af4d52` (detached) поверх `c3d3e5f`, рестарт только `spread-bbot-would-send-prod` на flat book (`position=None` / orphan θ нет). Size gate на stub **выключен**: unit env `BBOT_SIZE_GATE=0` — `size_check` всё ещё пишет available/planned (`size_ok_raw`), но `size_ok=true` и не блокирует open/close. Live/gear23 не трогали (default gate on). `BBOT_NOTIONAL_USDT=20`, AGE/SKEW 10s (`SPREAD_TICK_AGE_MAX_MS=10000` / `SPREAD_TICK_SKEW_MAX_MS=10000`). Ротация expand-only в 10:00 МСК. Пул 54 = база 29 + 25 экстра (AEON, API3, ARX, BREV, CT, DGAI, ENJ, ESP, GMX, KGEN, LAB, LQTY, MANA, OPN, RECALL, RESOLV, RSR, SAND, SENT, SPACE, TRIA, TRUTH, UMA, WOO, YGG). Открытых θ нет. Канарейка theta-k1 остановлена. После деплоя: `insufficient_size` на stub не должен резать сделки; смотреть opens/heartbeat.
 - Гейты: θ_open 0.50, p50_open 0.60, min_profit 0.20, fee 0.30, K=1; tick AGE/SKEW 10000 мс; **size gate off** (`BBOT_SIZE_GATE=0`).
+- `theta/` и `tw_p50/` закрытых дней — `metrics.jsonl.zst` (zstd на смене UTC event_date, grace 120 с, + startup sweep; `floor/` не сжимаем). Флаг unit `BBOT_METRICS_ROTATE_COMPRESS=1`.
 - Следит Sentry (issue created) на открытиях.
 - Не трогать Contour B и `/data/live`. Шов рестарта: hot-add экстра прогревается из устаревшей history, floor прыгает.
 
