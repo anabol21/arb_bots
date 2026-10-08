@@ -16,7 +16,7 @@ No-gap rollover design (see ``DayRollover``):
 * After the grace window the previous day is *sealed*: the writer will never
   open it again and a background worker thread compresses it (nice/ionice
   ``zstd -3 -T1`` subprocess fed at a paced rate, ``BBOT_METRICS_COMPRESS_MBPS``
-  default 24 MiB/s, because the unit has CPUQuota=100% shared with the bot),
+  default 16 MiB/s, because the unit has CPUQuota=100% shared with the bot),
   verifies (paced ``zstd -dc`` with frame checksums + line count + byte count
   + sha256 of the decompressed stream vs. the original), fsyncs, atomically
   renames ``.zst.tmp`` -> ``.zst`` and only then deletes the original.
@@ -61,7 +61,7 @@ DEFAULT_GRACE_SEC = 120.0
 # The would_send unit runs with CPUQuota=100% and the bot itself uses ~70% of
 # it; compression shares that cgroup, so it is paced (MiB/s of *uncompressed*
 # data) to stay a few % of a core instead of bursting to the quota.
-DEFAULT_RATE_MBPS = 24.0
+DEFAULT_RATE_MBPS = 16.0
 METRICS_NAME = "metrics.jsonl"
 ZST_NAME = "metrics.jsonl.zst"
 TMP_NAME = "metrics.jsonl.zst.tmp"
@@ -90,7 +90,7 @@ def rotate_grace_sec(env: Optional[Mapping[str, str]] = None) -> float:
 
 
 def compress_rate_bytes(env: Optional[Mapping[str, str]] = None) -> float:
-    """``BBOT_METRICS_COMPRESS_MBPS`` (MiB/s, default 24; 0 = unpaced)."""
+    """``BBOT_METRICS_COMPRESS_MBPS`` (MiB/s, default 16; 0 = unpaced)."""
     e = env if env is not None else os.environ
     raw = str(e.get(ENV_RATE) or "").strip()
     try:

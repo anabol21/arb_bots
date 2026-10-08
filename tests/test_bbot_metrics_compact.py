@@ -71,7 +71,7 @@ class FlagTests(unittest.TestCase):
         self.assertFalse(rotate_compress_enabled({}))
         self.assertTrue(rotate_compress_enabled({"BBOT_METRICS_ROTATE_COMPRESS": "1"}))
         self.assertFalse(rotate_compress_enabled({"BBOT_METRICS_ROTATE_COMPRESS": "0"}))
-        self.assertEqual(mc.compress_rate_bytes({}), 24 * 1024 * 1024)
+        self.assertEqual(mc.compress_rate_bytes({}), 16 * 1024 * 1024)
         self.assertEqual(mc.compress_rate_bytes({"BBOT_METRICS_COMPRESS_MBPS": "0"}), 0)
 
     def test_legacy_writer_unchanged_when_off(self) -> None:
