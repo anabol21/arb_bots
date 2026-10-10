@@ -18,12 +18,17 @@
 
 ## Contour B (бот)
 
-Контур гира 2.3 (динамический пул) на real net, `send=true`, номинал 10 USDT. Сейчас не запущен: ручной прогон (PID 2808155) остановился сам 10.10 02:57 МСК после закрытия TRUST `ce305e9a` (`open_window_elapsed_flat`, `completed_cycles=1`).
+Контур гира 2.3 (динамический пул) на real net, `send=true`, номинал 10 USDT. Запущен standalone (не systemd), статус и PID — в отчёте 10.10 ниже.
 
 - Вектор: довести 2.3 до «готово» по [roadmap.md](roadmap.md): hot-add монеты торгуют наравне с базой. Фандинг в `close_min_profit` и PnL пока не учитывается, фикс отложен до бэктеста (2.6 в roadmap): на TRUST за ~32 ч удержания фандинг съел ~105% gross, net ≈ −0.034 USDT.
-- Код: `f230345` (ветка `codex/gear23-dynamic-pool`, не main) + патч `3c719bc` (плечо 1x на hot-add; в origin ещё нет). Запуск standalone, не systemd, лаунчером с гардами: flat и без pending, совпадение дедлайна окна, подтверждённый пул 1x.
+- Код: дерево `gear23-b2.3-tw-deque-20261010` (см. отчёт ниже) заменило прежнее `f230345` + патч `3c719bc` (плечо 1x на hot-add). Входит ли `3c719bc` в tw-deque — не проверено. Запуск standalone, не systemd, лаунчером.
 - Пул 59 = база 29 + 30 hot-add из `/data/bbot-would-send-prod/hot_add_delta.csv` (expand-only). Новая монета получает плечо 1x на обеих биржах и до подтверждения стоит на гейте `one_x_unconfirmed`.
 - Гейты: θ_open 0.50, p50_open 0.60, min_profit 0.20, fee 0.30, min_θ_close 0.05, K=1; tick AGE/SKEW 10000 мс; `terminal_private`, policy gear22.
+- Отчёт 10.10 (~21:40 МСК):
+  - gear 2.3 остановился сам 10.10 02:57 МСК (`open_window_elapsed_flat`, `completed_cycles=1`) после закрытия TRUST `ce305e9a`. Рестарт 10.10 18:41:45 МСК: PID 3224101, standalone `python -m app.bot` (не systemd), код `gear23-b2.3-tw-deque-20261010`. cwd `/root/b-private-b-exp/response-manager-code/gear23-b2.3-tw-deque-20261010`, лаунчер `/tmp/gear23-b23-twdeque-launch-20261010.sh`, runroot `/root/b-private-b-exp/response-manager/20261005T194200Z-gear22-longrun`, лог `bbot-gear23-b2.3.log`.
+  - В новом коде последние правки Codex: оптимизация вычислительного ядра скользящих квантилей (tw deque). Ожидается, что нагрузка на CPU в Contour B и would_send заметно уменьшится (не замерено до записи; по словам Миши). Без сделок с рестарта, heartbeat свежий (проверено 10.10 21:37 МСК).
+  - would_send (стратег): `spread-bbot-would-send-prod` active, PID 3196000, перезапущен 10.10 16:23:01 МСК. Отдельного процесса стратега нет, стратег = would_send.
+  - Sentry (проверка 10.10 21:40 МСК): тестовые события из отдельного короткого процесса с теми же настройками дошли: `ARB-BOTS-CONTOUR-B-4V` (проект `arb-bots-contour-b`, env `/etc/spread/bbot-gear22-live-canary.env`) и `ARB-BOTS-STRATEGIST-2D` (проект `arb-bots-strategist`, env `/etc/spread/sentry-strategist.env`). Ключи и проекты рабочие; что sentry инициализирован внутри самих процессов, подтвердит первая реальная сделка. У gear23 в новом лаунчере нет `SENTRY_RELEASE` (не было в файле env). Тестовые issues — игнор.
 - Диск: runroot ~4 ГБ, метрики сжимает `spread-bbot-gear23-metrics-compact.timer` раз в сутки в 03:15 МСК (Parquet, JSONL удаляется).
 - Ближайшее: подтвердить Sentry-события и пост-трейд дашборд на первой живой сделке; решить, нужно ли новое окно открытий.
 - Слежу я (бот): тихий часовой watch и Sentry issue-триггер.
