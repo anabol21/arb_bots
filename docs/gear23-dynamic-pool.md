@@ -156,9 +156,14 @@ one-minute-only snapshot schema. The B2.3 contour drops the unused five-minute
 snapshot fields while leaving floor policy, theta policy, and private send
 unchanged. A hedge-mode-safe hot-add leverage preflight still requires both
 venues flat and without open orders; Bybit readback accepts `positionIdx` 0, 1,
-or 2 only when all matching rows have zero size and 1x buy/sell leverage. The
-set request uses equal buy/sell leverage of 1, as required for cross margin in
-both Bybit position modes.
+or 2 only when all matching rows have zero size and 1x buy/sell leverage. On
+the 2026-10-10 live restart, Bybit returned a second same-symbol cursor row with
+only `size=0`, `positionIdx=0`, and stale `leverage=10`; `positionStatus` and
+`updatedTime` were empty. The leverage readback treats rows with both fields
+populated as current, requires at least one, and checks all such rows for 1x.
+The flat/open-order preflight still examines every page and row. The set request
+uses equal buy/sell leverage of 1, as required for cross margin in both Bybit
+position modes.
 
 The refreshed process reads the 29 fixed base coins plus the live would-send
 cumulative delta (32 extras at launch; 61 total) from

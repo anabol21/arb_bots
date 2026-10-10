@@ -472,9 +472,16 @@ def _bybit_readback_is_one(data: Mapping[str, Any], symbol: str) -> bool:
         row for row in rows
         if isinstance(row, Mapping) and str(row.get("symbol") or "") == symbol
     ]
-    if not matching:
+    # Bybit may append an empty cursor placeholder for the same symbol; it can
+    # carry an old leverage value but has no position status or update time.
+    current = [
+        row for row in matching
+        if row.get("positionStatus") not in (None, "")
+        and row.get("updatedTime") not in (None, "")
+    ]
+    if not current:
         return False
-    for row in matching:
+    for row in current:
         leverage_values = [
             row.get(field)
             for field in ("leverage", "buyLeverage", "sellLeverage")

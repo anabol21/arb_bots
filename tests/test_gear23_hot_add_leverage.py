@@ -235,7 +235,8 @@ class HotAddLeverageTests(unittest.TestCase):
                 return {"retCode": 0, "result": {"list": []}}
             return {"retCode": 0, "result": {"list": [{"symbol": target.bybit_symbol,
                     "leverage": "1", "buyLeverage": "1", "sellLeverage": "1",
-                    "size": "0", "positionIdx": 0}]}}
+                    "size": "0", "positionIdx": 0, "positionStatus": "Normal",
+                    "updatedTime": "1791640000000"}]}}
 
         self.assertTrue(set_and_verify_leverage_one(
             target,
@@ -296,7 +297,8 @@ class HotAddLeverageTests(unittest.TestCase):
                 return {"retCode": 0, "result": {"list": []}}
             rows = [
                 {"symbol": target.bybit_symbol, "size": "0", "positionIdx": idx,
-                 "leverage": "1", "buyLeverage": "1", "sellLeverage": "1"}
+                 "leverage": "1", "buyLeverage": "1", "sellLeverage": "1",
+                 "positionStatus": "Normal", "updatedTime": "1791640000000"}
                 for idx in (1, 2)
             ]
             return {"retCode": 0, "result": {"list": rows}}
@@ -315,8 +317,36 @@ class HotAddLeverageTests(unittest.TestCase):
             "result": {"list": [{
                 "symbol": target.bybit_symbol, "size": "0", "positionIdx": 3,
                 "leverage": "1", "buyLeverage": "1", "sellLeverage": "1",
+                "positionStatus": "Normal", "updatedTime": "1791640000000",
             }]},
         }, target.bybit_symbol))
+
+    def test_bybit_readback_ignores_empty_pagination_placeholder(self) -> None:
+        target = "AEONUSDT"
+        self.assertTrue(_bybit_readback_is_one({
+            "retCode": 0,
+            "result": {"list": [
+                {"symbol": target, "size": "0", "positionIdx": 0,
+                 "leverage": "1", "positionStatus": "Normal",
+                 "updatedTime": "1791292865176"},
+                {"symbol": target, "size": "0", "positionIdx": 0,
+                 "leverage": "10", "positionStatus": "", "updatedTime": ""},
+            ]},
+        }, target))
+
+    def test_bybit_readback_rejects_conflicting_current_rows(self) -> None:
+        target = "AEONUSDT"
+        self.assertFalse(_bybit_readback_is_one({
+            "retCode": 0,
+            "result": {"list": [
+                {"symbol": target, "size": "0", "positionIdx": 0,
+                 "leverage": "1", "positionStatus": "Normal",
+                 "updatedTime": "1791292865176"},
+                {"symbol": target, "size": "0", "positionIdx": 0,
+                 "leverage": "10", "positionStatus": "Normal",
+                 "updatedTime": "1791292865176"},
+            ]},
+        }, target))
 
     def test_flat_preflight_follows_bybit_position_and_order_cursors(self) -> None:
         target = LeverageTarget("NEW", "NEW-USDT-SWAP", "NEWUSDT")
@@ -354,6 +384,7 @@ class HotAddLeverageTests(unittest.TestCase):
                         "symbol": target.bybit_symbol, "leverage": "1",
                         "buyLeverage": "1", "sellLeverage": "1",
                         "size": "0", "positionIdx": 0,
+                        "positionStatus": "Normal", "updatedTime": "1791640000000",
                     }]}
                     if position_calls == 3:
                         result["nextPageCursor"] = "readback-next"
