@@ -35,6 +35,17 @@ _SEND_TIMING_FIELDS = (
     "owner_ws_send_started_ns",
     "owner_ws_send_returned_ns",
 )
+_PRE_SEND_TIMING_FIELDS = (
+    "decision_gates_done",
+    "task_scheduled",
+    "task_started",
+    "worker_thread_started",
+    "meta_done",
+    "guard_done",
+    "place_io_requested",
+    "place_io_acquired",
+    "chrono_created",
+)
 
 
 class StepChrono:
@@ -144,6 +155,27 @@ class StepChrono:
                 "mono_ns": mono,
                 "signal_ts_ms": self.signal_ts_ms,
                 "send_timing_monotonic_ns": safe,
+            }
+        )
+
+    def pre_send_timing(self, stamps: Mapping[str, int]) -> None:
+        """Keep scheduling stamps in memory until the normal post-send flush."""
+        safe = {
+            name: value if type(value) is int else None
+            for name in _PRE_SEND_TIMING_FIELDS
+            for value in (stamps.get(name),)
+        }
+        if not any(value is not None for value in safe.values()):
+            return
+        wall, mono = self._stamp()
+        self._rows.append(
+            {
+                "intent_id": self.intent_id,
+                "block": "pre_send_timing",
+                "wall_ms": wall,
+                "mono_ns": mono,
+                "signal_ts_ms": self.signal_ts_ms,
+                "pre_send_timing_monotonic_ns": safe,
             }
         )
 

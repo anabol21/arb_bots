@@ -154,6 +154,41 @@ class SyntheticSendTimingTests(unittest.TestCase):
         self.assertTrue(placed.completed)
         self.assertFalse(any(r["block"] == "send_timing" for r in self._rows()))
 
+    def test_pre_send_stamps_are_persisted_as_monotonic_only(self):
+        stamps = {
+            "decision_gates_done": 10,
+            "task_scheduled": 11,
+            "task_started": 12,
+            "worker_thread_started": 13,
+            "meta_done": 14,
+            "guard_done": 15,
+            "place_io_requested": 16,
+            "place_io_acquired": 17,
+        }
+        sender = _Sender()
+        flush = StepChrono.flush
+
+        def capture_flush(chrono):
+            self.assertEqual(len(sender.calls), 1)
+            flush(chrono)
+
+        with patch.object(StepChrono, "flush", capture_flush):
+            placed = self._place(sender, extra={"pre_send_stamps": stamps})
+        self.assertTrue(placed.send_attempted)
+        self.assertEqual(len(sender.calls), 1)
+        row = next(row for row in self._rows() if row["block"] == "pre_send_timing")
+        recorded = row["pre_send_timing_monotonic_ns"]
+        self.assertEqual(recorded["decision_gates_done"], 10)
+        self.assertEqual(recorded["task_scheduled"], 11)
+        self.assertEqual(recorded["place_io_requested"], 16)
+        self.assertEqual(recorded["place_io_acquired"], 17)
+        self.assertIsInstance(recorded["chrono_created"], int)
+        self.assertEqual(set(recorded), {
+            "decision_gates_done", "task_scheduled", "task_started",
+            "worker_thread_started", "meta_done", "guard_done",
+            "place_io_requested", "place_io_acquired", "chrono_created",
+        })
+
     def test_real_dual_queue_markers_survive_place_and_serialize(self):
         def callback(item):
             # Inject the owner stamps without a websocket or exchange call.

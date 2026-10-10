@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import tempfile
+import threading
 import time
 import unittest
 from pathlib import Path
@@ -246,6 +247,83 @@ class TrivialSenderTests(unittest.TestCase):
             self.assertLess(skew_ns, 50_000_000)  # 50 ms enqueue skew
         finally:
             loop.close()
+
+    def test_second_venue_callback_starts_while_first_is_blocked(self) -> None:
+        first_started = threading.Event()
+        second_started = threading.Event()
+        release_first = threading.Event()
+
+        def _send(item) -> None:
+            if item.venue == "bybit":
+                first_started.set()
+                self.assertTrue(release_first.wait(5.0))
+            else:
+                self.assertTrue(first_started.wait(2.0))
+                second_started.set()
+
+        loop = TrivialDualSender(send_fn=_send)
+        result: list[object] = []
+        failure: list[BaseException] = []
+
+        def enqueue() -> None:
+            try:
+                b_text, b_req, _ = build_signed_place_text(
+                    venue="bybit", symbol="SOLUSDT", side="buy", qty="0.5",
+                    credentials=_creds(),
+                )
+                o_text, o_req, _ = build_signed_place_text(
+                    venue="okx", symbol="SOL-USDT-SWAP", side="sell", qty="1",
+                    credentials=None, inst_id_code=99,
+                )
+                result.append(loop.enqueue_dual(
+                    bybit_text=b_text, okx_text=o_text,
+                    bybit_req_id=b_req, okx_req_id=o_req, phase="open",
+                ))
+            except BaseException as exc:  # surface worker assertion in this test thread
+                failure.append(exc)
+
+        caller = threading.Thread(target=enqueue)
+        caller.start()
+        try:
+            self.assertTrue(first_started.wait(1.0))
+            self.assertTrue(second_started.wait(1.0))
+            release_first.set()
+            caller.join(2.0)
+            self.assertFalse(caller.is_alive())
+            self.assertFalse(failure)
+            self.assertEqual(len(result), 1)
+            self.assertIsNone(result[0].error)
+        finally:
+            release_first.set()
+            caller.join(2.0)
+            loop.close()
+
+    def test_partial_thread_start_failure_closes_started_sender(self) -> None:
+        start = threading.Thread.start
+        started = []
+
+        def start_one(thread):
+            if thread.name == "trivial-sender-okx":
+                raise RuntimeError("cannot start thread")
+            started.append(thread)
+            start(thread)
+
+        with patch.object(threading.Thread, "start", start_one):
+            with self.assertRaisesRegex(RuntimeError, "cannot start thread"):
+                TrivialDualSender()
+        self.assertEqual(len(started), 1)
+        self.assertFalse(started[0].is_alive())
+
+    def test_close_clears_readiness_and_refuses_more_sends(self) -> None:
+        sender = TrivialDualSender()
+        self.assertTrue(sender.is_ready())
+        sender.close()
+        sender.close()
+        self.assertFalse(sender.is_ready())
+        for thread in sender._threads.values():
+            self.assertFalse(thread.is_alive())
+        with self.assertRaisesRegex(RuntimeError, "queues not ready"):
+            sender.enqueue_one(venue="okx", text="test", req_id="test", phase="close")
 
     def test_warm_send_fn_carries_owner_write_markers_into_result(self) -> None:
         class _TimedSocket:

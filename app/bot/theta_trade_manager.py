@@ -1721,6 +1721,7 @@ class ThetaTradeManager:
         signal_mono_ns: Optional[int] = None,
         okx_s: Mapping[str, Any],
         bybit_s: Mapping[str, Any],
+        pre_send_stamps: Optional[dict[str, int]] = None,
     ) -> list[dict[str, Any]]:
         """Call the injected place_fn. Journal rows belong to that function.
 
@@ -1729,6 +1730,8 @@ class ThetaTradeManager:
         """
         if self._place_fn is None or decision.action not in ("open", "close"):
             return []
+        if pre_send_stamps is not None:
+            pre_send_stamps["worker_thread_started"] = time.monotonic_ns()
         if decision.action == "open":
             trade_id = str(uuid.uuid4())
             intent_id = trade_id
@@ -1768,6 +1771,8 @@ class ThetaTradeManager:
                 if self.execution_mode == "terminal_private":
                     self.slot.pending = False
                 return []
+        if pre_send_stamps is not None:
+            pre_send_stamps["meta_done"] = time.monotonic_ns()
 
         if self.execution_mode == "terminal_private" and self._pre_send_guard_fn is not None:
             try:
@@ -1799,6 +1804,8 @@ class ThetaTradeManager:
                 }
                 self._log(f"theta_trade_pre_send_reject | reason={reason} | coin={coin}")
                 return []
+        if pre_send_stamps is not None:
+            pre_send_stamps["guard_done"] = time.monotonic_ns()
 
         extra = {
             "trade_id": trade_id,
@@ -1806,6 +1813,8 @@ class ThetaTradeManager:
             "synthetic_roll": self._decide_fn is not None,
             "signal_mono_ns": signal_mono_ns,
         }
+        if pre_send_stamps is not None:
+            extra["pre_send_stamps"] = pre_send_stamps
         self.slot.pending = True
         keep_pending = False
         try:
@@ -1878,6 +1887,7 @@ class ThetaTradeManager:
         signal_mono_ns: Optional[int],
         okx_s: Mapping[str, Any],
         bybit_s: Mapping[str, Any],
+        pre_send_stamps: Optional[dict[str, int]] = None,
     ) -> list[dict[str, Any]]:
         """Reserve K=1 before handing blocking terminal handling to one worker."""
         import asyncio
@@ -1885,10 +1895,12 @@ class ThetaTradeManager:
         if self.slot.pending or self._terminal_place_task is not None:
             return []
         self.slot.pending = True
+        pre_send_stamps = pre_send_stamps if pre_send_stamps is not None else {}
 
         async def run() -> None:
             import asyncio
 
+            pre_send_stamps["task_started"] = time.monotonic_ns()
             worker = asyncio.create_task(
                 asyncio.to_thread(
                     self._execute_injected_place,
@@ -1897,6 +1909,7 @@ class ThetaTradeManager:
                     signal_mono_ns=signal_mono_ns,
                     okx_s=okx_s,
                     bybit_s=bybit_s,
+                    pre_send_stamps=pre_send_stamps,
                 ),
                 name="theta-private-place-worker",
             )
@@ -1934,6 +1947,7 @@ class ThetaTradeManager:
                 if self._terminal_place_task is asyncio.current_task():
                     self._terminal_place_task = None
 
+        pre_send_stamps["task_scheduled"] = time.monotonic_ns()
         self._terminal_place_task = asyncio.create_task(run(), name="theta-private-place")
         return []
 
@@ -2013,6 +2027,7 @@ class ThetaTradeManager:
         decision = self._record_policy_status(decision, evaluated_at_ms=tick_ms)
         signal_ts_ms = int(time.time() * 1000) if now_ms is None else int(now_ms)
         signal_mono_ns = time.monotonic_ns()
+        pre_send_stamps: dict[str, int] = {}
 
         async def _async_sleep(seconds: float) -> None:
             await asyncio.sleep(seconds)
@@ -2027,6 +2042,7 @@ class ThetaTradeManager:
                 quotes=quotes,
                 now_ms=signal_ts_ms,
                 signal_mono_ns=signal_mono_ns,
+                pre_send_stamps=pre_send_stamps,
             )
         finally:
             self._sleep_fn = prev
@@ -2039,6 +2055,7 @@ class ThetaTradeManager:
         quotes: Mapping[str, Mapping[str, Mapping[str, Any]]],
         now_ms: Optional[int] = None,
         signal_mono_ns: Optional[int] = None,
+        pre_send_stamps: Optional[dict[str, int]] = None,
     ) -> list[dict[str, Any]]:
         """Async twin of ``execute_decision`` (await fill delay)."""
         import asyncio
@@ -2102,6 +2119,8 @@ class ThetaTradeManager:
             return self.execute_decision(
                 decision, snapshots=snapshots, quotes=quotes, now_ms=signal_ts
             )
+        if pre_send_stamps is not None:
+            pre_send_stamps["decision_gates_done"] = time.monotonic_ns()
 
         if self.execution_mode == "terminal_private":
             return self._schedule_terminal_private_place(
@@ -2110,6 +2129,7 @@ class ThetaTradeManager:
                 signal_mono_ns=signal_mono_ns,
                 okx_s=okx_s,
                 bybit_s=bybit_s,
+                pre_send_stamps=pre_send_stamps,
             )
 
         if self._decide_fn is not None:
