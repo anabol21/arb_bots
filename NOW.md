@@ -6,15 +6,15 @@
 
 ## would_send (стратег)
 
-Симуляция гира 2.2, `would_send`, `send=false`. Живых ордеров нет.
+Симуляция гира 2.2, `would_send`, `send=false`. Живых ордеров нет. Sentry env `gear22-would-send-canary`.
 
-- Юнит `spread-bbot-would-send-prod`, данные `/data/bbot-would-send-prod`.
-- SHA checkout на хосте `8f942d2` (код #75 `BBOT_SIZE_GATE=0` + #76/#77 zstd-компактор; tip main).
-- Статус 07.10 ~00:39 МСК: выкатили `8af4d52` (detached) поверх `c3d3e5f`, рестарт только `spread-bbot-would-send-prod` на flat book (`position=None` / orphan θ нет). Size gate на stub **выключен**: unit env `BBOT_SIZE_GATE=0` — `size_check` всё ещё пишет available/planned (`size_ok_raw`), но `size_ok=true` и не блокирует open/close. Live/gear23 не трогали (default gate on). `BBOT_NOTIONAL_USDT=20`, AGE/SKEW 10s (`SPREAD_TICK_AGE_MAX_MS=10000` / `SPREAD_TICK_SKEW_MAX_MS=10000`). Ротация expand-only в 10:00 МСК. Пул 54 = база 29 + 25 экстра (AEON, API3, ARX, BREV, CT, DGAI, ENJ, ESP, GMX, KGEN, LAB, LQTY, MANA, OPN, RECALL, RESOLV, RSR, SAND, SENT, SPACE, TRIA, TRUTH, UMA, WOO, YGG). Открытых θ нет. Канарейка theta-k1 остановлена. После деплоя: `insufficient_size` на stub не должен резать сделки; смотреть opens/heartbeat.
-- Гейты: θ_open 0.50, p50_open 0.60, min_profit 0.20, fee 0.30, K=1; tick AGE/SKEW 10000 мс; **size gate off** (`BBOT_SIZE_GATE=0`).
-- `theta/` и `tw_p50/` закрытых дней — `metrics.jsonl.zst` (zstd на смене UTC event_date, grace 120 с, + startup sweep; `floor/` не сжимаем). Флаг unit `BBOT_METRICS_ROTATE_COMPRESS=1`.
+- Юнит `spread-bbot-would-send-prod`, данные `/data/bbot-would-send-prod`; active с 10.10 16:23 МСК (PID 3196000, NRestarts=0).
+- Checkout на хосте `/root/spread_bbot_theta_top10_canary` (симлинк `/root/spread_bbot_would_send_prod`) = `8f942d2` **+ незакоммиченные правки** (`runtime.py`, `theta_screener.py`, `theta_trade_manager.py`, `tw_p50_watcher.py` и тесты) — Codex A/B оптимизированного compute-ядра, трекинг CPU/качества данных. Прод ≠ чистый main (main ушёл вперёд на Gear 2.3 merge `e9c701d`); не делать `git checkout`/`reset` на хосте, пока Codex не закоммитит.
+- Статус 10.10 ~21:40 МСК: пул 61 (база 29 + 32 экстра) после expand-only ротации 10:00 МСК (ежедневно, history seed rc=0). Открытых θ нет (8 сделок, все закрыты).
+- Гейты: θ_open 0.50, p50_open 0.60, min_profit 0.20, fee 0.30, K=1, notional 20 USDT; tick AGE/SKEW 10000 мс; size gate off (`BBOT_SIZE_GATE=0`, `size_ok_raw` пишется); `CPUQuota=100%`.
+- `theta/` и `tw_p50/` закрытых дней сжимаются в `metrics.jsonl.zst` на смене UTC event_date (`BBOT_METRICS_ROTATE_COMPRESS=1`, + startup sweep); `floor/` не сжимаем. Рост контура ~0.16 GB/день.
 - Следит Sentry (issue created) на открытиях.
-- Не трогать Contour B и `/data/live`. Шов рестарта: hot-add экстра прогревается из устаревшей history, floor прыгает.
+- Не трогать Contour B, `/data/live`, чужие юниты. Рестарт только когда flat по `theta_trades` (не по heartbeat `position`).
 
 ## Contour B (бот)
 
