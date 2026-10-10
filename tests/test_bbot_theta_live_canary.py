@@ -40,10 +40,8 @@ def _snap(
         side=side,
         ts_ms=ts_ms,
         p50_1m=p1,
-        p50_5m=p1,
         floor_tf_select_a25=floor,
         theta_1m=theta_1m,
-        theta_5m=(p1 - floor) if p1 is not None else None,
         computed_at_ms=ts_ms + 1,
     )
 

@@ -45,7 +45,6 @@ def _snap(
     *,
     floor: float = 0.05,
     p50_1m: float | None = None,
-    p50_5m: float | None = None,
     ts_ms: int = 1_700_000_000_000,
 ) -> ThetaSnapshot:
     p1 = p50_1m if p50_1m is not None else (
@@ -56,10 +55,8 @@ def _snap(
         side=side,
         ts_ms=ts_ms,
         p50_1m=p1,
-        p50_5m=p50_5m if p50_5m is not None else p1,
         floor_tf_select_a25=floor,
         theta_1m=theta_1m,
-        theta_5m=(p1 - floor) if p1 is not None else None,
         computed_at_ms=ts_ms + 1,
     )
 
@@ -856,10 +853,8 @@ class JournalSchemaTests(unittest.TestCase):
             "fill_ts_ms": 1_725_000_000_070,
             "latency_ms": 70,
             "theta_1m": 0.25,
-            "theta_5m": 0.2,
             "floor": 0.05,
             "p50_1m": 0.3,
-            "p50_5m": 0.25,
             "opposite_theta_1m": 0.01,
             "slip_spread": 0.0,
             "notional_usdt": 100.0,

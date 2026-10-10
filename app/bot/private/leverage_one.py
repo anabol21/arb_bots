@@ -355,7 +355,7 @@ def _preflight_flat(
     )
     if _bybit_has_next_page(bybit_positions) or not _bybit_position_flat(
         bybit_positions, target.bybit_symbol
-    ) or not _bybit_one_way(bybit_positions, target.bybit_symbol):
+    ):
         raise RuntimeError("leverage_preflight_not_flat")
 
     bybit_orders = _bybit_signed_get(
@@ -399,18 +399,6 @@ def _bybit_has_next_page(data: Mapping[str, Any]) -> bool:
     result = data.get("result")
     return bool(
         isinstance(result, Mapping) and result.get("nextPageCursor")
-    )
-
-
-def _bybit_one_way(data: Mapping[str, Any], symbol: str) -> bool:
-    result = data.get("result")
-    rows = result.get("list") if isinstance(result, Mapping) else None
-    if not isinstance(rows, list):
-        return False
-    return all(
-        row.get("positionIdx") in (None, "", 0, "0")
-        for row in rows
-        if isinstance(row, Mapping) and str(row.get("symbol") or "") == symbol
     )
 
 
@@ -468,7 +456,7 @@ def _bybit_readback_is_one(data: Mapping[str, Any], symbol: str) -> bool:
                 return False
         except Exception:  # noqa: BLE001 — venue response boundary
             return False
-        if row.get("positionIdx") not in (None, "", 0, "0"):
+        if row.get("positionIdx") not in (None, "", 0, "0", 1, "1", 2, "2"):
             return False
     return True
 

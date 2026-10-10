@@ -223,7 +223,7 @@ class Gear23HotAddTests(unittest.TestCase):
         )
         snap = ThetaSnapshot(
             base_coin="NEWONE", side="long", ts_ms=int(now), p50_1m=1,
-            p50_5m=1, floor_tf_select_a25=0, theta_1m=1, theta_5m=1,
+            floor_tf_select_a25=0, theta_1m=1,
             computed_at_ms=int(now),
         )
         self.assertFalse(runtime._gear23_candidate_ready("NEWONE", [snap]))

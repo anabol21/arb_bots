@@ -18,6 +18,7 @@ except ModuleNotFoundError:
 from app.bot.hot_add import bbot_hot_add_set_leverage_enabled
 from app.bot.private.leverage_one import (
     LeverageTarget,
+    _bybit_readback_is_one,
     set_and_verify_leverage_one,
 )
 from app.bot.private.order_sign import LiveCredentials
@@ -92,7 +93,7 @@ class HotAddLeverageTests(unittest.TestCase):
         runtime._gear23_floor_warm["NEW"] = True
         runtime.snapshot = ThetaSnapshot(
             base_coin="NEW", side="long", ts_ms=int(now), p50_1m=1,
-            p50_5m=1, floor_tf_select_a25=0, theta_1m=1, theta_5m=1,
+            floor_tf_select_a25=0, theta_1m=1,
             computed_at_ms=int(now),
         )
 
@@ -268,6 +269,53 @@ class HotAddLeverageTests(unittest.TestCase):
                     post_fn=post,
                     get_fn=bad_get,
                 )
+
+    def test_flat_bybit_hedge_mode_can_set_and_verify_one_x(self) -> None:
+        target = LeverageTarget("NEW", "NEW-USDT-SWAP", "NEWUSDT")
+        creds = LiveCredentials("key", "secret", "pass")
+        posts: list[str] = []
+
+        def post(url, _headers, _body):
+            posts.append(url)
+            if "okx" in url:
+                return 200, {"code": "0", "data": [{"lever": "1"}]}
+            return 200, {"retCode": 0, "result": {}}
+
+        def get(url, _headers, *, timeout_sec):
+            self.assertEqual(timeout_sec, 15.0)
+            if "/api/v5/account/positions" in url:
+                return {"code": "0", "data": []}
+            if "/api/v5/trade/orders-pending" in url:
+                return {"code": "0", "data": []}
+            if "/api/v5/account/leverage-info" in url:
+                return {"code": "0", "data": [{
+                    "instId": target.okx_symbol, "lever": "1", "mgnMode": "cross",
+                }]}
+            if "/v5/order/realtime" in url:
+                return {"retCode": 0, "result": {"list": []}}
+            rows = [
+                {"symbol": target.bybit_symbol, "size": "0", "positionIdx": idx,
+                 "leverage": "1", "buyLeverage": "1", "sellLeverage": "1"}
+                for idx in (1, 2)
+            ]
+            return {"retCode": 0, "result": {"list": rows}}
+
+        self.assertTrue(set_and_verify_leverage_one(
+            target,
+            okx_credentials=creds,
+            bybit_credentials=creds,
+            endpoints=endpoints_for_venue("live"),
+            post_fn=post,
+            get_fn=get,
+        ))
+        self.assertEqual(len(posts), 2)
+        self.assertFalse(_bybit_readback_is_one({
+            "retCode": 0,
+            "result": {"list": [{
+                "symbol": target.bybit_symbol, "size": "0", "positionIdx": 3,
+                "leverage": "1", "buyLeverage": "1", "sellLeverage": "1",
+            }]},
+        }, target.bybit_symbol))
 
     def test_preflight_exposure_prevents_all_setter_calls(self) -> None:
         target = LeverageTarget("NEW", "NEW-USDT-SWAP", "NEWUSDT")

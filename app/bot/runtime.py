@@ -571,7 +571,7 @@ class BotRuntime:
         self._synthetic_sender_session: Any = None
         self._synthetic_live_send_enabled = False
         self._l1_ring_warned = False
-        # Gear 2.2 floor observer (5m bar metrics). Off critical decide/send path.
+        # Gear 2.2 floor observer. Off critical decide/send path.
         self.floor_enabled = floor_watch_enabled(self.profile)
         self.floor_observer: LiveFloorObserver | None = None
         self.floor_journal: FloorJournalWriter | None = None
@@ -580,7 +580,7 @@ class BotRuntime:
         if self.floor_enabled:
             self.floor_observer = LiveFloorObserver(self.coins)
             self.floor_journal = FloorJournalWriter(self.data_root)
-        # Rolling TW p50 (1m/5m) observer — alongside floor, not instead of it.
+        # Rolling one-minute TW p50 observer — alongside floor.
         self.tw_p50_enabled = tw_p50_watch_enabled(self.profile)
         self.tw_p50_observer: LiveTwP50Observer | None = None
         self.tw_p50_journal: TwP50JournalWriter | None = None
@@ -1629,7 +1629,6 @@ class BotRuntime:
             }
             for key in (
                 "theta_1m",
-                "theta_5m",
                 "floor",
                 "p50_1m",
                 "spread_signal",
@@ -2658,11 +2657,11 @@ class BotRuntime:
                         type(exc).__name__,
                     )
                 continue
-            # Skip sides that have never received a tick (n_5m==0 and no coverage).
+            # Skip sides that have never received a tick in the 1m window.
             rows = [
                 s.as_row()
                 for s in snapshots
-                if s.n_5m > 0 or s.coverage_5m > 0.0 or s.n_1m > 0
+                if s.n_1m > 0 or s.coverage_1m > 0.0
             ]
             if rows:
                 await self._flush_tw_p50_rows(rows)
@@ -2752,7 +2751,7 @@ class BotRuntime:
         active_keys = {
             (s.base_coin, s.side)
             for s in tw_snapshots
-            if s.n_5m > 0 or s.coverage_5m > 0.0 or s.n_1m > 0
+            if s.n_1m > 0 or s.coverage_1m > 0.0
         }
         rows = [
             s.as_row()

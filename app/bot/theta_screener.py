@@ -1,13 +1,12 @@
-"""Live theta screener: TW p50 − gear-2.2 floor (public books only).
+"""Live theta screener: 1m TW p50 − gear-2.2 floor (public books only).
 
 Per ``(base_coin, side)``:
 
 - ``theta_1m = p50_1m - floor_tf_select_a25``
-- ``theta_5m = p50_5m - floor``
 
-``p50_*`` come from the live TW-p50 watcher RAM snapshot; ``floor`` is the
+``p50_1m`` comes from the live TW-p50 watcher RAM snapshot; ``floor`` is the
 latest finite gear-2.2 floor from the live floor observer (same coin/side).
-If floor or the corresponding p50 is non-finite → that theta is null.
+If floor or p50 is non-finite → theta is null.
 
 Emit/persist ~1 Hz together with (or immediately after) tw_p50 snapshots.
 Never writes ticks. Low RAM: only last floor + last p50 per side for compute.
@@ -30,7 +29,7 @@ from app.bot.fsadvise import advise_dontneed
 from app.bot.paths import theta_metrics_jsonl_path
 from app.bot.tw_p50_watcher import LiveTwP50Observer, TwP50Snapshot
 
-SCHEMA_VERSION = "bbot.theta.v1"
+SCHEMA_VERSION = "bbot.theta.v2"
 SIDES: tuple[str, ...] = ("long", "short")
 EMIT_INTERVAL_SEC = 1.0
 
@@ -76,23 +75,18 @@ def _finite(value: Any) -> Optional[float]:
 
 def compute_theta(
     p50_1m: Any,
-    p50_5m: Any,
     floor: Any,
-) -> tuple[Optional[float], Optional[float], Optional[float]]:
-    """Return ``(floor, theta_1m, theta_5m)`` with null rules.
+) -> tuple[Optional[float], Optional[float]]:
+    """Return ``(floor, theta_1m)`` with null rules.
 
-    - floor non-finite → floor/theta_1m/theta_5m all None
-    - p50_1m non-finite → theta_1m None (theta_5m may still compute)
-    - p50_5m non-finite → theta_5m None
+    Non-finite floor nulls both outputs; non-finite p50 leaves theta null.
     """
     floor_f = _finite(floor)
     if floor_f is None:
-        return None, None, None
+        return None, None
     p1 = _finite(p50_1m)
-    p5 = _finite(p50_5m)
     theta_1m = (float(p1) - float(floor_f)) if p1 is not None else None
-    theta_5m = (float(p5) - float(floor_f)) if p5 is not None else None
-    return float(floor_f), theta_1m, theta_5m
+    return float(floor_f), theta_1m
 
 
 @dataclass(frozen=True)
@@ -103,10 +97,8 @@ class ThetaSnapshot:
     side: str
     ts_ms: int
     p50_1m: Optional[float]
-    p50_5m: Optional[float]
     floor_tf_select_a25: Optional[float]
     theta_1m: Optional[float]
-    theta_5m: Optional[float]
     computed_at_ms: int
 
     def as_row(self) -> dict[str, Any]:
@@ -116,10 +108,8 @@ class ThetaSnapshot:
             "side": self.side,
             "ts_ms": int(self.ts_ms),
             "p50_1m": self.p50_1m,
-            "p50_5m": self.p50_5m,
             "floor_tf_select_a25": self.floor_tf_select_a25,
             "theta_1m": self.theta_1m,
-            "theta_5m": self.theta_5m,
             "computed_at_ms": int(self.computed_at_ms),
         }
 
@@ -130,12 +120,11 @@ def theta_from_inputs(
     side: str,
     ts_ms: int,
     p50_1m: Any,
-    p50_5m: Any,
     floor: Any,
     computed_at_ms: Optional[int] = None,
 ) -> ThetaSnapshot:
     """Build one theta snapshot from raw p50 + floor inputs."""
-    floor_f, th1, th5 = compute_theta(p50_1m, p50_5m, floor)
+    floor_f, th1 = compute_theta(p50_1m, floor)
     wall = (
         int(computed_at_ms)
         if computed_at_ms is not None
@@ -146,10 +135,8 @@ def theta_from_inputs(
         side=str(side),
         ts_ms=int(ts_ms),
         p50_1m=_finite(p50_1m),
-        p50_5m=_finite(p50_5m),
         floor_tf_select_a25=floor_f,
         theta_1m=th1,
-        theta_5m=th5,
         computed_at_ms=wall,
     )
 
@@ -195,7 +182,6 @@ class LiveThetaScreener:
                 side=tw.side,
                 ts_ms=tw.ts_ms,
                 p50_1m=tw.p50_1m,
-                p50_5m=tw.p50_5m,
                 floor=floor_val,
                 computed_at_ms=wall,
             )
@@ -220,26 +206,23 @@ class LiveThetaScreener:
         for coin in self.coins:
             for side in SIDES:
                 p50_1m: Optional[float] = None
-                p50_5m: Optional[float] = None
                 ts_ms = now
                 if self.tw_p50_observer is not None:
                     tw = self.tw_p50_observer.get_snapshot(coin, side)
                     if tw is not None:
                         p50_1m = tw.p50_1m
-                        p50_5m = tw.p50_5m
                         ts_ms = int(tw.ts_ms)
                 floor_val: Optional[float] = None
                 if self.floor_observer is not None:
                     floor_val = self.floor_observer.last_floor(coin, side)
                 # Skip sides that have never seen p50 or floor (cold start).
-                if p50_1m is None and p50_5m is None and floor_val is None:
+                if p50_1m is None and floor_val is None:
                     continue
                 snap = theta_from_inputs(
                     base_coin=coin,
                     side=side,
                     ts_ms=ts_ms,
                     p50_1m=p50_1m,
-                    p50_5m=p50_5m,
                     floor=floor_val,
                     computed_at_ms=wall,
                 )

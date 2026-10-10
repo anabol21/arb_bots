@@ -148,3 +148,35 @@ UTC against only that run's `data/` event-date partitions for `theta`,
 `tw_p50`, `floor`, and `theta_trades`. The current compactor writes Parquet
 after the 12-hour age gate and keeps the source JSONL; the sibling `private/`
 journal and the process text log are outside its scope.
+
+## TW deque and unlimited live restart (2026-10-10)
+
+B2.3 now uses the verified `deque` implementation for TW-p50(1m), with the
+one-minute-only snapshot schema. The B2.3 contour drops the unused five-minute
+snapshot fields while leaving floor policy, theta policy, and private send
+unchanged. A hedge-mode-safe hot-add leverage preflight still requires both
+venues flat and without open orders; Bybit readback accepts `positionIdx` 0, 1,
+or 2 only when all matching rows have zero size and 1x buy/sell leverage. The
+set request uses equal buy/sell leverage of 1, as required for cross margin in
+both Bybit position modes.
+
+The refreshed process reads the 29 fixed base coins plus the live would-send
+cumulative delta (32 extras at launch; 61 total) from
+`/data/bbot-would-send-prod/hot_add_delta.csv`. It retains the existing live
+Sentry env-file setup and VPS data root. `BBOT_CANARY_MAX_CYCLES=0` and an
+unset `BBOT_CANARY_OPEN_WINDOW_HOURS` remove both stop limits. Startup must
+confirm flatness for the full 61-coin set before public signal tasks start.
+
+Focused validation ran 123 tests on VPS Python 3.10, including exact TW
+watcher checks, Gear 2.3 hot-add/leverage, private flat guards, and Sentry
+events. The 10-minute 360-message/s deque comparison is recorded in
+[`docs/would-send-cpu-canary-20261010.md`](would-send-cpu-canary-20261010.md):
+exact reference parity, 23.331 CPU-seconds vs 364.2 for the legacy watcher.
+The 1m snapshot-schema change is covered by B2.3 tests.
+
+Runtime source and test code are staged under
+`/root/b-private-b-exp/response-manager-code/gear23-b2.3-tw-deque-20261010/`.
+The standalone process uses the existing run root
+`/root/b-private-b-exp/response-manager/20261005T194200Z-gear22-longrun/` so
+Grok/Sentry continue to watch the established logs and state. Logs and runtime
+files are VPS-local; remote backup durability was not revalidated.

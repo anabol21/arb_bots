@@ -1,4 +1,4 @@
-"""Live BotRuntime rolling TW p50 watcher (1m/5m, no tick WAL)."""
+"""Live BotRuntime rolling one-minute TW p50 watcher (no tick WAL)."""
 
 from __future__ import annotations
 
@@ -17,7 +17,6 @@ from app.bot.tw_p50_watcher import (
     DEFAULT_SAMPLE_CAP,
     SCHEMA_VERSION,
     WINDOW_1M_MS,
-    WINDOW_5M_MS,
     LiveTwP50Observer,
     TwP50JournalWriter,
     tw_p50_sample_cap,
@@ -39,13 +38,14 @@ class TwP50FlagTests(unittest.TestCase):
         )
         self.assertTrue(tw_p50_watch_enabled("gear1", {"BBOT_TW_P50_WATCH": "1"}))
 
-    def test_sample_cap_reuses_floor_env(self) -> None:
+    def test_sample_cap_ignores_floor_metric_setting(self) -> None:
         self.assertEqual(tw_p50_sample_cap({}), DEFAULT_SAMPLE_CAP)
         self.assertEqual(
             tw_p50_sample_cap({"BBOT_TW_P50_SAMPLE_CAP": "128"}), 128
         )
         self.assertEqual(
-            tw_p50_sample_cap({"BBOT_FLOOR_BAR_SAMPLE_CAP": "256"}), 256
+            tw_p50_sample_cap({"BBOT_FLOOR_BAR_SAMPLE_CAP": "256"}),
+            DEFAULT_SAMPLE_CAP,
         )
 
 
@@ -80,40 +80,55 @@ class TwP50AlgorithmTests(unittest.TestCase):
         self.assertAlmostEqual(cov, 0.5, places=9)
         self.assertAlmostEqual(p50, 4.0, places=12)
 
-    def test_5m_window_uses_longer_history(self) -> None:
-        now = 300_000
-        # Dominant mass at 1.0 for first 200s, then 9.0 for 100s → 5m p50=1.0
-        # 1m window is fully covered by carry of 9.0 (no in-window ticks).
-        samples = [(0, 1.0), (200_000, 9.0)]
-        p50_1m, n_1m, cov_1m = tw_p50_window(
-            samples, now_ms=now, window_ms=WINDOW_1M_MS
-        )
-        p50_5m, n_5m, cov_5m = tw_p50_window(
-            samples, now_ms=now, window_ms=WINDOW_5M_MS
-        )
-        self.assertEqual(n_1m, 0)
-        self.assertAlmostEqual(cov_1m, 1.0, places=9)
-        self.assertAlmostEqual(p50_1m, 9.0, places=12)
-        self.assertEqual(n_5m, 1)
-        self.assertAlmostEqual(cov_5m, 1.0, places=9)
-        self.assertAlmostEqual(p50_5m, 1.0, places=12)
-
-
 class TwP50ObserverTests(unittest.TestCase):
+    def test_default_deque_defers_pruning_and_matches_legacy_snapshot(self) -> None:
+        legacy = LiveTwP50Observer(
+            ["BTC"], sample_cap=128, one_minute_engine="legacy"
+        )
+        optimized = LiveTwP50Observer(["BTC"], sample_cap=128)
+        t0 = 1_725_000_000_000
+        samples = (
+            (0, 1.0, 7.0),
+            (30_000, 3.0, 5.0),
+            (90_000, 2.0, 6.0),
+            (85_000, 4.0, 8.0),
+            (300_000, 9.0, 1.0),
+        )
+        for offset, long_value, short_value in samples:
+            legacy.note_spreads("BTC", t0 + offset, long_value, short_value)
+            optimized.note_spreads("BTC", t0 + offset, long_value, short_value)
+        self.assertEqual(
+            len(optimized.snapshot_samples()[("BTC", "long")]), len(samples)
+        )
+        expected = {
+            snap.side: snap.as_row()
+            for snap in legacy.compute_snapshots(
+                now_ms=t0 + 300_001, computed_at_ms=t0
+            )
+        }
+        actual = {
+            snap.side: snap.as_row()
+            for snap in optimized.compute_snapshots(
+                now_ms=t0 + 300_001, computed_at_ms=t0
+            )
+        }
+        self.assertEqual(actual, expected)
+        self.assertEqual(len(optimized.snapshot_samples()[("BTC", "long")]), 2)
+
     def test_age_prune_keeps_carry_no_tick_files(self) -> None:
         tmp = Path(tempfile.mkdtemp())
         obs = LiveTwP50Observer(["BTC"], sample_cap=64)
         t0 = 1_725_000_000_000
-        # Spread samples across >5m so older body is pruned but carry remains.
+        # Spread samples across >1m so older body is pruned but carry remains.
         for i in range(20):
-            ts = t0 + i * 30_000  # 30s steps → 9.5 minutes span
+            ts = t0 + i * 30_000  # 30s steps across a 9.5-minute span
             obs.note_spreads("BTC", ts, 0.1 + i * 0.01, 0.2)
         snaps = obs.compute_snapshots(now_ms=t0 + 19 * 30_000, computed_at_ms=t0)
         self.assertTrue(obs.memory_bound_ok())
         long_snap = next(s for s in snaps if s.side == "long")
         self.assertEqual(long_snap.base_coin, "BTC")
-        self.assertIsNotNone(long_snap.p50_5m)
-        self.assertGreater(long_snap.n_5m, 0)
+        self.assertIsNotNone(long_snap.p50_1m)
+        self.assertGreater(long_snap.n_1m, 0)
         # No tick WAL artifacts.
         writer = TwP50JournalWriter(tmp)
         paths = writer.append_rows([long_snap.as_row()])
@@ -128,11 +143,8 @@ class TwP50ObserverTests(unittest.TestCase):
             "side",
             "ts_ms",
             "p50_1m",
-            "p50_5m",
             "n_1m",
-            "n_5m",
             "coverage_1m",
-            "coverage_5m",
             "computed_at_ms",
         ):
             self.assertIn(key, row)
