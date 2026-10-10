@@ -10,7 +10,9 @@
 |------|--------|
 | [`../architecture.md`](../architecture.md) | Топология D/M/B, журналы, гейты live send, глоссарий |
 | [`../README.md`](../README.md) | Вход: три контура и что не смешивать |
-| [`../AGENTS.md`](../AGENTS.md) | Политика агентов, live safety, что не останавливать |
+| [`../AGENTS.md`](../AGENTS.md) | Общая политика агентов и live safety |
+| [`agent-architecture.md`](agent-architecture.md) | Общая архитектура Cursor/Codex/Grok, делегирование и review |
+| [`agents/codex.md`](agents/codex.md) | Средоспецифичные правила делегирования Codex |
 | [`../roadmap.md`](../roadmap.md) | План развития: источник правды по вектору |
 | [`../NOW.md`](../NOW.md) | Снимок хоста: источник правды по текущему состоянию |
 | [`strategy-gears.md`](strategy-gears.md) | Историческая лестница гиров M до наблюдения 2.2, не текущий план |

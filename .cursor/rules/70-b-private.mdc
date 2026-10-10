@@ -1,22 +1,16 @@
 ---
-description: B-private testnet-then-live — isolate from D, never default to live send
+description: Keeps private execution isolated and live sends fail-closed
 globs: app/bot/private/**/*.py,docs/b-private-*.md
 alwaysApply: false
 ---
 
 # B-private
 
-Written unlock 2026-08-18: private channels allowed. Ladder is testnet/demo
-first, live orders only after testnet evidence and an explicit user phrase.
-
-- Own code: `app/bot/private/**`. Do not put keys or send in `app/screaner_b_o.py`.
-- Do not turn `stub_broker.py` into a live sender.
-- Paths: `/data/bbot/private/`, `/var/log/spread/bbot-private.log`, secrets
-  outside git (`/etc/spread/bbot-private.env`, mode 600).
-- Never write `/data/live`, `/data/bars`, `/data/compacted`, or D backup prefixes.
-- Testnet process must not load live keys. Default `VENUE=testnet`, live send
-  requires `VENUE=live` and `LIVE_ORDERS=1`.
-- Live risk cap ≈ 100 USD per exchange (OKX and Bybit). First live order is
-  minimum lot, `K_live=1`.
-- Host Ops agent is not created on testnet; it opens at the first live order.
-- No profitability claims. No secrets in git, chat, or logs.
+- Private venue APIs and credentials stay within `app/bot/private/**` and the approved private configuration path; never place them in the collector or its logs.
+- Keep stub and private broker paths distinct. A stub setting or `would_send` record must not become an order transport by implication.
+- Do not assume data roots, unit names, coin pools, deployment status, or implementation details from an old prompt. Confirm the current code and `architecture.md`.
+- Preserve fail-closed behavior. Live send requires all code/config gates: `BBOT_BROKER=private_live`, `VENUE=live`, and `LIVE_ORDERS=1`. These flags do not grant user permission.
+- Require explicit user authorization to launch a new live campaign or materially change its scope, deploy/restart it, change configuration/risk limits, or alter the live execution contract. Individual orders may execute autonomously within the approved campaign under its policy and risk gates; do not require per-order authorization.
+- Prefer testnet/demo when available and compatible with the campaign. Honor a documented historical exception only for its named campaign and exact approved scope; it does not authorize a new campaign or expansion.
+- Keep credentials out of Git, docs, logs, journals, and chat. Keep B paths isolated from D data and services.
+- Before a permitted VPS change, follow the fresh-state, position/pending, canary, and rollback checks in [`../../docs/agent-architecture.md`](../../docs/agent-architecture.md).
