@@ -76,6 +76,24 @@ class HotAddEnabledTests(unittest.TestCase):
 
 
 class TaskSupervisorTests(unittest.IsolatedAsyncioTestCase):
+    async def test_late_completed_failure_is_observed_by_wait(self) -> None:
+        supervisor = TaskSupervisor()
+        cancelled: dict[str, bool] = {}
+
+        async def fail() -> None:
+            raise RuntimeError("late failure")
+
+        supervisor.add(_hang_until_cancelled("sibling", cancelled), name="sibling")
+        task = supervisor.add(fail(), name="late-failure")
+        await asyncio.sleep(0.01)
+        self.assertTrue(task.done())
+        with self.assertRaisesRegex(RuntimeError, "late failure"):
+            await asyncio.wait_for(supervisor.wait(), timeout=0.2)
+        self.assertTrue(supervisor.closed)
+        await supervisor.drain()
+        self.assertTrue(cancelled.get("sibling"))
+        self.assertEqual(len(supervisor), 0)
+
     async def test_late_add_is_awaited_and_cancelled(self) -> None:
         supervisor = TaskSupervisor()
         cancelled: dict[str, bool] = {}

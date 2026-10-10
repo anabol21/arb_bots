@@ -191,6 +191,8 @@ class ParsedStreamEvent:
     dedupe_key: Optional[str] = None
     req_id: Optional[str] = None
     ack_ok: Optional[bool] = None
+    subscription_channel: Optional[str] = None
+    subscription_symbol: Optional[str] = None
 
 
 @dataclass
@@ -283,6 +285,11 @@ class PrivateStreamRuntime:
     _fingerprint_by_attempt: dict[str, str] = field(default_factory=dict)
     # OKX WS Place/Cancel: positive instIdCode (from instruments). Bybit unused.
     okx_inst_id_code: Optional[int] = None
+    # OKX additions require both per-instrument channel ACKs in this generation.
+    _symbol_subscription_acks: dict[tuple[str, str], tuple[int, bool]] = field(default_factory=dict)
+    _okx_subscription_requests: dict[str, tuple[int, frozenset[tuple[str, str]]]] = field(default_factory=dict)
+    _okx_global_subscription_requests: set[str] = field(default_factory=set)
+    _symbol_subscription_rejected: set[tuple[str, str, int, str]] = field(default_factory=set)
     # Keepalive may drain trade noise (pong); non-noise frames are stashed so
     # place/ack recv cannot lose them to the supervisor thread.
     _trade_inbound_stash: list[str] = field(default_factory=list)
@@ -423,6 +430,9 @@ class PrivateStreamRuntime:
         self._sends_blocked = True
         self._last_seq = None
         self._trade_inbound_stash.clear()
+        # ACKs from the prior socket generation can never make a new pool ready.
+        self._symbol_subscription_acks.clear()
+        self._symbol_subscription_rejected.clear()
         self._journal_stream_recon(
             sequence_state=SequenceHealth.RESEED_REQUIRED,
             observation_source="private_ws",
@@ -444,7 +454,29 @@ class PrivateStreamRuntime:
             # Bybit private topics are account-wide; coin pool is client-side.
             return build_bybit_private_subscribe()
         if self.exchange == "okx":
-            return build_okx_private_subscribe(symbols=self.subscribed_natives)
+            self._okx_subscription_requests = {
+                req: value
+                for req, value in self._okx_subscription_requests.items()
+                if value[0] >= self.reconnect_generation - 1
+            }
+            self._okx_global_subscription_requests.intersection_update(
+                self._okx_subscription_requests
+            )
+            req_id = new_okx_ws_id(prefix="sub")
+            keys = frozenset(
+                (symbol, channel)
+                for symbol in self.subscribed_natives
+                for channel in ("orders", "positions")
+            )
+            self._okx_subscription_requests[req_id] = (
+                self.reconnect_generation,
+                keys,
+            )
+            self._okx_global_subscription_requests.add(req_id)
+            return build_okx_private_subscribe(
+                symbols=self.subscribed_natives,
+                req_id=req_id,
+            )
         raise ValueError(f"unsupported exchange {self.exchange!r}")
 
     def build_heartbeat(self) -> WsOutboundMessage:
@@ -477,6 +509,12 @@ class PrivateStreamRuntime:
         if not self.authenticated:
             raise RuntimeError("subscribe requires successful auth")
         msg = self.build_subscribe_message()
+        if self.exchange == "okx":
+            self._symbol_subscription_acks = {
+                (symbol, channel): (self.reconnect_generation, False)
+                for symbol in self.subscribed_natives
+                for channel in ("orders", "positions")
+            }
         send_mono = time.monotonic_ns()
         self.private_socket.send_text(msg.text)
         self.subscription_readiness = SubscriptionReadiness.NOT_READY
@@ -498,6 +536,49 @@ class PrivateStreamRuntime:
         _safe_log("subscribe_sent", exchange=self.exchange, gen=self.reconnect_generation)
         self.publish_private_leg_state()
         return ev
+
+    def add_okx_subscription(self, symbol: str) -> None:
+        """Subscribe an added OKX instrument on the existing private socket."""
+        if self.exchange != "okx":
+            raise ValueError("instrument-scoped private subscriptions are OKX only")
+        native = str(symbol).strip()
+        if not native:
+            raise ValueError("OKX subscription symbol is empty")
+        if native in self.subscribed_natives:
+            return
+        if not self.authenticated or self.private_socket is None:
+            raise RuntimeError("OKX private session is not authenticated")
+        req_id = new_okx_ws_id(prefix="sub")
+        msg = build_okx_private_subscribe(symbol=native, req_id=req_id)
+        keys = frozenset((native, channel) for channel in ("orders", "positions"))
+        self._okx_subscription_requests = {
+            req: value
+            for req, value in self._okx_subscription_requests.items()
+            if value[0] >= self.reconnect_generation - 1
+        }
+        self._okx_global_subscription_requests.intersection_update(
+            self._okx_subscription_requests
+        )
+        self._okx_subscription_requests[req_id] = (self.reconnect_generation, keys)
+        for key in keys:
+            self._symbol_subscription_acks[key] = (self.reconnect_generation, False)
+        try:
+            self.private_socket.send_text(msg.text)
+        except Exception:
+            self._okx_subscription_requests.pop(req_id, None)
+            for key in keys:
+                self._symbol_subscription_acks.pop(key, None)
+            raise
+        self.subscribe_symbols = (*self.subscribed_natives, native)
+
+    def okx_symbol_ready(self, symbol: str) -> bool:
+        if self.exchange != "okx":
+            return False
+        return all(
+            self._symbol_subscription_acks.get((str(symbol), channel))
+            == (self.reconnect_generation, True)
+            for channel in ("orders", "positions")
+        )
 
     def send_heartbeat(self) -> None:
         assert self.private_socket is not None
@@ -602,7 +683,113 @@ class PrivateStreamRuntime:
             self.authenticated = False
             self.journal_auth(success=False, error_code="auth_failed")
         elif parsed.kind == "sub_ack":
-            self._on_subscribe_ack(ok=bool(parsed.ack_ok))
+            request = self._okx_subscription_requests.get(parsed.req_id or "")
+            response_key = (
+                (parsed.subscription_symbol, parsed.subscription_channel)
+                if parsed.subscription_symbol and parsed.subscription_channel
+                else None
+            )
+            request_matches = bool(
+                request is not None
+                and request[0] == self.reconnect_generation
+                and (
+                    response_key in request[1]
+                    or (
+                        response_key is None
+                        and not parsed.ack_ok
+                    )
+                )
+            )
+            ack_trace_reason = "not_okx"
+            if self.exchange == "okx":
+                if parsed.req_id is None:
+                    ack_trace_reason = "missing_request_id"
+                elif request is None:
+                    ack_trace_reason = "unknown_request_id"
+                elif request[0] != self.reconnect_generation:
+                    ack_trace_reason = "stale_request_generation"
+                elif response_key is None:
+                    ack_trace_reason = (
+                        "matched_request_nack_without_arg"
+                        if not parsed.ack_ok
+                        else "missing_symbol_channel"
+                    )
+                elif response_key not in request[1]:
+                    ack_trace_reason = "unexpected_symbol_channel"
+                elif response_key not in self._symbol_subscription_acks:
+                    ack_trace_reason = "symbol_channel_not_registered"
+                elif not parsed.ack_ok:
+                    ack_trace_reason = "matched_nack"
+                elif (
+                    *response_key,
+                    self.reconnect_generation,
+                    parsed.req_id,
+                ) in self._symbol_subscription_rejected:
+                    ack_trace_reason = "positive_after_nack_ignored"
+                else:
+                    ack_trace_reason = "matched_ack"
+            accept_global = self.exchange != "okx" or (
+                not self._okx_subscription_requests and not parsed.req_id
+            ) or (
+                parsed.req_id in self._okx_global_subscription_requests
+                and request_matches
+            )
+            if accept_global:
+                self._on_subscribe_ack(ok=bool(parsed.ack_ok))
+            if (
+                self.exchange == "okx"
+                and parsed.subscription_channel
+                and parsed.subscription_symbol
+            ):
+                key = (parsed.subscription_symbol, parsed.subscription_channel)
+                rejected_key = (*key, self.reconnect_generation, parsed.req_id or "")
+                if (
+                    key in self._symbol_subscription_acks
+                    and request is not None
+                    and request[0] == self.reconnect_generation
+                    and key in request[1]
+                    and rejected_key not in self._symbol_subscription_rejected
+                ):
+                    if not parsed.ack_ok:
+                        self._symbol_subscription_rejected.add(rejected_key)
+                    self._symbol_subscription_acks[key] = (
+                        self.reconnect_generation,
+                        bool(parsed.ack_ok),
+                    )
+            elif (
+                self.exchange == "okx"
+                and parsed.kind == "sub_ack"
+                and parsed.req_id
+                and not parsed.ack_ok
+            ):
+                if request is not None:
+                    generation, keys = request
+                    if generation == self.reconnect_generation:
+                        for key in keys:
+                            self._symbol_subscription_rejected.add(
+                                (*key, generation, parsed.req_id)
+                            )
+                            self._symbol_subscription_acks[key] = (
+                                generation,
+                                False,
+                            )
+            if self.exchange == "okx" and parsed.kind == "sub_ack":
+                accepted_keys = sum(
+                    generation == self.reconnect_generation and ok
+                    for generation, ok in self._symbol_subscription_acks.values()
+                )
+                _safe_log(
+                    "instrument_sub_ack",
+                    exchange=self.exchange,
+                    generation=self.reconnect_generation,
+                    req_id=parsed.req_id or "-",
+                    channel=parsed.subscription_channel or "-",
+                    inst_id=parsed.subscription_symbol or "-",
+                    ack_ok=bool(parsed.ack_ok),
+                    correlation=ack_trace_reason,
+                    expected_keys=len(self._symbol_subscription_acks),
+                    accepted_keys=accepted_keys,
+                )
         elif parsed.kind == "gap":
             self._on_sequence_gap()
         elif parsed.kind == "duplicate":
@@ -735,18 +922,24 @@ class PrivateStreamRuntime:
         return row
 
     def run_rest_reseed(self) -> dict[str, Any]:
+        """Retry each native up to three times; persistent failure blocks the pool."""
         if self.rest_reseed is None:
             raise RuntimeError("REST reseed port unbound")
         last: Optional[RestReseedResult] = None
         natives = self.subscribed_natives or (self.symbol_alias,)
         for native in natives:
-            last = self.rest_reseed.reseed(
-                venue=self.exchange,
-                environment=self.environment,
-                reconnect_generation=self.reconnect_generation,
-                symbol_alias=native,
-            )
-            if last is None or not last.matched:
+            for attempt in range(3):
+                last = self.rest_reseed.reseed(
+                    venue=self.exchange,
+                    environment=self.environment,
+                    reconnect_generation=self.reconnect_generation,
+                    symbol_alias=native,
+                )
+                if last is not None and last.matched and not last.inconclusive:
+                    break
+                if attempt < 2:
+                    time.sleep(1.0)
+            if last is None or not last.matched or last.inconclusive:
                 return self.confirm_rest_reseed(
                     last if last is not None else RestReseedResult(matched=False, inconclusive=True)
                 )
@@ -1177,18 +1370,36 @@ class PrivateStreamRuntime:
             )
         if event == "subscribe":
             ok = str(data.get("code", "0")) == "0"
-            return ParsedStreamEvent(kind="sub_ack", ack_ok=ok)
+            arg = data.get("arg") if isinstance(data.get("arg"), Mapping) else {}
+            return ParsedStreamEvent(
+                kind="sub_ack",
+                ack_ok=ok,
+                req_id=str(data.get("id") or "") or None,
+                subscription_channel=str(arg.get("channel") or "") or None,
+                subscription_symbol=str(arg.get("instId") or "") or None,
+            )
         if event == "error":
             # 64003 / fee-tier is a channel subscribe nack (often ``arg: null``).
             # Never treat that as auth_reject — that un-auths the warm session
             # and starts the ~10s private login reconnect storm.
             if is_okx_fee_tier_channel_error(data):
-                return ParsedStreamEvent(kind="sub_ack", ack_ok=False)
+                return ParsedStreamEvent(
+                    kind="sub_ack",
+                    ack_ok=False,
+                    req_id=str(data.get("id") or "") or None,
+                )
             # Distinguish auth vs sub via arg channel when present.
             arg = data.get("arg") if isinstance(data.get("arg"), Mapping) else {}
-            if not arg:
+            req_id = str(data.get("id") or "") or None
+            if not arg and req_id not in self._okx_subscription_requests:
                 return ParsedStreamEvent(kind="auth_reject", ack_ok=False)
-            return ParsedStreamEvent(kind="sub_ack", ack_ok=False)
+            return ParsedStreamEvent(
+                kind="sub_ack",
+                ack_ok=False,
+                req_id=req_id,
+                subscription_channel=str(arg.get("channel") or "") or None,
+                subscription_symbol=str(arg.get("instId") or "") or None,
+            )
         arg = data.get("arg") if isinstance(data.get("arg"), Mapping) else {}
         channel = str(arg.get("channel") or "")
         if channel in {"orders", "positions", "fills"}:

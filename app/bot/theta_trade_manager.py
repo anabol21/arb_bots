@@ -51,7 +51,7 @@ def compute_spreads_pct(okx: Mapping[str, Any], bybit: Mapping[str, Any]) -> tup
     spread_short = (okx["bid_price"] - bybit["ask_price"]) * 100.0 / okx["bid_price"]
     return float(spread_long), float(spread_short)
 
-SCHEMA_VERSION = "bbot.theta_trade.v1"
+SCHEMA_VERSION = "bbot.theta_trade.v2"
 DEFAULT_THETA_THR = 0.2
 DEFAULT_FILL_DELAY_MS = 70
 DEFAULT_SLOT_K = 1
@@ -1063,6 +1063,7 @@ class ThetaTradeManager:
                 "theta live send requires place_fn and meta_fn (fail closed)"
             )
         self.slot = SlotState(k=int(self.config.slot_k))
+        self._skip_log_budget = 0
         position, pending, coin, side = restore_synthetic_slot(
             self.data_root, notional_usdt=float(self.config.notional_usdt)
         )
@@ -1073,7 +1074,13 @@ class ThetaTradeManager:
                 "theta_trade_slot_restored | pending=%s | coin=%s | side=%s"
                 % (str(pending).lower(), coin, side)
             )
-        self._skip_log_budget = 0
+
+    def _fee_round_trip_pp(self) -> float:
+        """Same round-trip fee ``potential_pp`` subtracts (frozen default 0.30)."""
+        params = self.config.policy_params
+        if params is None:
+            return float(DEFAULT_OBSERVE_PARAMS.fee_round_trip_pp)
+        return float(params.fee_round_trip_pp)
 
     def _fee_round_trip_pp(self) -> float:
         """Same round-trip fee ``potential_pp`` subtracts (frozen default 0.30)."""
@@ -1120,10 +1127,8 @@ class ThetaTradeManager:
         opp = by_key.get((coin, opposite_side(side)))
         return {
             "theta_1m": own.theta_1m if own else None,
-            "theta_5m": own.theta_5m if own else None,
             "floor": own.floor_tf_select_a25 if own else None,
             "p50_1m": own.p50_1m if own else None,
-            "p50_5m": own.p50_5m if own else None,
             "opposite_theta_1m": opp.theta_1m if opp else None,
         }
 
@@ -1186,10 +1191,8 @@ class ThetaTradeManager:
             "theta_thr": float(self.config.theta_thr),
             "slot_k": int(self.config.slot_k),
             "theta_1m": metrics["theta_1m"],
-            "theta_5m": metrics["theta_5m"],
             "floor": metrics["floor"],
             "p50_1m": metrics["p50_1m"],
-            "p50_5m": metrics["p50_5m"],
             "opposite_theta_1m": metrics["opposite_theta_1m"],
             "leg_buy_ex": signal_size.get("leg_buy_ex"),
             "leg_sell_ex": signal_size.get("leg_sell_ex"),
@@ -1500,7 +1503,6 @@ class ThetaTradeManager:
                 "spread_fill": row.get("spread_fill"),
                 "slip_spread": row.get("slip_spread"),
                 "theta_1m": row.get("theta_1m"),
-                "theta_5m": row.get("theta_5m"),
                 "floor": row.get("floor"),
                 "p50_1m": row.get("p50_1m"),
                 "signal_size_ok": row.get("signal_size_ok"),
@@ -2332,7 +2334,6 @@ class ThetaTradeManager:
                 "spread_fill": row.get("spread_fill"),
                 "slip_spread": row.get("slip_spread"),
                 "theta_1m": row.get("theta_1m"),
-                "theta_5m": row.get("theta_5m"),
                 "floor": row.get("floor"),
                 "p50_1m": row.get("p50_1m"),
                 "signal_size_ok": row.get("signal_size_ok"),

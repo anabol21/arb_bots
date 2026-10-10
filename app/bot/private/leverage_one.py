@@ -15,6 +15,7 @@ import urllib.request
 from dataclasses import dataclass
 from decimal import Decimal
 from typing import Any, Callable, Mapping, Optional, Sequence
+from urllib.parse import urlencode
 from urllib.request import Request
 
 from app.bot.private.order_sign import LiveCredentials
@@ -33,6 +34,14 @@ LEVER_ONE = "1"
 _BYBIT_UNCHANGED = 110043
 
 PostFn = Callable[[str, Mapping[str, str], str], tuple[int, Mapping[str, Any]]]
+GetFn = Callable[..., Mapping[str, Any]]
+
+OKX_LEVERAGE_INFO_PATH = "/api/v5/account/leverage-info"
+BYBIT_POSITION_PATH = "/v5/position/list"
+BYBIT_OPEN_ORDERS_PATH = "/v5/order/realtime"
+OKX_POSITION_PATH = "/api/v5/account/positions"
+OKX_OPEN_ORDERS_PATH = "/api/v5/trade/orders-pending"
+_MAX_PREFLIGHT_PAGES = 100
 
 
 @dataclass(frozen=True)
@@ -236,6 +245,258 @@ def set_leverage_one(
                 confirmed=confirmed,
             )
     return confirmed
+
+
+def set_and_verify_leverage_one(
+    target: LeverageTarget,
+    *,
+    okx_credentials: LiveCredentials,
+    bybit_credentials: LiveCredentials,
+    endpoints: VenueEndpoints,
+    post_fn: Optional[PostFn] = None,
+    get_fn: Optional[GetFn] = None,
+) -> bool:
+    """Require a flat instrument, set 1x, then verify both venue readbacks."""
+    getter = get_fn or _http_get_json
+    try:
+        _preflight_flat(
+            target,
+            okx_credentials=okx_credentials,
+            bybit_credentials=bybit_credentials,
+            endpoints=endpoints,
+            get_fn=getter,
+        )
+    except RuntimeError as exc:
+        if str(exc) == "leverage_preflight_not_flat":
+            raise
+        raise RuntimeError("leverage_preflight_failed") from exc
+    except Exception as exc:  # noqa: BLE001 — fail closed before setter
+        raise RuntimeError("leverage_preflight_failed") from exc
+    confirmed = set_leverage_one(
+        [target],
+        okx_credentials=okx_credentials,
+        bybit_credentials=bybit_credentials,
+        endpoints=endpoints,
+        post_fn=post_fn,
+    )
+    if (
+        confirmed.get(("okx", target.okx_symbol)) != LEVER_ONE
+        or confirmed.get(("bybit", target.bybit_symbol)) != LEVER_ONE
+    ):
+        raise RuntimeError("leverage_set_unconfirmed")
+
+    okx_path = (
+        f"{OKX_LEVERAGE_INFO_PATH}?"
+        f"{urlencode({'instId': target.okx_symbol, 'mgnMode': 'cross'})}"
+    )
+    from app.bot.private.rest_readonly import build_okx_readonly_headers
+
+    okx_headers = build_okx_readonly_headers(
+        api_key=okx_credentials.api_key,
+        api_secret=okx_credentials.api_secret,
+        passphrase=okx_credentials.passphrase or "",
+        path=okx_path,
+        simulated_trading=endpoints.okx_simulated_trading,
+    )
+    okx_data = getter(
+        f"{endpoints.okx_rest}{okx_path}", okx_headers, timeout_sec=15.0
+    )
+    if not _okx_readback_is_one(okx_data, target.okx_symbol):
+        raise RuntimeError("leverage_readback_unconfirmed")
+
+    query = (
+        f"category=linear&symbol={target.bybit_symbol}"
+        "&settleCoin=USDT&limit=200"
+    )
+    try:
+        bybit_data = _bybit_get_all_pages(
+            credentials=bybit_credentials,
+            base=endpoints.bybit_rest,
+            path=BYBIT_POSITION_PATH,
+            query=query,
+            get_fn=getter,
+        )
+    except RuntimeError as exc:
+        raise RuntimeError("leverage_readback_failed") from exc
+    if not _bybit_readback_is_one(bybit_data, target.bybit_symbol):
+        raise RuntimeError("leverage_readback_unconfirmed")
+    return True
+
+
+def _preflight_flat(
+    target: LeverageTarget,
+    *,
+    okx_credentials: LiveCredentials,
+    bybit_credentials: LiveCredentials,
+    endpoints: VenueEndpoints,
+    get_fn: GetFn,
+) -> None:
+    from app.bot.private.ws_w4_baseline import (
+        _BYBIT_OPEN,
+        _BYBIT_POS,
+        _OKX_OPEN,
+        _OKX_POS,
+        _bybit_open_orders_flat,
+        _bybit_position_flat,
+        _bybit_signed_get,
+        _okx_open_orders_flat,
+        _okx_position_flat,
+        _okx_signed_get,
+    )
+
+    bybit_position_query = (
+        f"category=linear&symbol={target.bybit_symbol}"
+        "&settleCoin=USDT&limit=200"
+    )
+    bybit_positions = _bybit_get_all_pages(
+        credentials=bybit_credentials,
+        base=endpoints.bybit_rest,
+        path=_BYBIT_POS,
+        query=bybit_position_query,
+        get_fn=get_fn,
+    )
+    if not _bybit_position_flat(bybit_positions, target.bybit_symbol):
+        raise RuntimeError("leverage_preflight_not_flat")
+
+    bybit_orders = _bybit_get_all_pages(
+        credentials=bybit_credentials,
+        base=endpoints.bybit_rest,
+        path=_BYBIT_OPEN,
+        query=(
+            f"category=linear&symbol={target.bybit_symbol}"
+            "&openOnly=0&limit=50"
+        ),
+        get_fn=get_fn,
+    )
+    if not _bybit_open_orders_flat(bybit_orders, target.bybit_symbol):
+        raise RuntimeError("leverage_preflight_not_flat")
+
+    okx_positions = _okx_signed_get(
+        credentials=okx_credentials,
+        base=endpoints.okx_rest,
+        path_with_query=(
+            f"{_OKX_POS}?{urlencode({'instId': target.okx_symbol, 'instType': 'SWAP'})}"
+        ),
+        http_get_json=get_fn,
+    )
+    if not _okx_position_flat(okx_positions, target.okx_symbol):
+        raise RuntimeError("leverage_preflight_not_flat")
+    okx_orders = _okx_signed_get(
+        credentials=okx_credentials,
+        base=endpoints.okx_rest,
+        path_with_query=(
+            f"{_OKX_OPEN}?{urlencode({'instId': target.okx_symbol, 'instType': 'SWAP'})}"
+        ),
+        http_get_json=get_fn,
+    )
+    if not _okx_open_orders_flat(okx_orders, target.okx_symbol):
+        raise RuntimeError("leverage_preflight_not_flat")
+
+
+def _bybit_get_all_pages(
+    *,
+    credentials: LiveCredentials,
+    base: str,
+    path: str,
+    query: str,
+    get_fn: GetFn,
+) -> Mapping[str, Any]:
+    from app.bot.private.ws_w4_baseline import _bybit_signed_get
+
+    cursor = ""
+    seen: set[str] = set()
+    rows: list[Any] = []
+    for _ in range(_MAX_PREFLIGHT_PAGES):
+        page_query = query if not cursor else f"{query}&{urlencode({'cursor': cursor})}"
+        page = _bybit_signed_get(
+            credentials=credentials,
+            base=base,
+            path=path,
+            query=page_query,
+            http_get_json=get_fn,
+        )
+        if page.get("retCode") not in (0, "0"):
+            raise RuntimeError("bybit_preflight_get_rejected")
+        result = page.get("result")
+        if not isinstance(result, Mapping) or not isinstance(
+            result.get("list"), list
+        ):
+            raise RuntimeError("leverage_preflight_failed")
+        rows.extend(result["list"])
+        next_cursor = str(result.get("nextPageCursor") or "")
+        if not next_cursor:
+            return {"retCode": 0, "result": {"list": rows}}
+        if next_cursor in seen:
+            raise RuntimeError("leverage_preflight_failed")
+        seen.add(next_cursor)
+        cursor = next_cursor
+    raise RuntimeError("leverage_preflight_failed")
+
+
+def _http_get_json(
+    url: str, headers: Mapping[str, str], *, timeout_sec: float
+) -> Mapping[str, Any]:
+    request = Request(url, headers=dict(headers), method="GET")
+    try:
+        with urllib.request.urlopen(request, timeout=timeout_sec) as response:
+            data = json.loads(response.read().decode("utf-8"))
+    except (urllib.error.URLError, TimeoutError, OSError, json.JSONDecodeError) as exc:
+        raise RuntimeError("leverage_readback_failed") from exc
+    if not isinstance(data, Mapping):
+        raise RuntimeError("leverage_readback_failed")
+    return data
+
+
+def _okx_readback_is_one(data: Mapping[str, Any], symbol: str) -> bool:
+    rows = data.get("data")
+    if str(data.get("code")) != "0" or not isinstance(rows, list):
+        return False
+    matching = [
+        row for row in rows
+        if isinstance(row, Mapping) and str(row.get("instId") or "") == symbol
+    ]
+    return bool(matching) and all(
+        _is_one(row.get("lever")) and str(row.get("mgnMode") or "") == "cross"
+        for row in matching
+    )
+
+
+def _bybit_readback_is_one(data: Mapping[str, Any], symbol: str) -> bool:
+    if str(data.get("retCode")) != "0":
+        return False
+    result = data.get("result")
+    rows = result.get("list") if isinstance(result, Mapping) else None
+    if not isinstance(rows, list):
+        return False
+    matching = [
+        row for row in rows
+        if isinstance(row, Mapping) and str(row.get("symbol") or "") == symbol
+    ]
+    # Bybit may append an empty cursor placeholder for the same symbol; it can
+    # carry an old leverage value but has no position status or update time.
+    current = [
+        row for row in matching
+        if row.get("positionStatus") not in (None, "")
+        and row.get("updatedTime") not in (None, "")
+    ]
+    if not current:
+        return False
+    for row in current:
+        leverage_values = [
+            row.get(field)
+            for field in ("leverage", "buyLeverage", "sellLeverage")
+            if row.get(field) not in (None, "")
+        ]
+        if not leverage_values or any(not _is_one(value) for value in leverage_values):
+            return False
+        try:
+            if Decimal(str(row.get("size") or "0")) != 0:
+                return False
+        except Exception:  # noqa: BLE001 — venue response boundary
+            return False
+        if row.get("positionIdx") not in (None, "", 0, "0", 1, "1", 2, "2"):
+            return False
+    return True
 
 
 def _confirm_okx(

@@ -266,6 +266,10 @@ class LoopOwnedSocket:
         except queue.Empty as exc:
             raise TimeoutError("loop-owned recv timeout") from exc
 
+    def activate_handshake(self) -> None:
+        """Switch the owner pump to parsed frames and drain queued private ACKs."""
+        self._owner.activate_handshake(self)
+
     def push_inbound(self, text: str) -> None:
         """Test / listen helper: enqueue a venue→client frame."""
         if not isinstance(text, str):
@@ -456,6 +460,41 @@ class PrivateWarmLoop:
         self._slots[key] = slot
         asyncio.run_coroutine_threadsafe(self._listen_slot(slot), self._loop)
         return sock
+
+    def activate_handshake(self, sock: LoopOwnedSocket) -> None:
+        """Atomically hand queued private frames from handshake recv to the owner pump."""
+        loop = self._loop
+        if loop is None or not loop.is_running():
+            raise RuntimeError("private warm loop is not running")
+
+        async def _activate() -> None:
+            # No await between switching modes and draining: _pump cannot race
+            # this queue handoff on the same asyncio loop.
+            sock.handshake_done = True
+            if sock.channel != "private" or sock.runtime is None:
+                return
+            from app.bot.private.ws_private import is_ws_noise_frame
+
+            while True:
+                try:
+                    text = sock._inbound.get_nowait()
+                except queue.Empty:
+                    return
+                if not is_ws_noise_frame(sock.exchange, text):
+                    sock.runtime.handle_inbound_text(text)
+
+        try:
+            running = asyncio.get_running_loop()
+        except RuntimeError:
+            running = None
+        if running is loop:
+            raise RuntimeError("private handshake activation cannot block the owner loop")
+        fut = asyncio.run_coroutine_threadsafe(_activate(), loop)
+        try:
+            fut.result(timeout=_SEND_TIMEOUT_SEC)
+        except concurrent.futures.TimeoutError as exc:
+            fut.cancel()
+            raise TimeoutError("private handshake activation timeout") from exc
 
     def slot(self, exchange: str, channel: str) -> Optional[SocketSlot]:
         return self._slots.get(f"{str(exchange).lower()}:{str(channel).lower()}")

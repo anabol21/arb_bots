@@ -39,6 +39,15 @@ HOT_ADD is in this tree: `app/discovery/`, `docs/hot-add-new-coins.md`, and `SPR
 | 2 Model | `model.ipynb`, `model_gear2.ipynb`, `docs/strategy-gears.md`, `research/gear22_backtest/` | Historical simulation only. No live orders. |
 | 3 Glue | `docs/b-v0-block-diagram.md`, `app/bot/**`, `app/policy/**`, `app/bot/private/**` | Live stub + B-private send. Isolated from D trees. |
 
+Gear 2.3 (opt-in via `BBOT_HOT_ADD=1`) reuses the Gear 2.2 process and the
+would-send cumulative coin snapshot. Patch A adds public book tasks and watcher
+state. Patch B updates the existing Bybit private allowlist and sends
+instrument-scoped OKX orders/positions subscriptions through the current
+private-session owner loop. A new entry requires public/private readiness,
+warm observers, valid metadata, and prep-confirmed 1x. See
+`docs/gear23-dynamic-pool.md` for the readiness gates and bounded A/B validation
+records. The Gear 2.2 process/service is unchanged when the flag is unset.
+
 Portable policy (pure function, no I/O): `app/policy/trade_manager.py`, `app/policy/gear2_market_manager.py`, `app/policy/features.py`. Model notebook still owns its own VARIATION/HYPER copy.
 
 ### Processes found in `deploy/systemd/` (templates in git)
@@ -71,8 +80,16 @@ Oneshot + timer (B, isolated prefixes):
 |---|---|---|
 | `spread-bbot-backup-transfer.service` + `.timer` | `python -m app.bot.backup` | `{BBOT_DATA_ROOT}/journal` → rclone `spread-bbot`. |
 | `spread-bbot-gear2-backup-transfer.service` + `.timer` | `python -m app.bot.backup` | same module, prefix `spread-bbot-gear2`. |
+| `spread-bbot-gear23-metrics-compact.service` + `.timer` | shared `compact_metrics_jsonl_to_parquet.py` | Gear 2.3 `theta`, `tw_p50`, `floor`, and `theta_trades` closed UTC-day JSONL → Parquet; keeps source JSONL. |
 
 No backup units in this tree for `/data/bbot-canary-wal-eden` or `/data/bbot-gear22-live-canary`.
+
+The Gear 2.3 live canary is launched as a standalone `python -m app.bot.runtime`
+child by its guarded `/tmp/gear23_launch_*.py` launcher, not by systemd. Its
+daily compaction timer is separate from the trading process and is scoped to
+that run's `data/` root; it excludes the sibling `private/` journal. It uses
+the VPS-installed theta-k1 compactor script and retains JSONL inputs while
+writing Parquet, so failed or malformed records remain available for review.
 
 ### Documented on VPS, **not** in `deploy/systemd/` this rev
 
@@ -207,6 +224,9 @@ flowchart TB
   profile -->|gear1 / signal_test| tickDecide["policy.decide"]
   profile -->|gear2_would_send / canary_wal_eden| mktDecide["decide_market_tick"]
   profile -->|gear22_would_send / gear22_live_canary| observers["floor + tw_p50 + theta ~1Hz"]
+  observers -->|opt-in gear23| pool["cumulative delta CSV → public OKX + Bybit feeds"]
+  pool --> privpool["existing private session: Bybit allowlist + OKX orders/positions ACKs"]
+  privpool -->|metadata + warm + fresh public/private + confirmed 1x| observers
   observers --> thetaDec["ThetaTradeManager"]
   tickDecide --> place
   mktDecide --> place
@@ -330,6 +350,8 @@ Local lean only: `SPREAD_LEAN_PARQUET_ROOT`, `SPREAD_LEAN_BARS_ROOT`, `SPREAD_LE
 | `BBOT_CANARY_MAX_CYCLES`, `BBOT_CANARY_OPEN_WINDOW_HOURS`, `BBOT_CANARY_RESUME_MANIFEST` | terminal-only cycle cap (`0` unlimited), natural-close open window, explicit strict resume manifest |
 | `BBOT_THETA_OPEN`, `BBOT_P50_OPEN`, `BBOT_MIN_PROFIT_PP`, `BBOT_MIN_THETA_CLOSE`, `BBOT_FEE_RT_PP`, `BBOT_FILL_DELAY_MS`, `BBOT_SLOT_K`, `BBOT_THETA_THR` | frozen-knob overlays |
 | `BBOT_FLOOR_WATCH`, `BBOT_TW_P50_WATCH`, `BBOT_THETA_WATCH`, `BBOT_FLOOR_WARM`, `BBOT_FLOOR_BAR_SAMPLE_CAP` | observers |
+| `BBOT_HOT_ADD`, `BBOT_HOT_ADD_DELTA`, `BBOT_HOT_ADD_MAX_EXTRA`, `BBOT_HOT_ADD_POLL_SEC`, `BBOT_HOT_ADD_WARM`, `BBOT_HOT_ADD_HISTORY_ROOT` | opt-in Gear 2.3 cumulative pool; private additions reuse the active owner session and entries require every readiness gate |
+| `BBOT_HOT_ADD_SET_LEVERAGE` | default-off Gear 2.3 private-extra setup; a supervised off-loop task requires flat positions/no open orders, sets only 1x, and requires matching OKX and Bybit readbacks before admission |
 | `BBOT_CHRONOMETRY`, `BBOT_L1_RING` | live canary instrumentation |
 | `BBOT_PRIVATE_DATA_ROOT`, `BBOT_PRIVATE_LOG_PATH`, `BBOT_PRIVATE_ENV_FILE` | private journal / secret **path** |
 | `BBOT_PRIVATE_SEND_PATH`, `BBOT_PRIVATE_W6`, `W6_DUAL_LEG`, `BBOT_PRIVATE_W4`/`W4_POST_ONLY`, `BBOT_PRIVATE_W5`/`W5_MARKET`, `BBOT_PRIVATE_W7`/`W7_PARALLEL_DUAL_LEG` | send-path / experiment flags |
@@ -397,6 +419,8 @@ The terminal live canary also writes `{root}/canary_state.json` as an atomic loc
 ### B-private
 
 Default `BBOT_PRIVATE_DATA_ROOT=/data/bbot/private` (or `<repo>/output/bbot/private` if default not writable).
+
+Private REST reseed retries each subscribed native up to three times, with a one-second wait after an inconclusive attempt. A persistent failure keeps reconciliation blocked and aborts the remaining native pool; a matched native proceeds to the next one.
 
 | Path | Schema |
 |---|---|

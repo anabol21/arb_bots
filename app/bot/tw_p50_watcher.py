@@ -1,9 +1,9 @@
 """Live rolling time-weighted p50 watcher for BotRuntime (public books only).
 
 Per ``(base_coin, side)`` keeps an in-memory deque of ``(ts_ms, spread)`` for
-the last ~5 minutes (plus one carry-in sample). Every ~1s an asyncio task
-computes duration-weighted median (TW p50) over 1m and 5m windows and journals
-metric rows — never raw ticks.
+the last minute plus one carry-in sample. Every ~1s an asyncio task computes
+the duration-weighted one-minute median (TW p50) and journals metric rows —
+never raw ticks.
 
 No private broker imports. Hot path: cheap append + age prune only.
 Compute + JSONL I/O run in the 1 Hz task (``asyncio.to_thread`` for journal).
@@ -33,15 +33,14 @@ from app.bot.fsadvise import advise_dontneed
 from app.bot.paths import tw_p50_metrics_jsonl_path
 from app.bot.metrics_compact import MetricsDayCompactor, RotatingMetricsJsonl
 
-SCHEMA_VERSION = "bbot.tw_p50.v1"
+SCHEMA_VERSION = "bbot.tw_p50.v2"
 WINDOW_1M_MS = 60_000
-WINDOW_5M_MS = 300_000
-# Retain slightly past 5m so age-prune can keep one carry-in before the left edge.
-RETAIN_MS = WINDOW_5M_MS
+# Keep one carry-in sample before the 1m window's left edge.
+RETAIN_MS = WINDOW_1M_MS
 DEFAULT_SAMPLE_CAP = 4096
 ENV_SAMPLE_CAP = "BBOT_TW_P50_SAMPLE_CAP"
-# Fall back to floor cap env when TW-specific unset (same floor-style default).
-ENV_FLOOR_SAMPLE_CAP = "BBOT_FLOOR_BAR_SAMPLE_CAP"
+ENV_1M_ENGINE = "BBOT_TW_P50_1M_ENGINE"
+DEFAULT_1M_ENGINE = "deque"
 SIDES: tuple[str, ...] = ("long", "short")
 EMIT_INTERVAL_SEC = 1.0
 
@@ -76,7 +75,7 @@ def tw_p50_watch_enabled(
 def tw_p50_sample_cap(env: Optional[Mapping[str, str]] = None) -> int:
     """Max retained ``(ts, spread)`` samples per coin/side."""
     e = env if env is not None else os.environ
-    raw = str(e.get(ENV_SAMPLE_CAP) or e.get(ENV_FLOOR_SAMPLE_CAP) or "").strip()
+    raw = str(e.get(ENV_SAMPLE_CAP) or "").strip()
     if not raw:
         return DEFAULT_SAMPLE_CAP
     try:
@@ -84,6 +83,14 @@ def tw_p50_sample_cap(env: Optional[Mapping[str, str]] = None) -> int:
     except ValueError:
         return DEFAULT_SAMPLE_CAP
     return max(16, n)
+
+
+def tw_p50_1m_engine(env: Optional[Mapping[str, str]] = None) -> str:
+    e = env if env is not None else os.environ
+    engine = str(e.get(ENV_1M_ENGINE) or DEFAULT_1M_ENGINE).strip().lower()
+    if engine not in {"legacy", "deque"}:
+        raise ValueError(f"{ENV_1M_ENGINE} must be legacy or deque")
+    return engine
 
 
 def _finite(value: Any) -> Optional[float]:
@@ -118,11 +125,8 @@ class TwP50Snapshot:
     side: str
     ts_ms: int
     p50_1m: Optional[float]
-    p50_5m: Optional[float]
     n_1m: int
-    n_5m: int
     coverage_1m: float
-    coverage_5m: float
     computed_at_ms: int
 
     def as_row(self) -> dict[str, Any]:
@@ -132,11 +136,8 @@ class TwP50Snapshot:
             "side": self.side,
             "ts_ms": int(self.ts_ms),
             "p50_1m": self.p50_1m,
-            "p50_5m": self.p50_5m,
             "n_1m": int(self.n_1m),
-            "n_5m": int(self.n_5m),
             "coverage_1m": float(self.coverage_1m),
-            "coverage_5m": float(self.coverage_5m),
             "computed_at_ms": int(self.computed_at_ms),
         }
 
@@ -147,6 +148,7 @@ class _SideRing:
 
     samples: deque[tuple[int, float]] = field(default_factory=deque)
     samples_seen: int = 0  # for reservoir (includes discarded)
+    timestamps_ordered: bool = True
 
 
 def tw_p50_window(
@@ -202,7 +204,7 @@ def tw_p50_window(
 
 
 class LiveTwP50Observer:
-    """Per-coin / per-side rolling 5m sample ring + 1 Hz TW p50 snapshots."""
+    """Per-coin / per-side rolling one-minute samples + 1 Hz TW p50 snapshots."""
 
     def __init__(
         self,
@@ -210,6 +212,7 @@ class LiveTwP50Observer:
         *,
         sample_cap: Optional[int] = None,
         rng: Optional[random.Random] = None,
+        one_minute_engine: Optional[str] = None,
     ) -> None:
         self.sample_cap = (
             int(sample_cap) if sample_cap is not None else tw_p50_sample_cap()
@@ -217,6 +220,9 @@ class LiveTwP50Observer:
         if self.sample_cap < 16:
             self.sample_cap = 16
         self._rng = rng if rng is not None else random.Random()
+        self.one_minute_engine = one_minute_engine or tw_p50_1m_engine()
+        if self.one_minute_engine not in {"legacy", "deque"}:
+            raise ValueError("one_minute_engine must be legacy or deque")
         self._lock = threading.Lock()
         self._rings: dict[tuple[str, str], _SideRing] = {}
         self._snapshots: dict[tuple[str, str], TwP50Snapshot] = {}
@@ -256,9 +262,15 @@ class LiveTwP50Observer:
                 self._append_sample(ring, ts, finite)
 
     def _append_sample(self, ring: _SideRing, ts_ms: int, value: float) -> None:
+        if self.one_minute_engine == "deque" and len(ring.samples) >= self.sample_cap:
+            left = int(ts_ms) - RETAIN_MS
+            if not ring.timestamps_ordered or ring.samples[0][0] <= left:
+                self._prune_ring(ring, now_ms=int(ts_ms))
         ring.samples_seen += 1
         n = ring.samples_seen
         if len(ring.samples) < self.sample_cap:
+            if ring.samples and int(ts_ms) < ring.samples[-1][0]:
+                ring.timestamps_ordered = False
             ring.samples.append((int(ts_ms), float(value)))
         else:
             # Algorithm R: replace index j with probability cap/n.
@@ -270,14 +282,23 @@ class LiveTwP50Observer:
                     idx = j % len(body)
                     body[idx] = (int(ts_ms), float(value))
                     ring.samples = deque(body)
-        self._prune_ring(ring, now_ms=int(ts_ms))
+                    ring.timestamps_ordered = False
+        if self.one_minute_engine == "legacy":
+            self._prune_ring(ring, now_ms=int(ts_ms))
 
     def _prune_ring(self, ring: _SideRing, *, now_ms: int) -> None:
-        """Drop samples older than 5m except one carry-in at/before left edge."""
+        """Drop samples older than 1m except one carry-in at/before left edge."""
         left = int(now_ms) - RETAIN_MS
         if not ring.samples:
             return
-        # Keep chronological order; samples may be slightly out of order under reservoir.
+        if ring.timestamps_ordered:
+            carry = None
+            while ring.samples and ring.samples[0][0] <= left:
+                carry = ring.samples.popleft()
+            if carry is not None:
+                ring.samples.appendleft(carry)
+            return
+        # Reservoir replacement or out-of-order input needs a stable local rebuild.
         ordered = sorted(ring.samples, key=lambda p: p[0])
         carry: Optional[tuple[int, float]] = None
         kept: list[tuple[int, float]] = []
@@ -299,6 +320,7 @@ class LiveTwP50Observer:
             if len(out) > self.sample_cap + 1:
                 out = out[-(self.sample_cap + 1) :]
         ring.samples = deque(out)
+        ring.timestamps_ordered = True
 
     def snapshot_samples(
         self,
@@ -313,37 +335,30 @@ class LiveTwP50Observer:
         now_ms: Optional[int] = None,
         computed_at_ms: Optional[int] = None,
     ) -> list[TwP50Snapshot]:
-        """Compute TW p50 for all rings; update RAM snapshots. Off hot path."""
+        """Compute only the policy-used 1m TW p50; update RAM snapshots."""
         now = int(now_ms) if now_ms is not None else int(time.time() * 1000)
         wall = (
             int(computed_at_ms)
             if computed_at_ms is not None
             else int(time.time() * 1000)
         )
-        copies = self.snapshot_samples()
-        # Age-prune under lock using compute time so rings stay bounded.
         with self._lock:
             for ring in self._rings.values():
                 self._prune_ring(ring, now_ms=now)
+            copies = {k: list(v.samples) for k, v in self._rings.items()}
 
         out: list[TwP50Snapshot] = []
         for (coin, side), samples in copies.items():
             p50_1m, n_1m, cov_1m = tw_p50_window(
                 samples, now_ms=now, window_ms=WINDOW_1M_MS
             )
-            p50_5m, n_5m, cov_5m = tw_p50_window(
-                samples, now_ms=now, window_ms=WINDOW_5M_MS
-            )
             snap = TwP50Snapshot(
                 base_coin=coin,
                 side=side,
                 ts_ms=now,
                 p50_1m=_json_float(p50_1m),
-                p50_5m=_json_float(p50_5m),
                 n_1m=n_1m,
-                n_5m=n_5m,
                 coverage_1m=float(cov_1m),
-                coverage_5m=float(cov_5m),
                 computed_at_ms=wall,
             )
             out.append(snap)

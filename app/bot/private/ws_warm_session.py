@@ -246,6 +246,33 @@ class PrivateWarmSession:
     def subscribed_okx(self) -> tuple[str, ...]:
         return self.okx_symbols or ((self.okx_symbol,) if self.okx_symbol else ())
 
+    def add_coin(self, coin: str, *, bybit_symbol: str, okx_symbol: str) -> None:
+        """Extend account-wide Bybit filtering and subscribe OKX on its owner socket."""
+        key = str(coin).strip().upper()
+        if not key:
+            raise ValueError("private subscription coin is empty")
+        with self._lock:
+            if key in self.coins:
+                return
+            if self._stopped or not self.is_ready():
+                raise RuntimeError("private session is not ready")
+            if self._place_inflight:
+                raise RuntimeError("private subscription deferred during place")
+            # Send first; commit the client-side allowlists only if it succeeds.
+            self.okx_runtime.add_okx_subscription(str(okx_symbol))
+            self.coins = (*self.coins, key)
+            self.bybit_symbols = (*self.subscribed_bybit(), str(bybit_symbol))
+            self.okx_symbols = (*self.subscribed_okx(), str(okx_symbol))
+            self.bybit_runtime.subscribe_symbols = self.bybit_symbols
+            self._publish_base_coins()
+
+    def coin_ready(self, *, bybit_symbol: str, okx_symbol: str) -> bool:
+        return (
+            self.is_ready()
+            and str(bybit_symbol) in self.subscribed_bybit()
+            and self.okx_runtime.okx_symbol_ready(str(okx_symbol))
+        )
+
     def is_ready(self) -> bool:
         if self._stopped or not self._started:
             return False
@@ -818,6 +845,7 @@ class PrivateWarmSession:
                 rt,
                 exchange=exchange,
                 ack_timeout_sec=float(self.ack_timeout_sec),
+                defer_reseed=True,
             )
             if err is not None:
                 LOG.warning(
@@ -833,9 +861,22 @@ class PrivateWarmSession:
                 return
             if not self._send_runtime_heartbeats(rt, phase="post_handshake"):
                 return
-            for sock in (priv, trade):
-                if hasattr(sock, "handshake_done"):
-                    sock.handshake_done = True
+            self._mark_loop_handshake_done((rt,))
+            reseed_ev = rt.run_rest_reseed()
+            if (
+                reseed_ev.get("reconciliation_state") != "matched"
+                or rt.reseed_required
+            ):
+                LOG.warning(
+                    "warm_loop_reseed_failed exchange=%s run_id=%s",
+                    exchange,
+                    self.run_id,
+                )
+                for sock in (priv, trade):
+                    drop = getattr(sock, "drop_connection", None)
+                    if callable(drop):
+                        drop()
+                return
             self._handshake_count += 1
             self._fail_attempt = 0
             self._last_hb_mono = time.monotonic()
@@ -849,10 +890,21 @@ class PrivateWarmSession:
         finally:
             lock.release()
 
-    def _mark_loop_handshake_done(self) -> None:
-        for rt in (self.bybit_runtime, self.okx_runtime):
+    def _mark_loop_handshake_done(
+        self, runtimes: Optional[Sequence[PrivateStreamRuntime]] = None
+    ) -> None:
+        """Enable owner receive work and hand off pre-auth queued frames atomically."""
+        targets = tuple(runtimes) if runtimes is not None else (
+            self.bybit_runtime,
+            self.okx_runtime,
+        )
+        for rt in targets:
             for sock in (rt.private_socket, rt.trade_socket):
-                if sock is not None and hasattr(sock, "handshake_done"):
+                if sock is None or not hasattr(sock, "handshake_done"):
+                    continue
+                if is_loop_owned_socket(sock):
+                    sock.activate_handshake()
+                else:
                     sock.handshake_done = True
 
     def connector(self) -> "WarmConnector":
@@ -879,14 +931,19 @@ class PrivateWarmSession:
         return True
 
     def _handshake_both(self) -> None:
-        for runtime, exchange in (
+        venues = (
             (self.bybit_runtime, "bybit"),
             (self.okx_runtime, "okx"),
-        ):
+        )
+        # Authenticate both trade sockets before any potentially slow account
+        # reseed. The loop may now receive and heartbeat, but sends remain
+        # blocked by each runtime's reseed_required state until both match.
+        for runtime, exchange in venues:
             err = _handshake_private_and_trade(
                 runtime,
                 exchange=exchange,
                 ack_timeout_sec=float(self.ack_timeout_sec),
+                defer_reseed=True,
             )
             if err is not None:
                 raise RuntimeError(f"warm handshake failed exchange={exchange} err={err}")
@@ -896,6 +953,19 @@ class PrivateWarmSession:
                 raise RuntimeError(
                     f"warm post-handshake heartbeat failed exchange={exchange}"
                 )
+        self._mark_loop_handshake_done()
+        for runtime, exchange in venues:
+            reseed_ev = runtime.run_rest_reseed()
+            if (
+                reseed_ev.get("reconciliation_state") != "matched"
+                or runtime.reseed_required
+            ):
+                LOG.warning(
+                    "warm_reseed_failed exchange=%s run_id=%s",
+                    exchange,
+                    self.run_id,
+                )
+                raise RuntimeError(f"warm reseed failed exchange={exchange}")
         self._handshake_count += 1
         self._last_hb_mono = time.monotonic()
 

@@ -1,4 +1,4 @@
-"""Live BotRuntime theta screener (p50 − floor, no tick WAL)."""
+"""Live BotRuntime one-minute theta screener (p50 − floor, no tick WAL)."""
 
 from __future__ import annotations
 
@@ -41,29 +41,20 @@ class ThetaFlagTests(unittest.TestCase):
 
 class ThetaArithmeticTests(unittest.TestCase):
     def test_both_finite(self) -> None:
-        floor, th1, th5 = compute_theta(0.10, 0.20, 0.05)
+        floor, th1 = compute_theta(0.10, 0.05)
         self.assertAlmostEqual(floor, 0.05)
         self.assertAlmostEqual(th1, 0.05)
-        self.assertAlmostEqual(th5, 0.15)
 
     def test_floor_non_finite_nulls_all(self) -> None:
         for bad in (None, float("nan"), float("inf"), float("-inf"), "x"):
-            floor, th1, th5 = compute_theta(0.1, 0.2, bad)
+            floor, th1 = compute_theta(0.1, bad)
             self.assertIsNone(floor)
             self.assertIsNone(th1)
-            self.assertIsNone(th5)
 
-    def test_p50_1m_null_keeps_theta_5m(self) -> None:
-        floor, th1, th5 = compute_theta(None, 0.30, 0.10)
+    def test_missing_p50_leaves_theta_null(self) -> None:
+        floor, th1 = compute_theta(None, 0.10)
         self.assertAlmostEqual(floor, 0.10)
         self.assertIsNone(th1)
-        self.assertAlmostEqual(th5, 0.20)
-
-    def test_p50_5m_null_keeps_theta_1m(self) -> None:
-        floor, th1, th5 = compute_theta(0.40, float("nan"), 0.10)
-        self.assertAlmostEqual(floor, 0.10)
-        self.assertAlmostEqual(th1, 0.30)
-        self.assertIsNone(th5)
 
     def test_snapshot_row_schema(self) -> None:
         snap = theta_from_inputs(
@@ -71,7 +62,6 @@ class ThetaArithmeticTests(unittest.TestCase):
             side="long",
             ts_ms=1_700_000_000_000,
             p50_1m=0.12,
-            p50_5m=0.11,
             floor=0.08,
             computed_at_ms=1_700_000_000_100,
         )
@@ -80,7 +70,13 @@ class ThetaArithmeticTests(unittest.TestCase):
         self.assertEqual(row["base_coin"], "BTC")
         self.assertEqual(row["side"], "long")
         self.assertAlmostEqual(row["theta_1m"], 0.04)
-        self.assertAlmostEqual(row["theta_5m"], 0.03)
+        self.assertEqual(
+            set(row),
+            {
+                "schema_version", "base_coin", "side", "ts_ms", "p50_1m",
+                "floor_tf_select_a25", "theta_1m", "computed_at_ms",
+            },
+        )
         self.assertAlmostEqual(row["floor_tf_select_a25"], 0.08)
 
 
@@ -135,17 +131,13 @@ class ThetaScreenerTests(unittest.TestCase):
             side="short",
             ts_ms=99,
             p50_1m=0.05,
-            p50_5m=0.04,
             n_1m=3,
-            n_5m=5,
             coverage_1m=1.0,
-            coverage_5m=1.0,
             computed_at_ms=100,
         )
         out = screener.compute_from_tw_snapshots([tw], computed_at_ms=101)
         self.assertEqual(len(out), 1)
         self.assertAlmostEqual(out[0].theta_1m, 0.03)
-        self.assertAlmostEqual(out[0].theta_5m, 0.02)
         self.assertAlmostEqual(out[0].floor_tf_select_a25, 0.02)
 
     def test_null_when_no_floor(self) -> None:
@@ -155,17 +147,13 @@ class ThetaScreenerTests(unittest.TestCase):
             side="long",
             ts_ms=1,
             p50_1m=0.1,
-            p50_5m=0.1,
             n_1m=1,
-            n_5m=1,
             coverage_1m=0.5,
-            coverage_5m=0.5,
             computed_at_ms=2,
         )
         out = screener.compute_from_tw_snapshots([tw], computed_at_ms=3)
         self.assertIsNone(out[0].floor_tf_select_a25)
         self.assertIsNone(out[0].theta_1m)
-        self.assertIsNone(out[0].theta_5m)
 
     def test_journal_no_tick_files_and_refuses_d(self) -> None:
         tmp = Path(tempfile.mkdtemp())
@@ -175,7 +163,6 @@ class ThetaScreenerTests(unittest.TestCase):
             side="long",
             ts_ms=1_725_000_000_000,
             p50_1m=0.2,
-            p50_5m=0.15,
             floor=0.05,
             computed_at_ms=1_725_000_000_050,
         )
@@ -191,10 +178,8 @@ class ThetaScreenerTests(unittest.TestCase):
             "side",
             "ts_ms",
             "p50_1m",
-            "p50_5m",
             "floor_tf_select_a25",
             "theta_1m",
-            "theta_5m",
             "computed_at_ms",
         ):
             self.assertIn(key, row)

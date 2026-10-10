@@ -31,7 +31,7 @@ class ThresholdTests(unittest.TestCase):
         with mock.patch.dict(os.environ, {}, clear=False):
             os.environ.pop("SPREAD_TICK_SKEW_MAX_MS", None)
             os.environ.pop("SPREAD_TICK_AGE_MAX_MS", None)
-            self.assertEqual(skew_age_thresholds(), (2000, 2000))
+            self.assertEqual(skew_age_thresholds(), (10_000, 10_000))
 
 
 class GenerationTests(unittest.TestCase):

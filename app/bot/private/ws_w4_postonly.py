@@ -328,6 +328,7 @@ def _handshake_private_and_trade(
     *,
     exchange: str,
     ack_timeout_sec: float,
+    defer_reseed: bool = False,
 ) -> Optional[str]:
     """Bounded auth/sub/trade-auth loops. Returns categorical error_code or None."""
     runtime.send_auth()
@@ -350,12 +351,14 @@ def _handshake_private_and_trade(
         return "venue_rejected"
     if sub_ev.ack_ok is False:
         return "venue_rejected"
-    reseed_ev = runtime.run_rest_reseed()
-    reseed_ok = (
-        reseed_ev.get("reconciliation_state") == "matched" and not runtime.reseed_required
-    )
-    if not reseed_ok:
-        return "reseed_required"
+    if not defer_reseed:
+        reseed_ev = runtime.run_rest_reseed()
+        reseed_ok = (
+            reseed_ev.get("reconciliation_state") == "matched"
+            and not runtime.reseed_required
+        )
+        if not reseed_ok:
+            return "reseed_required"
     runtime.send_trade_auth()
     try:
         ok = runtime.recv_trade_auth_ack(timeout_sec=ack_timeout_sec)

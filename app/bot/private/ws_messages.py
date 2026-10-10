@@ -298,6 +298,7 @@ def build_okx_private_subscribe(
     symbol: Optional[str] = None,
     symbols: Optional[Sequence[str]] = None,
     inst_type: str = "SWAP",
+    req_id: Optional[str] = None,
 ) -> WsOutboundMessage:
     """Orders + positions for each active OKX SWAP instId.
 
@@ -321,6 +322,8 @@ def build_okx_private_subscribe(
             ]
         )
     body = {"op": "subscribe", "args": args}
+    if req_id is not None:
+        body["id"] = assert_okx_ws_message_id(req_id)
     return WsOutboundMessage(
         venue="okx_live",
         channel="private_stream",

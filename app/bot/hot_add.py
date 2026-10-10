@@ -23,6 +23,7 @@ DELTA_ENV = "BBOT_HOT_ADD_DELTA"
 DROP_ENV = "BBOT_HOT_ADD_DROP"
 MAX_EXTRA_ENV = "BBOT_HOT_ADD_MAX_EXTRA"
 POLL_SEC_ENV = "BBOT_HOT_ADD_POLL_SEC"
+SET_LEVERAGE_ENV = "BBOT_HOT_ADD_SET_LEVERAGE"
 
 DEFAULT_DELTA_NAME = "hot_add_delta.csv"
 DEFAULT_DROP_NAME = "hot_add_drop.csv"
@@ -49,6 +50,11 @@ def _flag_on(name: str) -> bool:
 def bbot_hot_add_enabled() -> bool:
     """Default OFF. Deploying this code must not change the bot pool."""
     return _flag_on(HOT_ADD_ENV)
+
+
+def bbot_hot_add_set_leverage_enabled() -> bool:
+    """Default OFF; opt in to verified 1x setup for newly hot-added coins."""
+    return _flag_on(SET_LEVERAGE_ENV)
 
 
 def bbot_hot_add_max_extra() -> int:
@@ -290,6 +296,8 @@ __all__ = [
     "DROP_ENV",
     "MAX_EXTRA_ENV",
     "POLL_SEC_ENV",
+    "SET_LEVERAGE_ENV",
+    "bbot_hot_add_set_leverage_enabled",
     "BotHotAddController",
     "bbot_hot_add_delta_path",
     "bbot_hot_add_drop_path",

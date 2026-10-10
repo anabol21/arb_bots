@@ -47,7 +47,8 @@ class TaskSupervisor:
         return task
 
     def _on_done(self, task: asyncio.Task[Any]) -> None:
-        self._tasks.discard(task)
+        # Keep completed tasks until wait() observes their result. Removing a
+        # fast failure here can make wait() miss it and block forever.
         self._wakeup.set()
 
     def cancel_all(self) -> None:
@@ -77,6 +78,15 @@ class TaskSupervisor:
     async def wait(self) -> None:
         """Block until closed and drained, or a non-cancelled task fails."""
         while True:
+            completed = [task for task in self._tasks if task.done()]
+            for task in completed:
+                self._tasks.discard(task)
+                if task.cancelled():
+                    continue
+                exc = task.exception()
+                if exc is not None:
+                    self.cancel_all()
+                    raise exc
             live = {task for task in self._tasks if not task.done()}
             if self._closed and not live:
                 return
@@ -100,19 +110,11 @@ class TaskSupervisor:
                     except asyncio.CancelledError:
                         pass
             self._wakeup.clear()
-            for task in done:
-                if task is wakeup_task:
-                    continue
-                if task.cancelled():
-                    continue
-                exc = task.exception()
-                if exc is not None:
-                    self.cancel_all()
-                    raise exc
 
     async def drain(self) -> None:
         """Cancel remaining tasks and wait (return_exceptions)."""
         self.cancel_all()
-        pending = [task for task in list(self._tasks) if not task.done()]
-        if pending:
-            await asyncio.gather(*pending, return_exceptions=True)
+        tasks = list(self._tasks)
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+        self._tasks.clear()

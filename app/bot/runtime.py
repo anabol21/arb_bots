@@ -17,7 +17,7 @@ import tempfile
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Mapping, Optional
 
 from app.bot.broker import make_broker
 from app.bot.floor_watcher import (
@@ -58,6 +58,21 @@ from app.bot.floor_warm import (
     export_observer_warm_pickle,
     resolve_floor_warm_path,
 )
+from app.bot.hot_add import (
+    BotHotAddController,
+    bbot_hot_add_delta_path,
+    bbot_hot_add_enabled,
+    bbot_hot_add_max_extra,
+    bbot_hot_add_poll_sec,
+    bbot_hot_add_set_leverage_enabled,
+    run_hot_add_poller,
+)
+from app.bot.hot_add_warm import (
+    bbot_hot_add_warm_enabled,
+    resolve_hot_add_history_root,
+    warm_floor_from_history,
+    seed_tw_p50_from_slim_ticks,
+)
 from app.bot.stub_broker import InstrumentMeta
 from app.bot.ws_books import (
     books_ready,
@@ -88,7 +103,9 @@ from app.utils.tick_validity import (
     TickValidityGate,
     book_l1_complete,
 )
+from app.utils.task_supervisor import TaskSupervisor
 from app.utils.universe_csv import load_take_yes_base_coins, read_universe_dicts
+from app.utils.universe_delta import read_delta_rows
 
 ensure_repo_on_syspath()
 from research.is_crypto import is_crypto  # noqa: E402
@@ -439,10 +456,58 @@ class BotRuntime:
         self.coins = parse_coins(coins_raw)
         if not self.coins:
             raise RuntimeError("BBOT_COINS empty after is_crypto filter")
+        self._gear23_base_coins = tuple(self.coins)
+        self._gear23_hot_add_enabled = (
+            self.profile == "gear22_live_canary" and bbot_hot_add_enabled()
+        )
+        self._gear23_hot_add_set_leverage = (
+            self._gear23_hot_add_enabled and bbot_hot_add_set_leverage_enabled()
+        )
+        if self._gear23_hot_add_set_leverage and not (
+            self._gear23_hot_add_enabled and self._terminal_private_execution
+        ):
+            raise ValueError(
+                "BBOT_HOT_ADD_SET_LEVERAGE requires Gear23 terminal_private"
+            )
+        self._gear23_leverage_scheduled: set[str] = set()
+        self._gear23_leverage_ready = False
+        self._gear23_leverage_lock = asyncio.Lock()
+        self._gear23_last_leverage_start = 0.0
+        self._hot_add_supervisor: TaskSupervisor | None = None
+        self._hot_add_controller: BotHotAddController | None = None
+        self._gear23_pool_started = False
+        self._gear23_floor_warm: dict[str, bool] = {}
+        self._gear23_last_status: dict[str, str] = {}
+        self._gear23_confirmed_1x = frozenset(
+            coin.strip().upper()
+            for coin in os.environ.get("BBOT_CONFIRMED_1X_COINS", "").split(",")
+            if coin.strip()
+        )
+        if self._gear23_hot_add_enabled:
+            broker_kind = (os.environ.get("BBOT_BROKER") or "stub").strip().lower()
+            live_orders = (os.environ.get("LIVE_ORDERS") or "0").strip().lower()
+            live_send = (os.environ.get("BBOT_THETA_LIVE_SEND") or "0").strip().lower()
+            if self.profile not in {"gear22_would_send", "gear22_live_canary"}:
+                raise ValueError("BBOT_HOT_ADD requires a gear22 profile")
+            private_live = (
+                self._terminal_private_execution
+                and
+                self.profile == "gear22_live_canary"
+                and broker_kind == "private_live"
+                and live_orders in {"1", "true", "yes", "on"}
+                and live_send in {"1", "true", "yes", "on"}
+            )
+            public_stub = (
+                broker_kind == "stub"
+                and live_orders not in {"1", "true", "yes", "on"}
+                and live_send not in {"1", "true", "yes", "on"}
+            )
+            if not (private_live or public_stub):
+                raise ValueError("BBOT_HOT_ADD requires gear22 stub or fully gated gear22 private live")
         if self._terminal_private_execution:
             from app.bot.synthetic_policy import CANARY29_COINS
 
-            if tuple(self.coins) != CANARY29_COINS:
+            if not self._gear23_hot_add_enabled and tuple(self.coins) != CANARY29_COINS:
                 raise ValueError("terminal_private requires the ordered Canary29 pool")
         if self.profile == "canary_wal_eden":
             from app.policy.trade_manager import live_size_coin_allowed
@@ -533,7 +598,7 @@ class BotRuntime:
         self._synthetic_sender_session: Any = None
         self._synthetic_live_send_enabled = False
         self._l1_ring_warned = False
-        # Gear 2.2 floor observer (5m bar metrics). Off critical decide/send path.
+        # Gear 2.2 floor observer. Off critical decide/send path.
         self.floor_enabled = floor_watch_enabled(self.profile)
         self.floor_observer: LiveFloorObserver | None = None
         self.floor_journal: FloorJournalWriter | None = None
@@ -548,7 +613,7 @@ class BotRuntime:
         self.log.info(
             "metrics_rotate_compress | enabled=%s", int(metrics_rotate_compress)
         )
-        # Rolling TW p50 (1m/5m) observer — alongside floor, not instead of it.
+        # Rolling one-minute TW p50 observer — alongside floor.
         self.tw_p50_enabled = tw_p50_watch_enabled(self.profile)
         self.tw_p50_observer: LiveTwP50Observer | None = None
         self.tw_p50_journal: TwP50JournalWriter | None = None
@@ -1071,6 +1136,12 @@ class BotRuntime:
             and self._leverage_one.get(("bybit", bybit_symbol)) == "1"
         ):
             return "leverage_not_one"
+        if self._gear23_hot_add_enabled and coin not in self._gear23_base_coins:
+            if session is None or not session.coin_ready(
+                bybit_symbol=bybit_symbol,
+                okx_symbol=symbol,
+            ):
+                return "private_coin_not_ready"
         return None
 
     def _canary29_assert_flat(self, coin: str) -> None:
@@ -1606,10 +1677,29 @@ class BotRuntime:
 
         symbols = {self._meta(coin).okx_symbol for coin in self.coins}
         rows = fetch_okx_swap_instruments()
-        ct_vals, inst_codes = _canary29_okx_metadata(rows, symbols)
-        self._okx_ct_vals = ct_vals
-        self._okx_inst_id_codes = inst_codes
-        self.log.info("okx_canary_metadata_prefetched | n=%s", len(symbols))
+        ct_vals: dict[str, Any] = {}
+        inst_codes: dict[str, int] = {}
+        for symbol in symbols:
+            try:
+                ct, codes = _canary29_okx_metadata(rows, {symbol})
+            except RuntimeError:
+                continue
+            ct_vals.update(ct)
+            inst_codes.update(codes)
+        base_symbols = {self._meta(coin).okx_symbol for coin in self._gear23_base_coins}
+        missing_base = base_symbols.difference(ct_vals).union(base_symbols.difference(inst_codes))
+        if missing_base:
+            raise RuntimeError(
+                "okx_canary_metadata_incomplete:" + ",".join(sorted(missing_base))
+            )
+        self._okx_ct_vals.update(ct_vals)
+        self._okx_inst_id_codes.update(inst_codes)
+        missing_extra = symbols.difference(base_symbols).difference(ct_vals)
+        self.log.info(
+            "okx_canary_metadata_prefetched | n=%s | missing_extra=%s",
+            len(symbols) - len(missing_extra),
+            ",".join(sorted(missing_extra)) if missing_extra else "-",
+        )
 
     async def _await_terminal_place_before_shutdown(self) -> bool:
         if not self._terminal_private_execution or self.theta_trade is None:
@@ -1657,6 +1747,242 @@ class BotRuntime:
         call = dict(kwargs)
         call["meta"] = bound
         return place_local(data_root=self.data_root, **call)
+
+
+    def _emit_terminal_private_trade_sentry(
+        self,
+        result: Any,
+        kwargs: Mapping[str, Any],
+    ) -> None:
+        """Fail-safe Sentry trade event for terminal_private place_live outcomes.
+
+        Called only after ``place_live`` returns (outside ``place_io_section``).
+        Never raises; never touches exchange I/O.
+        """
+        try:
+            from app.bot.private.send_legs import _attempt_ids
+            from app.bot.sentry_setup import capture_trade_event
+
+            extra_raw = kwargs.get("extra")
+            extra: Mapping[str, Any] = extra_raw if isinstance(extra_raw, Mapping) else {}
+            coin = str(
+                getattr(result, "base_coin", None)
+                or kwargs.get("base_coin")
+                or ""
+            ).upper()
+            spread_side = str(kwargs.get("spread_side") or "").strip().lower()
+            side = str(getattr(result, "side", None) or "").strip().lower()
+            if not side:
+                if spread_side == "open_long":
+                    side = "long"
+                elif spread_side == "open_short":
+                    side = "short"
+                elif spread_side == "close":
+                    close_of = str(kwargs.get("close_of") or "")
+                    if "long" in close_of:
+                        side = "long"
+                    elif "short" in close_of:
+                        side = "short"
+            intent_id = str(
+                getattr(result, "intent_id", None)
+                or kwargs.get("intent_id")
+                or extra.get("intent_id")
+                or ""
+            )
+            trade_id = str(extra.get("trade_id") or intent_id or "")
+            if not trade_id or not coin:
+                return
+
+            completed = bool(getattr(result, "completed", False))
+            abort = getattr(result, "abort", None)
+            abort_s = str(abort) if abort is not None else None
+            keep_pending = bool(getattr(result, "keep_pending", False))
+            send_attempted = bool(getattr(result, "send_attempted", False))
+            status = getattr(result, "status", None)
+
+            asymmetric = bool(
+                abort_s in {"asymmetric_fill", "partial_fill", "fill_qty_mismatch"}
+                or (abort_s is not None and "asymmetric" in abort_s)
+            )
+
+            if completed and spread_side == "close":
+                event = "close"
+            elif completed:
+                event = "open"
+            elif asymmetric:
+                event = "asymmetric_fill"
+            else:
+                event = "send_abort"
+
+            signal_ts_ms = kwargs.get("signal_ts_ms")
+            fill_ts_ms = getattr(result, "fill_ts_ms", None)
+            latency_ms = getattr(result, "latency_ms", None)
+            if latency_ms is None and signal_ts_ms is not None and fill_ts_ms is not None:
+                try:
+                    latency_ms = int(fill_ts_ms) - int(signal_ts_ms)
+                except (TypeError, ValueError):
+                    latency_ms = None
+
+            bybit_order_id = okx_order_id = None
+            try:
+                bybit_order_id, okx_order_id, _dual = _attempt_ids(intent_id or trade_id)
+            except Exception:
+                pass
+
+            reduce_only = spread_side == "close" or bool(kwargs.get("close_of"))
+            chronometry = self._terminal_private_step_chrono_summary(intent_id or trade_id)
+
+            sentry_extras: dict[str, Any] = {
+                "spread_side": spread_side or None,
+                "direction": side or None,
+                "intent_id": intent_id or None,
+                "trade_id": trade_id,
+                "okx_venue": "okx",
+                "bybit_venue": "bybit",
+                "okx_order_id": okx_order_id,
+                "bybit_order_id": bybit_order_id,
+                "okx_avg_px": getattr(result, "okx_fill_px", None),
+                "bybit_avg_px": getattr(result, "bybit_fill_px", None),
+                "okx_filled_qty": getattr(result, "okx_filled_qty", None),
+                "bybit_filled_qty": getattr(result, "bybit_filled_qty", None),
+                "coin_qty": getattr(result, "coin_qty", None),
+                "fill_status": (
+                    "filled"
+                    if completed
+                    else (
+                        abort_s
+                        or status
+                        or ("keep_pending" if keep_pending else "incomplete")
+                    )
+                ),
+                "completed": completed,
+                "keep_pending": keep_pending,
+                "send_attempted": send_attempted,
+                "abort": abort_s,
+                "status": status,
+                "reduce_only": reduce_only,
+                "signal_ts_ms": signal_ts_ms,
+                "fill_ts_ms": fill_ts_ms,
+                "latency_ms": latency_ms,
+                "notional_usdt": getattr(self, "notional", None),
+                "completed_cycles": getattr(self, "_canary29_completed_cycles", None),
+                "execution": "terminal_private",
+                "chronometry": chronometry or None,
+            }
+            for key in (
+                "theta_1m",
+                "floor",
+                "p50_1m",
+                "spread_signal",
+                "spread_fill",
+                "slip_spread",
+                "pnl_spread",
+                "pnl_usdt_approx",
+                "open_fill_spread",
+                "close_fill_spread",
+                "fees_usdt",
+                "fee_usdt",
+                "potential_pp",
+                "signal_mono_ns",
+            ):
+                if key in extra and extra.get(key) is not None:
+                    sentry_extras[key] = extra.get(key)
+
+            capture_trade_event(
+                event=event,
+                trade_id=trade_id,
+                coin=coin,
+                side=side or "unknown",
+                extras=sentry_extras,
+                level="error",
+            )
+        except Exception:
+            try:
+                self.log.exception(
+                    "sentry_trade_emit | status=fail | path=terminal_private"
+                )
+            except Exception:
+                pass
+
+    def _terminal_private_step_chrono_summary(
+        self,
+        intent_id: str,
+    ) -> Optional[dict[str, Any]]:
+        """Best-effort per-leg timings from step_chrono.jsonl for this intent."""
+        if not intent_id:
+            return None
+        try:
+            from app.bot.paths import theta_step_chrono_jsonl_path
+
+            path = theta_step_chrono_jsonl_path(self.data_root)
+            if not path.exists() or path.is_symlink():
+                return None
+            wanted = str(intent_id)
+            rows: list[dict[str, Any]] = []
+            with path.open("r", encoding="utf-8") as fh:
+                for line in fh:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        row = json.loads(line)
+                    except Exception:
+                        continue
+                    if str(row.get("intent_id") or "") == wanted:
+                        rows.append(row)
+            if not rows:
+                return None
+            by_block: dict[str, dict[str, Any]] = {}
+            for row in rows:
+                block = str(row.get("block") or "")
+                edge = str(row.get("edge") or "")
+                if not block:
+                    continue
+                slot = by_block.setdefault(block, {})
+                payload = {
+                    "wall_ms": row.get("wall_ms"),
+                    "mono_ns": row.get("mono_ns"),
+                    "duration_ms": row.get("duration_ms"),
+                }
+                if edge:
+                    slot[edge] = payload
+                else:
+                    slot.setdefault("row", payload)
+            signal_ms = None
+            send_ms = None
+            fill_ms = None
+            sig = by_block.get("signal_decision") or {}
+            if "selected" in sig:
+                signal_ms = sig["selected"].get("wall_ms")
+            elif "row" in sig:
+                signal_ms = sig["row"].get("wall_ms")
+            ws = by_block.get("ws_send") or {}
+            if "enter" in ws:
+                send_ms = ws["enter"].get("wall_ms")
+            fill = by_block.get("fill_done") or {}
+            if "exit" in fill:
+                fill_ms = fill["exit"].get("wall_ms")
+            elif "enter" in fill:
+                fill_ms = fill["enter"].get("wall_ms")
+            out: dict[str, Any] = {"blocks": by_block}
+            if signal_ms is not None and send_ms is not None:
+                try:
+                    out["signal_to_send_ms"] = int(send_ms) - int(signal_ms)
+                except (TypeError, ValueError):
+                    pass
+            if send_ms is not None and fill_ms is not None:
+                try:
+                    out["send_to_fill_ms"] = int(fill_ms) - int(send_ms)
+                except (TypeError, ValueError):
+                    pass
+            if signal_ms is not None and fill_ms is not None:
+                try:
+                    out["signal_to_fill_ms"] = int(fill_ms) - int(signal_ms)
+                except (TypeError, ValueError):
+                    pass
+            return out
+        except Exception:
+            return None
 
     def _synthetic_live_place(self, **kwargs: Any) -> Any:
         """Live gates only. Uses the warm session sender; does not open a new socket."""
@@ -1762,6 +2088,9 @@ class BotRuntime:
             self._synthetic_roll_halt_reason = str(
                 abort or status or "incomplete_place"
             )
+        # Sentry after place_io_section so trade emit never blocks/delays send.
+        if self._terminal_private_execution:
+            self._emit_terminal_private_trade_sentry(result, kwargs)
         return result
 
     def _prefetch_okx_inst_id_codes(self) -> None:
@@ -1860,6 +2189,331 @@ class BotRuntime:
         if coin not in self.universe:
             raise KeyError(f"{coin} missing from bybit_okx_universe.csv")
         return self.universe[coin]
+
+    def _gear23_spawn_coin(self, row: Mapping[str, str]) -> None:
+        """Register one extra coin and its existing public/private subscriptions."""
+        supervisor = self._hot_add_supervisor
+        if supervisor is None:
+            raise RuntimeError("hot-add supervisor is not ready")
+        coin = str(row["base_coin"]).strip().upper()
+        self.quotes[coin] = {"okx": empty_book(), "bybit": empty_book()}
+        self.coins.append(coin)
+        self._book_inflight[coin] = False
+        self._book_dirty[coin] = False
+        self._book_last_exchange[coin] = "okx"
+        self._ma_cache[coin] = (None, None)
+        if self.theta_screener is not None:
+            self.theta_screener.coins.append(coin)
+        meta = self._meta(coin)
+        self._gear23_schedule_hot_add_leverage(coin)
+        if getattr(self, "_gear23_pool_started", False):
+            supervisor.add(
+                run_okx_books5(
+                    base_coin=coin,
+                    okx_symbol=meta.okx_symbol,
+                    book_store=self.quotes[coin]["okx"],
+                    on_book=self._on_book,
+                    on_lifecycle=self._on_lifecycle,
+                    stop_event=self.stop_event,
+                ),
+                name=f"okx-{coin}",
+            )
+            supervisor.add(
+                run_bybit_orderbook1(
+                    base_coin=coin,
+                    bybit_symbol=meta.bybit_symbol,
+                    book_store=self.quotes[coin]["bybit"],
+                    on_book=self._on_book,
+                    on_lifecycle=self._on_lifecycle,
+                    stop_event=self.stop_event,
+                ),
+                name=f"bybit-{coin}",
+            )
+            if self._private_warm is not None:
+                supervisor.add(
+                    self._gear23_add_private_coin(coin),
+                    name=f"private-add-{coin}",
+                )
+        if (
+            getattr(self, "_gear23_pool_started", False)
+            and bbot_hot_add_warm_enabled()
+            and self.floor_observer is not None
+        ):
+            supervisor.add(
+                self._gear23_warm_coin(coin), name=f"warm-{coin}"
+            )
+        self.log.info(
+            "gear23_coin_added | base_coin=%s | public_ws=starting | trade_eligible=pending_gates",
+            coin,
+        )
+
+    def _gear23_schedule_hot_add_leverage(self, coin: str) -> None:
+        supervisor = self._hot_add_supervisor
+        if (
+            not getattr(self, "_gear23_hot_add_set_leverage", False)
+            or not getattr(self, "_gear23_leverage_ready", False)
+            or coin in self._gear23_base_coins
+            or coin in self._gear23_confirmed_1x
+            or coin in self._gear23_leverage_scheduled
+            or supervisor is None
+        ):
+            return
+        self._gear23_leverage_scheduled.add(coin)
+        supervisor.add(
+            self._gear23_set_hot_add_leverage(coin),
+            name=f"leverage-1x-{coin}",
+        )
+
+    async def _gear23_set_hot_add_leverage(self, coin: str) -> None:
+        """Prepare one hot-added extra off-loop; admission remains fail-closed."""
+        async with self._gear23_leverage_lock:
+            if coin in self._gear23_base_coins or coin in self._gear23_confirmed_1x:
+                return
+            if self.stop_event.is_set():
+                return
+            delay = 1.0 - (time.monotonic() - self._gear23_last_leverage_start)
+            if delay > 0:
+                await asyncio.sleep(delay)
+            if self.stop_event.is_set():
+                return
+            self._gear23_last_leverage_start = time.monotonic()
+            session = self._private_warm
+            if session is None:
+                self.log.warning(
+                    "gear23_leverage_one_failed | base_coin=%s | reason=private_session_unavailable",
+                    coin,
+                )
+                return
+            meta = self._meta(coin)
+            from app.bot.private.leverage_one import (
+                LeverageTarget,
+                set_and_verify_leverage_one,
+            )
+            from app.bot.private.venue import endpoints_for_venue
+
+            try:
+                await asyncio.to_thread(
+                    set_and_verify_leverage_one,
+                    LeverageTarget(coin, meta.okx_symbol, meta.bybit_symbol),
+                    okx_credentials=session.okx_credentials,
+                    bybit_credentials=session.bybit_credentials,
+                    endpoints=endpoints_for_venue("live"),
+                )
+            except RuntimeError as exc:
+                reason = str(exc)
+                if reason not in {
+                    "leverage_set_unconfirmed",
+                    "leverage_preflight_failed",
+                    "leverage_preflight_not_flat",
+                    "leverage_readback_unconfirmed",
+                    "leverage_readback_failed",
+                }:
+                    reason = "verification_error"
+                self.log.warning(
+                    "gear23_leverage_one_failed | base_coin=%s | reason=%s",
+                    coin,
+                    reason,
+                )
+                return
+            except Exception as exc:  # noqa: BLE001 — extra remains blocked
+                self.log.warning(
+                    "gear23_leverage_one_failed | base_coin=%s | reason=%s",
+                    coin,
+                    type(exc).__name__,
+                )
+                return
+
+            self._leverage_one[("okx", meta.okx_symbol)] = "1"
+            self._leverage_one[("bybit", meta.bybit_symbol)] = "1"
+            self._gear23_confirmed_1x = self._gear23_confirmed_1x | {coin}
+            self.log.info(
+                "gear23_leverage_one_confirmed | base_coin=%s | venue_count=2",
+                coin,
+            )
+
+    async def _gear23_add_private_coin(self, coin: str) -> None:
+        session = self._private_warm
+        if session is None:
+            return
+        meta = self._meta(coin)
+        if not (
+            self._okx_ct_vals.get(meta.okx_symbol)
+            and self._okx_inst_id_codes.get(meta.okx_symbol)
+        ):
+            try:
+                await asyncio.to_thread(self._prefetch_okx_canary_metadata)
+            except Exception as exc:  # noqa: BLE001 — candidate only
+                self.log.error(
+                    "gear23_metadata_prefetch_failed | base_coin=%s | err=%s",
+                    coin,
+                    type(exc).__name__,
+                )
+        while not self.stop_event.is_set():
+            try:
+                await asyncio.to_thread(
+                    session.add_coin,
+                    coin,
+                    bybit_symbol=meta.bybit_symbol,
+                    okx_symbol=meta.okx_symbol,
+                )
+                if coin in self._gear23_confirmed_1x:
+                    self._leverage_one[("okx", meta.okx_symbol)] = "1"
+                    self._leverage_one[("bybit", meta.bybit_symbol)] = "1"
+                return
+            except RuntimeError as exc:
+                if "deferred during place" not in str(exc) and "not ready" not in str(exc):
+                    self.log.error(
+                        "gear23_private_add_failed | base_coin=%s | err=%s",
+                        coin,
+                        type(exc).__name__,
+                    )
+                    return
+                await asyncio.sleep(0.05)
+            except Exception as exc:  # noqa: BLE001 — candidate remains fail-closed
+                self.log.error(
+                    "gear23_private_add_failed | base_coin=%s | err=%s",
+                    coin,
+                    type(exc).__name__,
+                )
+                return
+        self.log.warning("gear23_private_add_stopped | base_coin=%s", coin)
+
+    async def _gear23_warm_coin(self, coin: str) -> None:
+        history_root = resolve_hot_add_history_root(self.data_root) or self.data_root
+        try:
+            result = await asyncio.to_thread(
+                warm_floor_from_history,
+                self.floor_observer,
+                coin,
+                history_root,
+                logger=self.log,
+            )
+        except Exception as exc:  # noqa: BLE001 — observer warm never halts public feeds
+            self._gear23_floor_warm[coin] = False
+            self.log.error(
+                "gear23_observer_warm_failed | base_coin=%s | err=%s | trade_eligible=false",
+                coin,
+                type(exc).__name__,
+            )
+            return
+        self._gear23_floor_warm[coin] = bool(result.ok)
+        ticks_fed = 0
+        if result.ok and self.tw_p50_observer is not None:
+            try:
+                ticks_fed = await asyncio.to_thread(
+                    seed_tw_p50_from_slim_ticks,
+                    self.tw_p50_observer,
+                    coin,
+                    history_root,
+                )
+            except Exception as exc:  # noqa: BLE001 — observability only in Patch A
+                self.log.warning(
+                    "gear23_tw_warm_failed | base_coin=%s | err=%s",
+                    coin,
+                    type(exc).__name__,
+                )
+        self.log.info(
+            "gear23_observer_warm | base_coin=%s | ok=%s | reason=%s | trade_eligible=pending_gates",
+            coin,
+            str(result.ok).lower(),
+            result.reason,
+        )
+        if ticks_fed:
+            self.log.info("gear23_tw_warm | base_coin=%s | ticks_fed=%s", coin, ticks_fed)
+
+    def _gear23_candidate_ready(self, coin: str, snapshots: Sequence[Any]) -> bool:
+        if coin in self._gear23_base_coins or not self._gear23_hot_add_enabled:
+            return True
+        def blocked(reason: str) -> bool:
+            if self._gear23_last_status.get(coin) != reason:
+                self.log.info("gear23_candidate_gate | base_coin=%s | status=blocked | reason=%s", coin, reason)
+                self._gear23_last_status[coin] = reason
+            return False
+
+        if not self._gear23_floor_warm.get(coin, False):
+            return blocked("floor_warm")
+        meta = self._meta(coin)
+        if min(
+            meta.okx_tick_size,
+            meta.okx_lot_size,
+            meta.okx_min_size,
+            meta.bybit_tick_size,
+            meta.bybit_qty_step,
+            meta.bybit_min_order_qty,
+        ) <= 0:
+            return blocked("instrument_metadata")
+        if self._private_warm is not None:
+            from app.bot.private.order_metadata import parse_decimal, parse_inst_id_code
+
+            try:
+                ct_val = parse_decimal(
+                    self._okx_ct_vals.get(meta.okx_symbol), field="ct_val"
+                )
+            except (TypeError, ValueError):
+                return blocked("okx_ctval_or_instidcode")
+            if ct_val <= 0 or parse_inst_id_code(
+                self._okx_inst_id_codes.get(meta.okx_symbol)
+            ) is None:
+                return blocked("okx_ctval_or_instidcode")
+        okx, bybit = self.quotes[coin]["okx"], self.quotes[coin]["bybit"]
+        if not books_ready(okx, bybit):
+            return blocked("public_book_incomplete")
+        now_ms = time.time() * 1000.0
+        if any(
+            now_ms - float(book["local_recv_ts_ms"]) < 0
+            or now_ms - float(book["local_recv_ts_ms"]) > self.gate.age_max_ms
+            or abs(float(okx["ts_exchange"]) - float(bybit["ts_exchange"]))
+            > self.gate.skew_max_ms
+            for book in (okx, bybit)
+        ):
+            return blocked("public_book_stale")
+        generation = self.gate.coin_generation.get(coin, 0)
+        if any(
+            self.gate.leg_generation.get((coin, venue)) != generation
+            for venue in ("okx", "bybit")
+        ):
+            return blocked("public_generation")
+        if not any(
+            snap.base_coin == coin
+            and all(
+                value is not None and math.isfinite(float(value))
+                for value in (snap.theta_1m, snap.p50_1m, snap.floor_tf_select_a25)
+            )
+            for snap in snapshots
+        ):
+            return blocked("theta_unusable")
+        session = self._private_warm
+        if session is None or not session.coin_ready(
+            bybit_symbol=meta.bybit_symbol,
+            okx_symbol=meta.okx_symbol,
+        ):
+            return blocked("private_ack")
+        if coin not in self._gear23_confirmed_1x:
+            return blocked("one_x_unconfirmed")
+        if not (
+            self._leverage_one.get(("okx", meta.okx_symbol)) == "1"
+            and self._leverage_one.get(("bybit", meta.bybit_symbol)) == "1"
+        ):
+            return blocked("one_x_unconfirmed")
+        if self._gear23_last_status.pop(coin, None) is not None:
+            self.log.info("gear23_candidate_gate | base_coin=%s | status=eligible", coin)
+        return True
+
+    def _gear23_trade_coin_order(self, snapshots: Sequence[Any] = ()) -> tuple[str, ...]:
+        if not self._gear23_hot_add_enabled:
+            return tuple(self.coins)
+        pinned = None
+        if self.theta_trade is not None:
+            position = self.theta_trade.slot.position
+            if position is not None:
+                pinned = position.base_coin.upper()
+        eligible = tuple(
+            coin
+            for coin in self.coins
+            if coin in self._gear23_base_coins
+            or self._gear23_candidate_ready(coin, snapshots)
+        )
+        return ((pinned,) + tuple(c for c in eligible if c != pinned)) if pinned in self.coins else eligible
 
     def _on_lifecycle(self, base_coin: str, exchange: str, event: str) -> None:
         channel = "books5" if exchange == "okx" else "orderbook.1"
@@ -2246,11 +2900,11 @@ class BotRuntime:
                         type(exc).__name__,
                     )
                 continue
-            # Skip sides that have never received a tick (n_5m==0 and no coverage).
+            # Skip sides that have never received a tick in the 1m window.
             rows = [
                 s.as_row()
                 for s in snapshots
-                if s.n_5m > 0 or s.coverage_5m > 0.0 or s.n_1m > 0
+                if s.n_1m > 0 or s.coverage_1m > 0.0
             ]
             if rows:
                 await self._flush_tw_p50_rows(rows)
@@ -2273,7 +2927,7 @@ class BotRuntime:
                 await self.theta_trade.on_theta_snapshots_async(
                     [],
                     quotes=self.quotes,
-                    coin_order=self.coins,
+                    coin_order=self._gear23_trade_coin_order(),
                 )
             except Exception as exc:  # noqa: BLE001
                 if not self._theta_trade_warned:
@@ -2340,7 +2994,7 @@ class BotRuntime:
         active_keys = {
             (s.base_coin, s.side)
             for s in tw_snapshots
-            if s.n_5m > 0 or s.coverage_5m > 0.0 or s.n_1m > 0
+            if s.n_1m > 0 or s.coverage_1m > 0.0
         }
         rows = [
             s.as_row()
@@ -2374,7 +3028,11 @@ class BotRuntime:
             await self.theta_trade.on_theta_snapshots_async(
                 theta_snaps,
                 quotes=self.quotes,
-                coin_order=self._trade_coin_order(),
+                coin_order=(
+                    self._gear23_trade_coin_order(theta_snaps)
+                    if self._gear23_hot_add_enabled
+                    else self._trade_coin_order()
+                ),
             )
             if (
                 self._canary29_window_elapsed()
@@ -2763,34 +3421,50 @@ class BotRuntime:
                     self._write_canary_state()
                 except Exception as exc:
                     self.log.error("canary29_state_checkpoint_failed | err=%s", type(exc).__name__)
-            # Save floor warm pickle immediately (synchronously) before stop_event.
-            # WS tasks may not unwind to finally before systemd timeout.
             self._save_floor_warm_pickle()
             self.stop_event.set()
-            supervisor = getattr(self, "_task_supervisor", None)
-            if supervisor is not None:
-                supervisor.cancel_all()
+            for supervisor in (
+                getattr(self, "_task_supervisor", None),
+                getattr(self, "_hot_add_supervisor", None),
+            ):
+                if supervisor is not None:
+                    supervisor.cancel_all()
 
         def _hot_add_reload_signal() -> None:
             self.log.info("bbot_hot_add_reload_signal | signal=SIGHUP")
             self._hot_add_reload.set()
 
         try:
-            loop.add_signal_handler(
-                signal.SIGTERM, lambda: _shutdown(signal.SIGTERM.name)
-            )
-        except (NotImplementedError, AttributeError):
-            pass
-        # SIGHUP: reload delta/drop when hot-add is on; otherwise keep legacy stop.
-        try:
-            if hot_add_on:
+            loop.add_signal_handler(signal.SIGTERM, lambda: _shutdown(signal.SIGTERM.name))
+            if hot_add_on and not self._gear23_hot_add_enabled:
                 loop.add_signal_handler(signal.SIGHUP, _hot_add_reload_signal)
             else:
-                loop.add_signal_handler(
-                    signal.SIGHUP, lambda: _shutdown(signal.SIGHUP.name)
-                )
+                loop.add_signal_handler(signal.SIGHUP, lambda: _shutdown(signal.SIGHUP.name))
         except (NotImplementedError, AttributeError):
             pass
+
+        if self._gear23_hot_add_enabled:
+            self._hot_add_supervisor = TaskSupervisor()
+            self._hot_add_controller = BotHotAddController(
+                quotes=self.quotes,
+                universe=self.universe,
+                spawn=self._gear23_spawn_coin,
+                max_extra=bbot_hot_add_max_extra(),
+                initial_pair_count=len(self._gear23_base_coins),
+                logger=self.log,
+            )
+            delta_path = bbot_hot_add_delta_path(self.data_root)
+            if delta_path.exists():
+                rows = read_delta_rows(delta_path)
+                added = self._hot_add_controller.apply_rows(rows)
+                self.log.info(
+                    "gear23_startup_delta_loaded | rows=%s | added=%s | source=%s",
+                    len(rows),
+                    len(added),
+                    delta_path,
+                )
+            else:
+                self.log.info("gear23_startup_delta_missing | source=%s", delta_path)
 
         thresh = None
         thresh_cs = None
@@ -2824,6 +3498,11 @@ class BotRuntime:
             f"floor_warm={'loaded' if self._floor_warm_loaded else 'off'} | "
             f"hot_add={'on' if hot_add_on else 'off'}"
         )
+        if self._gear23_hot_add_enabled:
+            self.log.info(
+                "gear23_hot_add_enabled | source=%s | mode=dynamic_pool | extras_require_all_readiness_gates=true",
+                bbot_hot_add_delta_path(self.data_root),
+            )
         if self.mode == "policy" and self.policy is None:
             self.log.error(
                 "policy_missing | continuing WS-only; will not open intents"
@@ -2871,15 +3550,23 @@ class BotRuntime:
                         for coin in os.environ.get("BBOT_CONFIRMED_1X_COINS", "").split(",")
                         if coin.strip()
                     )
-                    unknown = confirmed.difference(self.coins)
+                    self._gear23_confirmed_1x = confirmed
+                    unknown = (
+                        frozenset()
+                        if self._gear23_hot_add_enabled
+                        else confirmed.difference(self.coins)
+                    )
                     if unknown:
                         raise RuntimeError("BBOT_CONFIRMED_1X_COINS contains coins outside active universe")
-                    missing = set(self.coins).difference(confirmed)
+                    required = set(self._gear23_base_coins)
+                    if self.theta_trade is not None and self.theta_trade.slot.position is not None:
+                        required.add(self.theta_trade.slot.position.base_coin.upper())
+                    missing = required.difference(confirmed)
                     if missing:
-                        raise RuntimeError("terminal_private requires prep-verified 1x leverage for every coin")
+                        raise RuntimeError("terminal_private requires prep-verified 1x leverage for base/held coins")
                     self._leverage_one = {
                         key: "1"
-                        for coin in self.coins
+                        for coin in confirmed.intersection(self.coins)
                         for meta in (self._meta(coin),)
                         for key in (("okx", meta.okx_symbol), ("bybit", meta.bybit_symbol))
                     }
@@ -2918,71 +3605,37 @@ class BotRuntime:
             str(hot_add_on).lower(),
             delta_path,
             drop_path,
-            bbot_hot_add_max_extra() if hot_add_on else os.environ.get(
-                "BBOT_HOT_ADD_MAX_EXTRA", "8"
-            ),
+            bbot_hot_add_max_extra() if hot_add_on else os.environ.get("BBOT_HOT_ADD_MAX_EXTRA", "8"),
             str(bbot_hot_add_warm_enabled()).lower() if hot_add_on else "off",
             hist if hist is not None else self.data_root,
         )
 
-        if not hot_add_on:
-            # Legacy path unchanged when BBOT_HOT_ADD is off.
-            tasks: list[asyncio.Task] = [asyncio.create_task(self._heartbeat())]
+        if not hot_add_on and not self._gear23_hot_add_enabled:
+            tasks: list[asyncio.Task[Any]] = [asyncio.create_task(self._heartbeat())]
             if self.floor_observer is not None and (
                 self.profile in {"gear22_would_send", "gear22_live_canary"}
                 or self._floor_warm_loaded
             ):
-                tasks.append(
-                    asyncio.create_task(
-                        self._floor_warm_periodic_save(), name="floor-warm-save"
-                    )
-                )
+                tasks.append(asyncio.create_task(self._floor_warm_periodic_save(), name="floor-warm-save"))
             if self.tw_p50_enabled and self.tw_p50_observer is not None:
-                tasks.append(
-                    asyncio.create_task(self._tw_p50_emit_loop(), name="tw-p50-emit")
-                )
+                tasks.append(asyncio.create_task(self._tw_p50_emit_loop(), name="tw-p50-emit"))
             elif self.theta_enabled and self.theta_screener is not None:
-                tasks.append(
-                    asyncio.create_task(self._theta_emit_loop(), name="theta-emit")
-                )
+                tasks.append(asyncio.create_task(self._theta_emit_loop(), name="theta-emit"))
             if self.profile == "synthetic_roll" and self.theta_trade is not None:
-                tasks.append(
-                    asyncio.create_task(
-                        self._synthetic_roll_loop(), name="synthetic-roll"
-                    )
-                )
+                tasks.append(asyncio.create_task(self._synthetic_roll_loop(), name="synthetic-roll"))
             for coin in self.coins:
                 meta = self._meta(coin)
-                tasks.append(
-                    asyncio.create_task(
-                        run_okx_books5(
-                            base_coin=coin,
-                            okx_symbol=meta.okx_symbol,
-                            book_store=self.quotes[coin]["okx"],
-                            on_book=self._on_book,
-                            on_lifecycle=self._on_lifecycle,
-                            stop_event=self.stop_event,
-                        ),
-                        name=f"okx-{coin}",
-                    )
-                )
-                tasks.append(
-                    asyncio.create_task(
-                        run_bybit_orderbook1(
-                            base_coin=coin,
-                            bybit_symbol=meta.bybit_symbol,
-                            book_store=self.quotes[coin]["bybit"],
-                            on_book=self._on_book,
-                            on_lifecycle=self._on_lifecycle,
-                            stop_event=self.stop_event,
-                        ),
-                        name=f"bybit-{coin}",
-                    )
-                )
-
-            self.log.info(
-                f"ws_tasks_started | n={len(tasks) - 1} | expect={2 * len(self.coins)}"
-            )
+                tasks.append(asyncio.create_task(run_okx_books5(
+                    base_coin=coin, okx_symbol=meta.okx_symbol,
+                    book_store=self.quotes[coin]["okx"], on_book=self._on_book,
+                    on_lifecycle=self._on_lifecycle, stop_event=self.stop_event,
+                ), name=f"okx-{coin}"))
+                tasks.append(asyncio.create_task(run_bybit_orderbook1(
+                    base_coin=coin, bybit_symbol=meta.bybit_symbol,
+                    book_store=self.quotes[coin]["bybit"], on_book=self._on_book,
+                    on_lifecycle=self._on_lifecycle, stop_event=self.stop_event,
+                ), name=f"bybit-{coin}"))
+            self.log.info("ws_tasks_started | n=%s | expect=%s", len(tasks) - 1, 2 * len(self.coins))
             try:
                 await asyncio.gather(*tasks)
             except asyncio.CancelledError:
@@ -2993,10 +3646,12 @@ class BotRuntime:
                 await self._finish_private_shutdown()
             return
 
-        # Hot-add path: TaskSupervisor so late-added WS tasks are awaited/cancelled.
-        supervisor = TaskSupervisor()
+        gear23 = self._gear23_hot_add_enabled
+        supervisor = self._hot_add_supervisor if gear23 else TaskSupervisor()
+        if supervisor is None:
+            raise RuntimeError("hot-add task supervisor missing")
         self._task_supervisor = supervisor
-        initial_pair_count = len(self.coins)
+        initial_pair_count = len(self._gear23_base_coins) if gear23 else len(self.coins)
         supervisor.add(self._heartbeat(), name="heartbeat")
         if self.floor_observer is not None and (
             self.profile in {"gear22_would_send", "gear22_live_canary"}
@@ -3011,55 +3666,49 @@ class BotRuntime:
             supervisor.add(self._synthetic_roll_loop(), name="synthetic-roll")
         for coin in list(self.coins):
             meta = self._meta(coin)
-            supervisor.add(
-                run_okx_books5(
-                    base_coin=coin,
-                    okx_symbol=meta.okx_symbol,
-                    book_store=self.quotes[coin]["okx"],
-                    on_book=self._on_book,
-                    on_lifecycle=self._on_lifecycle,
-                    stop_event=self.stop_event,
-                ),
-                name=f"okx:{coin}",
-            )
-            supervisor.add(
-                run_bybit_orderbook1(
-                    base_coin=coin,
-                    bybit_symbol=meta.bybit_symbol,
-                    book_store=self.quotes[coin]["bybit"],
-                    on_book=self._on_book,
-                    on_lifecycle=self._on_lifecycle,
-                    stop_event=self.stop_event,
-                ),
-                name=f"bybit:{coin}",
-            )
+            supervisor.add(run_okx_books5(
+                base_coin=coin, okx_symbol=meta.okx_symbol,
+                book_store=self.quotes[coin]["okx"], on_book=self._on_book,
+                on_lifecycle=self._on_lifecycle, stop_event=self.stop_event,
+            ), name=f"okx:{coin}")
+            supervisor.add(run_bybit_orderbook1(
+                base_coin=coin, bybit_symbol=meta.bybit_symbol,
+                book_store=self.quotes[coin]["bybit"], on_book=self._on_book,
+                on_lifecycle=self._on_lifecycle, stop_event=self.stop_event,
+            ), name=f"bybit:{coin}")
 
-        controller = BotHotAddController(
-            quotes=self.quotes,
-            universe=self.universe,
-            spawn=self.spawn_coin,
-            max_extra=bbot_hot_add_max_extra(),
-            initial_pair_count=initial_pair_count,
-            logger=self.log,
-        )
-        supervisor.add(
-            run_hot_add_poller(
+        if gear23:
+            self._gear23_pool_started = True
+            if bbot_hot_add_warm_enabled() and self.floor_observer is not None:
+                for coin in self.coins:
+                    if coin not in self._gear23_base_coins:
+                        supervisor.add(self._gear23_warm_coin(coin), name=f"warm-{coin}")
+            controller = self._hot_add_controller
+            assert controller is not None
+            poller = run_hot_add_poller(
                 controller,
-                delta_path,
+                bbot_hot_add_delta_path(self.data_root),
                 interval_sec=bbot_hot_add_poll_sec(),
-                reload_event=self._hot_add_reload,
+                reload_event=asyncio.Event(),
                 logger=self.log,
                 supervisor=supervisor,
-                drop_path=drop_path,
-                drop_fn=self.drop_coin,
-            ),
-            name="bbot-hot-add-poller",
-        )
+            )
+            supervisor.add(poller, name="gear23-hot-add-poller")
+        else:
+            controller = BotHotAddController(
+                quotes=self.quotes, universe=self.universe, spawn=self.spawn_coin,
+                max_extra=bbot_hot_add_max_extra(), initial_pair_count=initial_pair_count,
+                logger=self.log,
+            )
+            supervisor.add(run_hot_add_poller(
+                controller, delta_path, interval_sec=bbot_hot_add_poll_sec(),
+                reload_event=self._hot_add_reload, logger=self.log, supervisor=supervisor,
+                drop_path=drop_path, drop_fn=self.drop_coin,
+            ), name="bbot-hot-add-poller")
 
         self.log.info(
             "ws_tasks_started | supervisor=1 | bootstrap_coins=%s | expect_ws=%s",
-            initial_pair_count,
-            2 * initial_pair_count,
+            initial_pair_count, 2 * len(self.coins),
         )
         try:
             await supervisor.wait()
@@ -3067,10 +3716,17 @@ class BotRuntime:
             self.stop_event.set()
             supervisor.cancel_all()
             raise
+        except Exception:
+            self.stop_event.set()
+            supervisor.cancel_all()
+            raise
         finally:
-            self._save_floor_warm_pickle()
             await supervisor.drain()
             self._task_supervisor = None
+            if gear23:
+                self._hot_add_supervisor = None
+                self.log.info("gear23_tasks_drained | remaining=%s", len(supervisor))
+            self._save_floor_warm_pickle()
             await self._finish_private_shutdown()
 
 

@@ -74,7 +74,6 @@ class MetricsJsonlAdviseTests(unittest.TestCase):
             side="long",
             ts_ms=1_725_000_000_000,
             p50_1m=0.2,
-            p50_5m=0.15,
             floor=0.05,
             computed_at_ms=1_725_000_000_050,
         )
@@ -87,16 +86,13 @@ class MetricsJsonlAdviseTests(unittest.TestCase):
     def test_tw_p50_append_calls_posix_fadvise(self) -> None:
         tmp = Path(tempfile.mkdtemp())
         row = {
-            "schema_version": "bbot.tw_p50.v1",
+            "schema_version": "bbot.tw_p50.v2",
             "base_coin": "ETH",
             "side": "long",
             "ts_ms": 1_725_000_000_000,
             "p50_1m": 0.1,
-            "p50_5m": 0.2,
             "n_1m": 1,
-            "n_5m": 1,
             "coverage_1m": 1.0,
-            "coverage_5m": 1.0,
             "computed_at_ms": 1_725_000_000_010,
         }
         self._assert_append_advises(

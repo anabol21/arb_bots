@@ -9,8 +9,8 @@ import os
 from typing import Any, Optional
 
 
-DEFAULT_SKEW_MAX_MS = 2000
-DEFAULT_AGE_MAX_MS = 2000
+DEFAULT_SKEW_MAX_MS = 10_000
+DEFAULT_AGE_MAX_MS = 10_000
 BOOK_CHANNELS = frozenset({"books5", "orderbook.1"})
 
 
