@@ -41,6 +41,7 @@ BYBIT_POSITION_PATH = "/v5/position/list"
 BYBIT_OPEN_ORDERS_PATH = "/v5/order/realtime"
 OKX_POSITION_PATH = "/api/v5/account/positions"
 OKX_OPEN_ORDERS_PATH = "/api/v5/trade/orders-pending"
+_MAX_PREFLIGHT_PAGES = 100
 
 
 @dataclass(frozen=True)
@@ -307,15 +308,16 @@ def set_and_verify_leverage_one(
         f"category=linear&symbol={target.bybit_symbol}"
         "&settleCoin=USDT&limit=200"
     )
-    from app.bot.private.ws_w4_baseline import _bybit_signed_get
-
-    bybit_data = _bybit_signed_get(
-        credentials=bybit_credentials,
-        base=endpoints.bybit_rest,
-        path=BYBIT_POSITION_PATH,
-        query=query,
-        http_get_json=getter,
-    )
+    try:
+        bybit_data = _bybit_get_all_pages(
+            credentials=bybit_credentials,
+            base=endpoints.bybit_rest,
+            path=BYBIT_POSITION_PATH,
+            query=query,
+            get_fn=getter,
+        )
+    except RuntimeError as exc:
+        raise RuntimeError("leverage_readback_failed") from exc
     if not _bybit_readback_is_one(bybit_data, target.bybit_symbol):
         raise RuntimeError("leverage_readback_unconfirmed")
     return True
@@ -346,19 +348,17 @@ def _preflight_flat(
         f"category=linear&symbol={target.bybit_symbol}"
         "&settleCoin=USDT&limit=200"
     )
-    bybit_positions = _bybit_signed_get(
+    bybit_positions = _bybit_get_all_pages(
         credentials=bybit_credentials,
         base=endpoints.bybit_rest,
         path=_BYBIT_POS,
         query=bybit_position_query,
-        http_get_json=get_fn,
+        get_fn=get_fn,
     )
-    if _bybit_has_next_page(bybit_positions) or not _bybit_position_flat(
-        bybit_positions, target.bybit_symbol
-    ):
+    if not _bybit_position_flat(bybit_positions, target.bybit_symbol):
         raise RuntimeError("leverage_preflight_not_flat")
 
-    bybit_orders = _bybit_signed_get(
+    bybit_orders = _bybit_get_all_pages(
         credentials=bybit_credentials,
         base=endpoints.bybit_rest,
         path=_BYBIT_OPEN,
@@ -366,11 +366,9 @@ def _preflight_flat(
             f"category=linear&symbol={target.bybit_symbol}"
             "&openOnly=0&limit=50"
         ),
-        http_get_json=get_fn,
+        get_fn=get_fn,
     )
-    if _bybit_has_next_page(bybit_orders) or not _bybit_open_orders_flat(
-        bybit_orders, target.bybit_symbol
-    ):
+    if not _bybit_open_orders_flat(bybit_orders, target.bybit_symbol):
         raise RuntimeError("leverage_preflight_not_flat")
 
     okx_positions = _okx_signed_get(
@@ -395,11 +393,44 @@ def _preflight_flat(
         raise RuntimeError("leverage_preflight_not_flat")
 
 
-def _bybit_has_next_page(data: Mapping[str, Any]) -> bool:
-    result = data.get("result")
-    return bool(
-        isinstance(result, Mapping) and result.get("nextPageCursor")
-    )
+def _bybit_get_all_pages(
+    *,
+    credentials: LiveCredentials,
+    base: str,
+    path: str,
+    query: str,
+    get_fn: GetFn,
+) -> Mapping[str, Any]:
+    from app.bot.private.ws_w4_baseline import _bybit_signed_get
+
+    cursor = ""
+    seen: set[str] = set()
+    rows: list[Any] = []
+    for _ in range(_MAX_PREFLIGHT_PAGES):
+        page_query = query if not cursor else f"{query}&{urlencode({'cursor': cursor})}"
+        page = _bybit_signed_get(
+            credentials=credentials,
+            base=base,
+            path=path,
+            query=page_query,
+            http_get_json=get_fn,
+        )
+        if page.get("retCode") not in (0, "0"):
+            raise RuntimeError("bybit_preflight_get_rejected")
+        result = page.get("result")
+        if not isinstance(result, Mapping) or not isinstance(
+            result.get("list"), list
+        ):
+            raise RuntimeError("leverage_preflight_failed")
+        rows.extend(result["list"])
+        next_cursor = str(result.get("nextPageCursor") or "")
+        if not next_cursor:
+            return {"retCode": 0, "result": {"list": rows}}
+        if next_cursor in seen:
+            raise RuntimeError("leverage_preflight_failed")
+        seen.add(next_cursor)
+        cursor = next_cursor
+    raise RuntimeError("leverage_preflight_failed")
 
 
 def _http_get_json(
