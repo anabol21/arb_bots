@@ -17,7 +17,7 @@ import tempfile
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Mapping, Optional
 
 from app.bot.broker import make_broker
 from app.bot.floor_watcher import (
@@ -1658,6 +1658,243 @@ class BotRuntime:
         call["meta"] = bound
         return place_local(data_root=self.data_root, **call)
 
+
+    def _emit_terminal_private_trade_sentry(
+        self,
+        result: Any,
+        kwargs: Mapping[str, Any],
+    ) -> None:
+        """Fail-safe Sentry trade event for terminal_private place_live outcomes.
+
+        Called only after ``place_live`` returns (outside ``place_io_section``).
+        Never raises; never touches exchange I/O.
+        """
+        try:
+            from app.bot.private.send_legs import _attempt_ids
+            from app.bot.sentry_setup import capture_trade_event
+
+            extra_raw = kwargs.get("extra")
+            extra: Mapping[str, Any] = extra_raw if isinstance(extra_raw, Mapping) else {}
+            coin = str(
+                getattr(result, "base_coin", None)
+                or kwargs.get("base_coin")
+                or ""
+            ).upper()
+            spread_side = str(kwargs.get("spread_side") or "").strip().lower()
+            side = str(getattr(result, "side", None) or "").strip().lower()
+            if not side:
+                if spread_side == "open_long":
+                    side = "long"
+                elif spread_side == "open_short":
+                    side = "short"
+                elif spread_side == "close":
+                    close_of = str(kwargs.get("close_of") or "")
+                    if "long" in close_of:
+                        side = "long"
+                    elif "short" in close_of:
+                        side = "short"
+            intent_id = str(
+                getattr(result, "intent_id", None)
+                or kwargs.get("intent_id")
+                or extra.get("intent_id")
+                or ""
+            )
+            trade_id = str(extra.get("trade_id") or intent_id or "")
+            if not trade_id or not coin:
+                return
+
+            completed = bool(getattr(result, "completed", False))
+            abort = getattr(result, "abort", None)
+            abort_s = str(abort) if abort is not None else None
+            keep_pending = bool(getattr(result, "keep_pending", False))
+            send_attempted = bool(getattr(result, "send_attempted", False))
+            status = getattr(result, "status", None)
+
+            asymmetric = bool(
+                abort_s in {"asymmetric_fill", "partial_fill", "fill_qty_mismatch"}
+                or (abort_s is not None and "asymmetric" in abort_s)
+            )
+
+            if completed and spread_side == "close":
+                event = "close"
+            elif completed:
+                event = "open"
+            elif asymmetric:
+                event = "asymmetric_fill"
+            else:
+                event = "send_abort"
+
+            signal_ts_ms = kwargs.get("signal_ts_ms")
+            fill_ts_ms = getattr(result, "fill_ts_ms", None)
+            latency_ms = getattr(result, "latency_ms", None)
+            if latency_ms is None and signal_ts_ms is not None and fill_ts_ms is not None:
+                try:
+                    latency_ms = int(fill_ts_ms) - int(signal_ts_ms)
+                except (TypeError, ValueError):
+                    latency_ms = None
+
+            bybit_order_id = okx_order_id = None
+            try:
+                bybit_order_id, okx_order_id, _dual = _attempt_ids(intent_id or trade_id)
+            except Exception:
+                pass
+
+            reduce_only = spread_side == "close" or bool(kwargs.get("close_of"))
+            chronometry = self._terminal_private_step_chrono_summary(intent_id or trade_id)
+
+            sentry_extras: dict[str, Any] = {
+                "spread_side": spread_side or None,
+                "direction": side or None,
+                "intent_id": intent_id or None,
+                "trade_id": trade_id,
+                "okx_venue": "okx",
+                "bybit_venue": "bybit",
+                "okx_order_id": okx_order_id,
+                "bybit_order_id": bybit_order_id,
+                "okx_avg_px": getattr(result, "okx_fill_px", None),
+                "bybit_avg_px": getattr(result, "bybit_fill_px", None),
+                "okx_filled_qty": getattr(result, "okx_filled_qty", None),
+                "bybit_filled_qty": getattr(result, "bybit_filled_qty", None),
+                "coin_qty": getattr(result, "coin_qty", None),
+                "fill_status": (
+                    "filled"
+                    if completed
+                    else (
+                        abort_s
+                        or status
+                        or ("keep_pending" if keep_pending else "incomplete")
+                    )
+                ),
+                "completed": completed,
+                "keep_pending": keep_pending,
+                "send_attempted": send_attempted,
+                "abort": abort_s,
+                "status": status,
+                "reduce_only": reduce_only,
+                "signal_ts_ms": signal_ts_ms,
+                "fill_ts_ms": fill_ts_ms,
+                "latency_ms": latency_ms,
+                "notional_usdt": getattr(self, "notional", None),
+                "completed_cycles": getattr(self, "_canary29_completed_cycles", None),
+                "execution": "terminal_private",
+                "chronometry": chronometry or None,
+            }
+            for key in (
+                "theta_1m",
+                "theta_5m",
+                "floor",
+                "p50_1m",
+                "spread_signal",
+                "spread_fill",
+                "slip_spread",
+                "pnl_spread",
+                "pnl_usdt_approx",
+                "open_fill_spread",
+                "close_fill_spread",
+                "fees_usdt",
+                "fee_usdt",
+                "potential_pp",
+                "signal_mono_ns",
+            ):
+                if key in extra and extra.get(key) is not None:
+                    sentry_extras[key] = extra.get(key)
+
+            capture_trade_event(
+                event=event,
+                trade_id=trade_id,
+                coin=coin,
+                side=side or "unknown",
+                extras=sentry_extras,
+                level="error",
+            )
+        except Exception:
+            try:
+                self.log.exception(
+                    "sentry_trade_emit | status=fail | path=terminal_private"
+                )
+            except Exception:
+                pass
+
+    def _terminal_private_step_chrono_summary(
+        self,
+        intent_id: str,
+    ) -> Optional[dict[str, Any]]:
+        """Best-effort per-leg timings from step_chrono.jsonl for this intent."""
+        if not intent_id:
+            return None
+        try:
+            from app.bot.paths import theta_step_chrono_jsonl_path
+
+            path = theta_step_chrono_jsonl_path(self.data_root)
+            if not path.exists() or path.is_symlink():
+                return None
+            wanted = str(intent_id)
+            rows: list[dict[str, Any]] = []
+            with path.open("r", encoding="utf-8") as fh:
+                for line in fh:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        row = json.loads(line)
+                    except Exception:
+                        continue
+                    if str(row.get("intent_id") or "") == wanted:
+                        rows.append(row)
+            if not rows:
+                return None
+            by_block: dict[str, dict[str, Any]] = {}
+            for row in rows:
+                block = str(row.get("block") or "")
+                edge = str(row.get("edge") or "")
+                if not block:
+                    continue
+                slot = by_block.setdefault(block, {})
+                payload = {
+                    "wall_ms": row.get("wall_ms"),
+                    "mono_ns": row.get("mono_ns"),
+                    "duration_ms": row.get("duration_ms"),
+                }
+                if edge:
+                    slot[edge] = payload
+                else:
+                    slot.setdefault("row", payload)
+            signal_ms = None
+            send_ms = None
+            fill_ms = None
+            sig = by_block.get("signal_decision") or {}
+            if "selected" in sig:
+                signal_ms = sig["selected"].get("wall_ms")
+            elif "row" in sig:
+                signal_ms = sig["row"].get("wall_ms")
+            ws = by_block.get("ws_send") or {}
+            if "enter" in ws:
+                send_ms = ws["enter"].get("wall_ms")
+            fill = by_block.get("fill_done") or {}
+            if "exit" in fill:
+                fill_ms = fill["exit"].get("wall_ms")
+            elif "enter" in fill:
+                fill_ms = fill["enter"].get("wall_ms")
+            out: dict[str, Any] = {"blocks": by_block}
+            if signal_ms is not None and send_ms is not None:
+                try:
+                    out["signal_to_send_ms"] = int(send_ms) - int(signal_ms)
+                except (TypeError, ValueError):
+                    pass
+            if send_ms is not None and fill_ms is not None:
+                try:
+                    out["send_to_fill_ms"] = int(fill_ms) - int(send_ms)
+                except (TypeError, ValueError):
+                    pass
+            if signal_ms is not None and fill_ms is not None:
+                try:
+                    out["signal_to_fill_ms"] = int(fill_ms) - int(signal_ms)
+                except (TypeError, ValueError):
+                    pass
+            return out
+        except Exception:
+            return None
+
     def _synthetic_live_place(self, **kwargs: Any) -> Any:
         """Live gates only. Uses the warm session sender; does not open a new socket."""
         from app.bot.private.place_send import (
@@ -1762,6 +1999,9 @@ class BotRuntime:
             self._synthetic_roll_halt_reason = str(
                 abort or status or "incomplete_place"
             )
+        # Sentry after place_io_section so trade emit never blocks/delays send.
+        if self._terminal_private_execution:
+            self._emit_terminal_private_trade_sentry(result, kwargs)
         return result
 
     def _prefetch_okx_inst_id_codes(self) -> None:
