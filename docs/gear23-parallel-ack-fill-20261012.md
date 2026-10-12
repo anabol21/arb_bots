@@ -47,3 +47,42 @@ then be resolved by an appended account-flat reconciliation marker and a backed-
 up checkpoint reset. That marker resolves the account slot, does not erase the
 original pending row, and does not invent fill price, quantity or execution time.
 Timeout/partial/asymmetric still halt; automatic order cancellation is not added.
+
+## VPS canary rollout result
+
+The decision-context baseline was merged through PR #81; main merge commit
+`e0816c44c5cecd90375d93f41a15128747d8cf68`. The separate parallel-reader patch
+is commit `156d8e6a5f5f12faa72d5e8171620b4749124d26` in draft PR #82.
+Only its `app/bot/private/place_send.py` was overlaid on the stopped deployed
+Gear 2.3 code; this is not a full checkout of current main. The previous file
+and canary checkpoint were backed up before modification.
+
+On VPS Python 3.10.12 / websockets 16.1, the affected private suite passed
+44 tests. No exchange calls occur in those tests. A single fresh GET-only
+pre-start check found zero nonzero Bybit USDT-linear / OKX SWAP positions and
+zero open orders. The RSR timeout close was reconciled with an appended marker
+and checkpoint reset. Historical pending rows remain intact; precise execution
+prices/timestamps of that close were not reconstructed.
+
+The existing launcher started PID `3593028` at 2026-10-12 15:32:26.868 MSK.
+At 15:35:12 MSK, the process was alive, private warm readiness was true, the
+64-coin pool had accepted 36,143 ticks, pending was false, the slot was empty,
+and the execution halt reason was null. All 35 hot-add extras had confirmed
+1x; TW and theta files had been updated less than one second before the check.
+The existing unlimited-cycle / unlimited-time campaign settings were preserved.
+
+The launcher checksum was unchanged and the process received the existing
+SENTRY_DSN / SENTRY_ENVIRONMENT configuration. No Sentry policy or event code
+was modified. Delivery to the downstream Grok bot was not exercised; an explicit
+Sentry initialization log was not present in the checked startup logs.
+
+No extra experiment orders were submitted. At this startup observation there
+was no new live trade validating the modified receiver path. This evidence
+confirms startup and mock concurrency behavior, not a completed real dual-leg
+trade under the patch. Timeout, partial, or asymmetric results still halt the
+manager and retain pending evidence; automatic cancellation is not implemented.
+
+Operational evidence is local to the VPS under
+`/root/b-private-b-exp/response-manager/gear23-ack-fill-parallel-20261012/`:
+`account-flat.json`, `launch.json`, `startup-result.json`, and pre-change backups.
+No env files or credentials are included in the PR.
