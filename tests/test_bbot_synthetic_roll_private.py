@@ -4,10 +4,13 @@ from __future__ import annotations
 
 import json
 import tempfile
+import threading
+import time
 import unittest
 from decimal import Decimal
 from pathlib import Path
 from types import SimpleNamespace
+from unittest import mock
 
 from app.bot.private.coin_qty import CoinQtyError, shared_coin_qty, shared_from_meta
 from app.bot.private.leverage_one import LeverageTarget, set_leverage_one
@@ -552,6 +555,139 @@ class LiveCycleTests(unittest.TestCase):
 
     def tearDown(self) -> None:
         clear_all()
+
+    def test_private_fill_readers_run_together_before_okx_first_collection(self) -> None:
+        """A slow OKX read must not prevent the Bybit reader from progressing."""
+        bybit_done = threading.Event()
+        okx_observed_bybit = threading.Event()
+        reader_threads: dict[str, str] = {}
+        writer_threads: list[str] = []
+
+        def recv(venue: str) -> str:
+            reader_threads[venue] = threading.current_thread().name
+            if venue == "okx":
+                if bybit_done.wait(0.4):
+                    okx_observed_bybit.set()
+            else:
+                bybit_done.set()
+            return _report_order_body(
+                venue, self.ws.sent, price="2.1" if venue == "okx" else "2.2"
+            )
+
+        from app.bot.private import place_send as place_send_module
+
+        append_rows = place_send_module._append_trade_rows
+
+        def track_writer(data_root: Path, rows: list[dict]) -> None:
+            writer_threads.append(threading.current_thread().name)
+            append_rows(data_root, rows)
+
+        with mock.patch.object(
+            place_send_module, "_append_trade_rows", side_effect=track_writer
+        ):
+            result = place_live(
+                data_root=self.root,
+                spread_side="open_long",
+                base_coin="BTC",
+                signal_ts_ms=1_700_000_000_000,
+                okx_book=_book(2),
+                bybit_book=_book(2),
+                meta=_meta(),
+                sender=self.sender,
+                credentials=_creds(),
+                leverage_one=True,
+                inst_id_code=101,
+                recv_fn=recv,
+            )
+
+        self.assertTrue(result.completed)
+        self.assertTrue(okx_observed_bybit.is_set())
+        self.assertTrue(
+            all(name.startswith("bbot-fill") for name in reader_threads.values())
+        )
+        self.assertNotEqual(reader_threads["okx"], reader_threads["bybit"])
+        self.assertTrue(writer_threads)
+        self.assertEqual(set(writer_threads), {threading.current_thread().name})
+
+    def test_shared_wait_deadline_keeps_early_fill_and_reports_asymmetric_fill(self) -> None:
+        from app.bot.private.place_send import SYNTHETIC_FILL_WAIT_SEC
+
+        deadline: float | None = None
+        bybit_body: str | None = None
+
+        def start_shared_deadline() -> None:
+            nonlocal deadline
+            deadline = time.monotonic() + 0.2
+
+        def recv(venue: str) -> str | None:
+            nonlocal bybit_body
+            assert deadline is not None
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return None
+            if venue == "bybit":
+                bybit_body = _report_order_body("bybit", self.ws.sent, price="2.2")
+                return bybit_body
+            threading.Event().wait(remaining)
+            return None
+
+        result = place_live(
+            data_root=self.root,
+            spread_side="open_long",
+            base_coin="BTC",
+            signal_ts_ms=1_700_000_000_000,
+            okx_book=_book(2),
+            bybit_book=_book(2),
+            meta=_meta(),
+            sender=self.sender,
+            credentials=_creds(),
+            leverage_one=True,
+            inst_id_code=101,
+            recv_fn=recv,
+            wait_fn=start_shared_deadline,
+        )
+
+        self.assertEqual(SYNTHETIC_FILL_WAIT_SEC, 60.0)
+        self.assertEqual(result.abort, "asymmetric_fill")
+        self.assertTrue(result.keep_pending)
+        rows = _read(theta_trades_jsonl_path(self.root, "2023-11-14"))
+        self.assertIn(bybit_body, [r.get("body") for r in rows])
+        self.assertNotIn("open", [r.get("status") for r in rows])
+
+    def test_reader_exception_joins_other_reader_and_stays_fail_closed(self) -> None:
+        other_started = threading.Event()
+        failure_raised = threading.Event()
+        other_finished = threading.Event()
+
+        def recv(venue: str) -> str | None:
+            if venue == "okx":
+                self.assertTrue(other_started.wait(0.3))
+                failure_raised.set()
+                raise RuntimeError("reader failed")
+            other_started.set()
+            failure_raised.wait(0.3)
+            other_finished.set()
+            return None
+
+        with self.assertRaisesRegex(RuntimeError, "reader failed"):
+            place_live(
+                data_root=self.root,
+                spread_side="open_long",
+                base_coin="BTC",
+                signal_ts_ms=1_700_000_000_000,
+                okx_book=_book(2),
+                bybit_book=_book(2),
+                meta=_meta(),
+                sender=self.sender,
+                credentials=_creds(),
+                leverage_one=True,
+                inst_id_code=101,
+                recv_fn=recv,
+            )
+
+        self.assertTrue(other_finished.is_set())
+        rows = _read(theta_trades_jsonl_path(self.root, "2023-11-14"))
+        self.assertEqual([row.get("status") for row in rows], ["pending"])
 
     def test_injected_sender_open_then_close_returns_flat(self) -> None:
         def recv(venue: str) -> str:
