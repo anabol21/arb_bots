@@ -64,6 +64,8 @@ class ThetaArithmeticTests(unittest.TestCase):
             p50_1m=0.12,
             floor=0.08,
             computed_at_ms=1_700_000_000_100,
+            coverage_1m=0.75,
+            n_1m=3,
         )
         row = snap.as_row()
         self.assertEqual(row["schema_version"], SCHEMA_VERSION)
@@ -75,8 +77,11 @@ class ThetaArithmeticTests(unittest.TestCase):
             {
                 "schema_version", "base_coin", "side", "ts_ms", "p50_1m",
                 "floor_tf_select_a25", "theta_1m", "computed_at_ms",
+                "coverage_1m", "n_1m",
             },
         )
+        self.assertEqual(row["coverage_1m"], 0.75)
+        self.assertEqual(row["n_1m"], 3)
         self.assertAlmostEqual(row["floor_tf_select_a25"], 0.08)
 
 
@@ -139,6 +144,8 @@ class ThetaScreenerTests(unittest.TestCase):
         self.assertEqual(len(out), 1)
         self.assertAlmostEqual(out[0].theta_1m, 0.03)
         self.assertAlmostEqual(out[0].floor_tf_select_a25, 0.02)
+        self.assertEqual(out[0].coverage_1m, 1.0)
+        self.assertEqual(out[0].n_1m, 3)
 
     def test_null_when_no_floor(self) -> None:
         screener = LiveThetaScreener(["BTC"], floor_observer=None, tw_p50_observer=None)

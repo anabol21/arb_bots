@@ -23,6 +23,7 @@ from app.bot.theta_trade_manager import (
     ThetaTradeConfig,
     ThetaTradeManager,
 )
+from app.bot.theta_screener import ThetaSnapshot
 
 
 class Canary29MetadataTests(unittest.TestCase):
@@ -360,6 +361,51 @@ class Gear22LongCanaryContractTests(unittest.TestCase):
 
 
 class Gear22CheckpointFailureTests(unittest.IsolatedAsyncioTestCase):
+    async def test_terminal_place_worker_receives_decision_context(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            calls: dict[str, object] = {}
+
+            def place(**kwargs: object) -> SimpleNamespace:
+                calls.update(kwargs)
+                return SimpleNamespace(completed=False, keep_pending=False)
+
+            manager = ThetaTradeManager(
+                data_root=Path(tmp),
+                config=ThetaTradeConfig(),
+                execution_mode="terminal_private",
+                place_fn=place,
+                meta_fn=lambda _coin: None,
+            )
+            snapshot = ThetaSnapshot(
+                base_coin="RVN",
+                side="long",
+                ts_ms=900,
+                p50_1m=0.12,
+                floor_tf_select_a25=0.08,
+                theta_1m=0.04,
+                computed_at_ms=1000,
+                coverage_1m=0.75,
+                n_1m=3,
+            )
+            manager._schedule_terminal_private_place(
+                ThetaDecision(
+                    action="open", base_coin="RVN", side="long",
+                    reason="signal", theta_1m=0.04,
+                ),
+                signal_ts=1000,
+                signal_mono_ns=None,
+                snapshots=[snapshot],
+                okx_s={"bid_price": 1.0, "ask_price": 1.0},
+                bybit_s={"bid_price": 1.0, "ask_price": 1.0},
+            )
+            assert manager._terminal_place_task is not None
+            await manager._terminal_place_task
+
+        context = calls["extra"]["decision_context"]
+        self.assertEqual(context["schema_version"], "bbot.trade_decision_context.v1")
+        self.assertEqual(context["state"]["long"]["coverage_1m"], 0.75)
+        self.assertEqual(context["state"]["long"]["n_1m"], 3)
+
     async def test_checkpoint_failure_requests_runtime_stop_and_retains_pending(self) -> None:
         runtime = object.__new__(BotRuntime)
         runtime.theta_trade = SimpleNamespace(

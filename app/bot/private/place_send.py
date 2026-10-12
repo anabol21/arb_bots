@@ -550,6 +550,9 @@ def _place(
         signal_monotonic_ns=extra.get("signal_mono_ns"),
     )
     send_attempted = False
+    decision_context = extra.get("decision_context")
+    if not isinstance(decision_context, dict):
+        decision_context = None
     okx_side, bybit_side, pos_side, reduce_only = _sides(spread_side, close_of)
     event = "close" if reduce_only else "open"
     phase = event
@@ -655,6 +658,8 @@ def _place(
         "signal_ts_ms": int(signal_ts_ms),
         "reduce_only": bool(reduce_only),
     }
+    if decision_context is not None:
+        pending_row["decision_context"] = decision_context
     chrono.enter("journal_pending")
     _append_trade_rows(data_root, [pending_row])
     chrono.exit("journal_pending")
@@ -794,6 +799,8 @@ def _place(
         "signal_ts_ms": int(signal_ts_ms),
         "reduce_only": bool(reduce_only),
     }
+    if decision_context is not None:
+        done["decision_context"] = decision_context
     chrono.enter("fill_done")
     _append_trade_rows(data_root, [done])
     chrono.exit("fill_done")

@@ -1374,6 +1374,7 @@ class ThetaTradeManager:
             return self._execute_injected_place(
                 decision,
                 signal_ts=signal_ts,
+                snapshots=snapshots,
                 okx_s=okx_s,
                 bybit_s=bybit_s,
             )
@@ -1806,6 +1807,7 @@ class ThetaTradeManager:
         *,
         signal_ts: int,
         signal_mono_ns: Optional[int] = None,
+        snapshots: Sequence[ThetaSnapshot] = (),
         okx_s: Mapping[str, Any],
         bybit_s: Mapping[str, Any],
     ) -> list[dict[str, Any]]:
@@ -1887,11 +1889,72 @@ class ThetaTradeManager:
                 self._log(f"theta_trade_pre_send_reject | reason={reason} | coin={coin}")
                 return []
 
+        diagnostic_spread_side = spread_side_for(side, event=decision.action)
+        spread_long = spread_short = selected_spread = None
+        try:
+            spread_long, spread_short = compute_spreads_pct(okx_s, bybit_s)
+            spread_long = _finite(spread_long)
+            spread_short = _finite(spread_short)
+            selected_spread = (
+                spread_long if diagnostic_spread_side == "open_long" else spread_short
+            )
+        except (KeyError, TypeError, ValueError, ZeroDivisionError):
+            pass
+        state = {
+            snap.side: {
+                "p50_1m": snap.p50_1m,
+                "floor_tf_select_a25": snap.floor_tf_select_a25,
+                "theta_1m": snap.theta_1m,
+                "coverage_1m": snap.coverage_1m,
+                "n_1m": snap.n_1m,
+                "ts_ms": snap.ts_ms,
+                "computed_at_ms": snap.computed_at_ms,
+            }
+            for snap in snapshots
+            if str(snap.base_coin).upper() == str(coin).upper()
+        }
+        policy = decision.policy_decision
+        okx_l1 = snapshot_book(okx_s)
+        bybit_l1 = snapshot_book(bybit_s)
+        decision_context = {
+            "schema_version": "bbot.trade_decision_context.v1",
+            "signal_ts_ms": int(signal_ts),
+            "action": decision.action,
+            "base_coin": str(coin).upper(),
+            "position_side": side,
+            "decision_reason": decision.reason,
+            "policy_id": POLICY_ID,
+            "policy_action": getattr(policy, "action", None),
+            "policy_reason": getattr(policy, "reason", None),
+            "theta_threshold": float(self.config.theta_thr),
+            "theta_1m": decision.theta_1m,
+            "opposite_theta_1m": decision.opposite_theta_1m,
+            "potential_pp": decision.potential_pp,
+            "spread_side": diagnostic_spread_side,
+            "spread_long_pct": spread_long,
+            "spread_short_pct": spread_short,
+            "selected_spread_pct": selected_spread,
+            "state": state,
+            "book": {
+                "okx": {
+                    **{key: okx_l1.get(key) for key in (
+                        "bid_price", "bid_size", "ask_price", "ask_size",
+                        "ts_exchange", "local_recv_ts_ms", "delivery_latency_ms",
+                    )},
+                    "ct_val": _finite(okx_s.get("ct_val")),
+                },
+                "bybit": {key: bybit_l1.get(key) for key in (
+                    "bid_price", "bid_size", "ask_price", "ask_size",
+                    "ts_exchange", "local_recv_ts_ms", "delivery_latency_ms",
+                )},
+            },
+        }
         extra = {
             "trade_id": trade_id,
             "intent_id": intent_id,
             "synthetic_roll": self._decide_fn is not None,
             "signal_mono_ns": signal_mono_ns,
+            "decision_context": decision_context,
         }
         self.slot.pending = True
         keep_pending = False
@@ -1963,6 +2026,7 @@ class ThetaTradeManager:
         *,
         signal_ts: int,
         signal_mono_ns: Optional[int],
+        snapshots: Sequence[ThetaSnapshot] = (),
         okx_s: Mapping[str, Any],
         bybit_s: Mapping[str, Any],
     ) -> list[dict[str, Any]]:
@@ -1982,6 +2046,7 @@ class ThetaTradeManager:
                     decision,
                     signal_ts=signal_ts,
                     signal_mono_ns=signal_mono_ns,
+                    snapshots=snapshots,
                     okx_s=okx_s,
                     bybit_s=bybit_s,
                 ),
@@ -2197,6 +2262,7 @@ class ThetaTradeManager:
                 decision,
                 signal_ts=signal_ts,
                 signal_mono_ns=signal_mono_ns,
+                snapshots=snapshots,
                 okx_s=okx_s,
                 bybit_s=bybit_s,
             )
@@ -2206,6 +2272,7 @@ class ThetaTradeManager:
                 decision,
                 signal_ts=signal_ts,
                 signal_mono_ns=signal_mono_ns,
+                snapshots=snapshots,
                 okx_s=okx_s,
                 bybit_s=bybit_s,
             )
