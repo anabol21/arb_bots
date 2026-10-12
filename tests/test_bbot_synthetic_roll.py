@@ -14,6 +14,7 @@ from types import SimpleNamespace
 
 from app.bot.paths import theta_step_chrono_jsonl_path, theta_trades_jsonl_path
 from app.bot.private.place_send import PlaceSendResult, place_local
+from app.bot.theta_screener import ThetaSnapshot
 from app.bot.synthetic_policy import (
     SyntheticDecision,
     decide_synthetic_roll,
@@ -185,6 +186,65 @@ class ManagerTests(unittest.TestCase):
         mgr.on_theta_snapshots([], quotes=_quotes(), coin_order=POOL, now_ms=1_700_000_001_000)
         self.assertEqual(len(self.calls), 1)
         self.assertIsNotNone(mgr.slot.position)
+
+    def test_trade_journal_keeps_decision_context_and_tw_coverage(self) -> None:
+        timestamp = 1_700_000_000_000
+        seed, coin, side = _find_open_hold_close_seed(POOL)
+        snapshot = ThetaSnapshot(
+            base_coin=coin,
+            side=side,
+            ts_ms=timestamp - 1000,
+            p50_1m=0.12,
+            floor_tf_select_a25=0.08,
+            theta_1m=0.04,
+            computed_at_ms=timestamp,
+            coverage_1m=0.75,
+            n_1m=3,
+        )
+        mgr = self._manager(random.Random(seed))
+
+        mgr.on_theta_snapshots([snapshot], quotes=_quotes(), coin_order=POOL, now_ms=timestamp)
+        mgr.on_theta_snapshots([snapshot], quotes=_quotes(), coin_order=POOL, now_ms=timestamp + 1000)
+        mgr.on_theta_snapshots([snapshot], quotes=_quotes(), coin_order=POOL, now_ms=timestamp + 2000)
+
+        rows = _rows(theta_trades_jsonl_path(self.root, "2023-11-14"))
+        trade_rows = [
+            row for row in rows
+            if row.get("status") in {"pending", "open", "closed"}
+        ]
+        self.assertEqual(
+            [row["status"] for row in trade_rows],
+            ["pending", "open", "pending", "closed"],
+        )
+        expected = {
+            "schema_version": "bbot.trade_decision_context.v1",
+            "action": "open",
+            "base_coin": coin,
+            "position_side": side,
+            "decision_reason": "synthetic_roll",
+            "state": {
+                side: {
+                    "p50_1m": 0.12,
+                    "floor_tf_select_a25": 0.08,
+                    "theta_1m": 0.04,
+                    "coverage_1m": 0.75,
+                    "n_1m": 3,
+                    "ts_ms": timestamp - 1000,
+                    "computed_at_ms": timestamp,
+                }
+            },
+        }
+        for row in trade_rows[:2]:
+            context = row["decision_context"]
+            for key, value in expected.items():
+                self.assertEqual(context[key], value)
+        self.assertEqual(
+            trade_rows[0]["decision_context"], trade_rows[1]["decision_context"]
+        )
+        close_context = trade_rows[-1]["decision_context"]
+        self.assertEqual(close_context["action"], "close")
+        self.assertEqual(close_context["decision_reason"], "synthetic_roll")
+        self.assertEqual(close_context["base_coin"], coin)
 
     def test_size_gate_blocks_open_and_close(self) -> None:
         seed, _coin, _side = _find_seed(POOL, (31,))
@@ -482,6 +542,7 @@ class RollHaltTests(unittest.TestCase):
         session = Session()
         host = SimpleNamespace(
             _private_warm=session,
+            _terminal_private_execution=False,
             _okx_ct_vals={},
             _okx_inst_id_codes={},
             _leverage_one={
@@ -553,6 +614,10 @@ class RollHaltTests(unittest.TestCase):
                 self.log = log
                 self._theta_trade_warned = False
                 self._synthetic_roll_halted = False
+                self._terminal_private_execution = False
+
+            def _gear23_trade_coin_order(self, _snapshots=()):
+                return tuple(self.coins)
 
         host = Host()
         with patch("app.bot.runtime.EMIT_INTERVAL_SEC", 0):
@@ -607,6 +672,10 @@ class RollHaltTests(unittest.TestCase):
                 self._theta_trade_warned = False
                 self._synthetic_roll_halted = False
                 self._synthetic_roll_halt_reason = None
+                self._terminal_private_execution = False
+
+            def _gear23_trade_coin_order(self, _snapshots=()):
+                return tuple(self.coins)
 
         host = Host()
         box["host"] = host
