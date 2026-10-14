@@ -1036,6 +1036,7 @@ class ThetaTradeManager:
         pre_send_guard_fn: Optional[Callable[..., Optional[str]]] = None,
         entry_allowed_fn: Optional[Callable[[], bool]] = None,
         state_change_fn: Optional[Callable[[], None]] = None,
+        decision_observer: Optional[Callable[[ThetaDecision, int], None]] = None,
     ) -> None:
         self.data_root = Path(data_root)
         self.config = config or ThetaTradeConfig.from_env()
@@ -1049,6 +1050,7 @@ class ThetaTradeManager:
         self._pre_send_guard_fn = pre_send_guard_fn
         self._entry_allowed_fn = entry_allowed_fn
         self._state_change_fn = state_change_fn
+        self._decision_observer = decision_observer
         self.last_policy_status: dict[str, Any] = {}
         self.execution_mode = str(execution_mode).strip().lower()
         if self.execution_mode not in {"inline", "terminal_private"}:
@@ -2168,6 +2170,11 @@ class ThetaTradeManager:
         decision = self._record_policy_status(decision, evaluated_at_ms=tick_ms)
         signal_ts_ms = int(time.time() * 1000) if now_ms is None else int(now_ms)
         signal_mono_ns = time.monotonic_ns()
+        if self._decision_observer is not None:
+            try:
+                self._decision_observer(decision, signal_mono_ns)
+            except Exception:  # noqa: BLE001 — diagnostics cannot change policy behavior
+                pass
 
         async def _async_sleep(seconds: float) -> None:
             await asyncio.sleep(seconds)
