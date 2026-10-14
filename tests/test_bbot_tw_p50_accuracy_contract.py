@@ -304,8 +304,12 @@ class TwP50AccuracyContractTests(unittest.TestCase):
             self.assertTrue(math.isfinite(sampled_theta - exact_theta))
             sampled_signal = sampled_theta > 0.0
             exact_signal = exact_theta > 0.0
-            self.assertIn(sampled_signal, (True, False))
-            self.assertIn(exact_signal, (True, False))
+            # This seeded cap=4096 stream deliberately pins a decision-level
+            # divergence: diagnostic CPU research may proceed, signal validity
+            # and final canary approval must remain blocked.
+            self.assertEqual(actual[0], 1.0)
+            self.assertEqual(exact_p50, 0.0)
+            self.assertNotEqual(sampled_signal, exact_signal)
 
     def test_json_and_theta_follow_on_keep_existing_contract(self) -> None:
         tw_keys = {
