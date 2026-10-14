@@ -351,6 +351,44 @@ class TwP50AccuracyContractTests(unittest.TestCase):
             self.assertEqual(exact_p50, 0.0)
             self.assertNotEqual(sampled_signal, exact_signal)
 
+    def test_tw_query_does_not_mutate_retained_stream_or_rng(self) -> None:
+        rng = random.Random(17)
+        observer = LiveTwP50Observer(
+            ["BTC"], sample_cap=16, rng=rng, one_minute_engine="deque"
+        )
+        for index in range(400):
+            ts = index * 10
+            value = float((index * 11) % 23)
+            observer.note_spreads("BTC", ts, value, -value)
+
+        now_ms = 3_990
+        observer.maintain(now_ms=now_ms)
+        samples_before = observer.snapshot_samples()
+        seen_before = {
+            key: ring.samples_seen for key, ring in observer._rings.items()
+        }
+        rng_before = rng.getstate()
+
+        first = observer.query_snapshots(now_ms=now_ms, computed_at_ms=4_000)
+        second = observer.query_snapshots(now_ms=now_ms, computed_at_ms=4_000)
+
+        self.assertEqual(first, second)
+        self.assertEqual(observer.snapshot_samples(), samples_before)
+        self.assertEqual(
+            {key: ring.samples_seen for key, ring in observer._rings.items()},
+            seen_before,
+        )
+        self.assertEqual(rng.getstate(), rng_before)
+
+        # The compatibility path retains the old canonical maintain+query
+        # behavior and therefore agrees at the same cutoff.
+        compatible = observer.compute_snapshots(
+            now_ms=now_ms, computed_at_ms=4_000
+        )
+        self.assertEqual(compatible, first)
+        self.assertEqual(observer.snapshot_samples(), samples_before)
+        self.assertEqual(rng.getstate(), rng_before)
+
     def test_json_and_theta_follow_on_keep_existing_contract(self) -> None:
         tw_keys = {
             "schema_version", "base_coin", "side", "ts_ms", "p50_1m",
