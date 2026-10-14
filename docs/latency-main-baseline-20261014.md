@@ -43,3 +43,7 @@ Repeating the same local cap=4096 microbenchmark after the patch gave first-4,09
 ## Shared theta lookup (P03 slice)
 
 `decide_theta_k1` already built a `(coin, side) → snapshot` map for held-position/reason lookups, but `build_feature_snapshot` rebuilt the same full map for every candidate. It now accepts an optional shared index, and the held-position plus candidate paths reuse that one map. This removes repeated O(pool) map construction from the candidate loop (O(N²) snapshot traversals to O(N)) without changing candidate order or feature values. Focused tests compare indexed and public sequence paths and verify all candidate calls receive the same map. The change is not an end-to-end latency claim.
+
+## TW maintenance/query split (P04)
+
+The observer now exposes `maintain(now_ms)` and read-only `query_snapshots(now_ms, computed_at_ms)` separately. Existing `compute_snapshots` remains a compatibility wrapper that runs maintenance followed by query at the same cutoff, preserving the canonical 1 Hz schedule and outputs. The query copies the maintained ring and performs no pruning or RNG calls; repeat-query and wrapper-parity tests pass with a fixed cutoff. This prepares later coherent-cut/scheduler work without changing cadence or reservoir selection today.
