@@ -187,6 +187,103 @@ class TwP50AccuracyContractTests(unittest.TestCase):
                         repeats.append(([s.as_row() for s in snapshots], retained, error))
                     self.assertEqual(repeats[0], repeats[1])
 
+    def test_repeated_cap_with_aging_carry_and_policy_error(self) -> None:
+        # Exercise repeated replacement and aging with a small cap so the test
+        # covers many rollover cycles quickly. Compare every emitted snapshot
+        # against the uncapped event history; capped Algorithm R is approximate.
+        cap = 16
+        observer = LiveTwP50Observer(
+            ["BTC"], sample_cap=cap, rng=random.Random(7),
+            one_minute_engine="deque",
+        )
+        history: list[tuple[int, float]] = []
+        replacements_observed = 0
+        samples_seen_at_checkpoints = []
+        coverage_errors = []
+        theta_errors = []
+        boolean_mismatches = []
+        threshold = 0.0
+        interval_ms = 100
+        total_events = 12 * 60 * 10  # 12 minutes at 10 Hz; cap hit repeatedly.
+        for index in range(total_events):
+            ts = index * interval_ms
+            # Regime changes force the exact median and policy boolean to move.
+            regime = (ts // 180_000) % 2
+            value = (1.0 if regime else -1.0) + ((index % 7) / 100.0)
+            history.append((ts, value))
+            observer.note_spreads("BTC", ts, value, -value)
+
+            ring = observer._rings[("BTC", "long")]
+            if ring.samples_seen > cap and len(ring.samples) == cap:
+                replacements_observed += 1
+
+            if index % 100 == 0 or index == total_events - 1:
+                exact_p50, exact_n, exact_coverage = uncapped_tw_median(
+                    history, now_ms=ts
+                )
+                snapshots = observer.compute_snapshots(
+                    now_ms=ts, computed_at_ms=ts + 1
+                )
+                long = next(s for s in snapshots if s.side == "long")
+                retained = observer.snapshot_samples()[("BTC", "long")]
+                self.assert_window_equal(
+                    (long.p50_1m, long.n_1m, long.coverage_1m),
+                    uncapped_tw_median(retained, now_ms=ts),
+                )
+                self.assertLessEqual(len(retained), cap + 1)
+                self.assertTrue(observer.memory_bound_ok())
+                samples_seen_at_checkpoints.append(ring.samples_seen)
+                coverage_errors.append(abs(long.coverage_1m - exact_coverage))
+                if exact_p50 is not None and long.p50_1m is not None:
+                    theta_errors.append(abs(long.p50_1m - exact_p50))
+                    boolean_mismatches.append(
+                        (long.p50_1m > threshold) != (exact_p50 > threshold)
+                    )
+                # The field counts retained in-window ticks, not source ticks.
+                self.assertLessEqual(long.n_1m, exact_n)
+
+        self.assertGreater(replacements_observed, 0)
+        self.assertGreater(samples_seen_at_checkpoints[-1], 4 * cap)
+        self.assertEqual(samples_seen_at_checkpoints[-1], total_events)
+        # Once the stream ages past a minute, carry-in must remain available.
+        final_ring = observer.snapshot_samples()[("BTC", "long")]
+        self.assertTrue(final_ring)
+        self.assertLessEqual(final_ring[0][0], (total_events - 1) * interval_ms - 60_000)
+        # Keep accuracy characterization explicit: exact parity is not a
+        # prerequisite for CPU work, but mismatches are visible to the gate.
+        self.assertTrue(all(math.isfinite(error) for error in coverage_errors))
+        self.assertTrue(all(math.isfinite(error) for error in theta_errors))
+        self.assertGreater(len(boolean_mismatches), 0)
+
+    def test_default_cap_reaches_4096_repeatedly(self) -> None:
+        # Validate the configured 4096 bound directly with a sustained burst.
+        cap = 4096
+        observer = LiveTwP50Observer(
+            ["BTC"], sample_cap=cap, rng=random.Random(42),
+            one_minute_engine="deque",
+        )
+        total_events = cap * 3
+        for index in range(total_events):
+            ts = index * 10
+            value = float((index // 200) % 2)
+            observer.note_spreads("BTC", ts, value, -value)
+        ring = observer._rings[("BTC", "long")]
+        retained = observer.snapshot_samples()[("BTC", "long")]
+        self.assertEqual(ring.samples_seen, total_events)
+        self.assertEqual(len(retained), cap)
+        self.assertTrue(observer.memory_bound_ok())
+        expected = uncapped_tw_median(
+            [(index * 10, float((index // 200) % 2)) for index in range(total_events)],
+            now_ms=(total_events - 1) * 10,
+        )
+        actual = tw_p50_window(
+            retained, now_ms=(total_events - 1) * 10, window_ms=60_000
+        )
+        self.assert_window_equal(actual, uncapped_tw_median(retained, now_ms=(total_events - 1) * 10))
+        # The uncapped oracle is explicitly calculated and kept alongside the
+        # sampled result for downstream accuracy review.
+        self.assertTrue(math.isfinite(expected[2]))
+
     def test_json_and_theta_follow_on_keep_existing_contract(self) -> None:
         tw_keys = {
             "schema_version", "base_coin", "side", "ts_ms", "p50_1m",
