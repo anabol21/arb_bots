@@ -241,6 +241,77 @@ class LatencyTraceRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([span.stage for span in cycle.spans], [STAGES[0]])
         self.assertEqual(events, [])
 
+    async def test_event_driven_mode_coalesces_policy_work_without_metric_journaling(self):
+        from app.bot.tw_p50_trigger import CoalescedTrigger
+
+        runtime, _, _ = self.runtime()
+        runtime._tw_p50_trigger = CoalescedTrigger()
+        runtime._tw_p50_min_interval_sec = 0.05
+        runtime.tw_p50_observer.compute_snapshots = lambda: [
+            TwP50Snapshot("BTC", "long", 60_000, 0.25, 1, 1.0, 60_001)
+        ]
+        journal = Mock()
+        runtime.tw_p50_journal = SimpleNamespace(append_rows=journal)
+        observed_starts = []
+
+        async def emit_theta(snapshots, *, _latency_cycle, journal_metrics):
+            observed_starts.append(runtime._tw_p50_current_event_started_ns)
+            self.assertFalse(journal_metrics)
+            self.assertEqual(len(snapshots), 1)
+            runtime.stop_event.set()
+
+        runtime._emit_theta_from_tw = emit_theta
+        runtime._tw_p50_trigger.signal(123_456)
+        with patch(
+            "app.bot.runtime.asyncio.to_thread",
+            side_effect=lambda fn, *args, **kwargs: fn(*args, **kwargs),
+        ):
+            await runtime._tw_p50_emit_loop()
+
+        self.assertEqual(observed_starts, [123_456])
+        journal.assert_not_called()
+        self.assertIsNone(runtime._tw_p50_current_event_started_ns)
+
+    async def test_timeout_fallback_consumes_event_arriving_during_rate_limit_wait(self):
+        from app.bot.tw_p50_trigger import CoalescedTrigger
+
+        runtime, _, _ = self.runtime()
+        runtime._tw_p50_trigger = CoalescedTrigger()
+        runtime._tw_p50_min_interval_sec = 0.05
+        runtime.tw_p50_observer.compute_snapshots = lambda: [
+            TwP50Snapshot("BTC", "long", 60_000, 0.25, 1, 1.0, 60_001)
+        ]
+        observed_starts = []
+
+        async def wait_once(_trigger, _stop, *, timeout):
+            return "timeout"
+
+        async def rate_limit(stop_event, _next_allowed_ns):
+            runtime._tw_p50_trigger.signal(654_321)
+            return False
+
+        async def emit_theta(_snapshots, *, _latency_cycle, journal_metrics):
+            observed_starts.append(runtime._tw_p50_current_event_started_ns)
+            runtime.stop_event.set()
+
+        runtime._emit_theta_from_tw = emit_theta
+        calls = 0
+
+        async def wait_then_stop(trigger, stop_event, *, timeout):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                return await wait_once(trigger, stop_event, timeout=timeout)
+            return "stopped"
+
+        with patch("app.bot.runtime.wait_for_trigger", side_effect=wait_then_stop), \
+             patch("app.bot.runtime.wait_until_allowed", side_effect=rate_limit), \
+             patch("app.bot.runtime.asyncio.to_thread", side_effect=lambda fn, *a, **k: fn(*a, **k)):
+            await runtime._tw_p50_emit_loop()
+
+        self.assertEqual(observed_starts, [654_321])
+        self.assertFalse(runtime._tw_p50_trigger.event.is_set())
+
 
 class LatencyTraceStorageTests(unittest.TestCase):
     def test_bounded_immutable_snapshot_and_drop_counter(self):
@@ -263,6 +334,38 @@ class LatencyTraceStorageTests(unittest.TestCase):
             snapshot.dropped_cycles = 0
         with self.assertRaises(ValueError):
             EmitLatencyTrace(capacity=0)
+
+    def test_raw_to_policy_latency_samples_are_bounded_and_do_not_retain_policy_payload(self):
+        from app.bot.latency_trace import EmitLatencyTrace
+
+        trace = EmitLatencyTrace(capacity=2, clock=FakeClock())
+        trace.record_raw_to_policy(100, 150)
+        trace.record_raw_to_policy(200, 275)
+        trace.record_raw_to_policy(300, 420)
+        snapshot = trace.snapshot()
+        self.assertEqual(snapshot.dropped_raw_to_policy, 1)
+        self.assertEqual(
+            [(sample.started_ns, sample.ended_ns, sample.elapsed_ns)
+             for sample in snapshot.raw_to_policy],
+            [(200, 275, 75), (300, 420, 120)],
+        )
+        self.assertFalse(hasattr(snapshot.raw_to_policy[0], "decision"))
+        with self.assertRaises(FrozenInstanceError):
+            snapshot.raw_to_policy[0].elapsed_ns = 0
+
+    def test_heartbeat_fields_expose_only_bounded_latency_percentiles(self):
+        from app.bot.latency_trace import EmitLatencyTrace
+
+        runtime = object.__new__(BotRuntime)
+        runtime._latency_trace = EmitLatencyTrace(capacity=3, clock=FakeClock())
+        for duration in (10_000_000, 20_000_000, 40_000_000, 90_000_000):
+            runtime._latency_trace.record_raw_to_policy(1, 1 + duration)
+
+        fields = runtime._latency_trace_log_fields()
+        self.assertIn("raw_policy_n=3", fields)
+        self.assertIn("raw_policy_p50_ms=40.000", fields)
+        self.assertIn("raw_policy_p95_ms=90.000", fields)
+        self.assertIn("raw_policy_dropped=1", fields)
 
     def test_interleaved_cycles_do_not_share_current_record(self):
         from app.bot.latency_trace import EmitLatencyTrace
