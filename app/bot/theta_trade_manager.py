@@ -183,14 +183,15 @@ def build_feature_snapshot(
     ts_s: int,
     snapshots: Sequence[ThetaSnapshot],
     quotes: Mapping[str, Mapping[str, Mapping[str, Any]]],
+    snapshot_index: Optional[Mapping[tuple[str, str], ThetaSnapshot]] = None,
 ) -> Optional[FeatureSnapshot]:
     """Build FeatureSnapshot for policy.decide from live ThetaSnapshot + books.
     
     Returns None if data is incomplete (both sides need p50, theta, floor, spread).
     """
-    by_key: dict[tuple[str, str], ThetaSnapshot] = {
-        (s.base_coin, s.side): s for s in snapshots
-    }
+    by_key = snapshot_index
+    if by_key is None:
+        by_key = {(s.base_coin, s.side): s for s in snapshots}
     long_snap = by_key.get((coin, "long"))
     short_snap = by_key.get((coin, "short"))
     if long_snap is None or short_snap is None:
@@ -723,6 +724,7 @@ def decide_theta_k1(
             ts_s=now_s,
             snapshots=snapshots,
             quotes=quotes,
+            snapshot_index=by_key,
         )
         if feat is None:
             own = by_key.get((pos.base_coin, pos.side))
@@ -830,6 +832,7 @@ def decide_theta_k1(
             ts_s=now_s,
             snapshots=snapshots,
             quotes=quotes,
+            snapshot_index=by_key,
         )
         if feat is None:
             continue
