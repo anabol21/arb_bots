@@ -51,6 +51,15 @@ class EmitLatencyCycle:
 class EmitLatencySnapshot:
     cycles: tuple[EmitLatencyCycle, ...]
     dropped_cycles: int
+    raw_to_policy: tuple[RawToPolicyLatency, ...] = ()
+    dropped_raw_to_policy: int = 0
+
+
+@dataclass(frozen=True, slots=True)
+class RawToPolicyLatency:
+    started_ns: int
+    ended_ns: int
+    elapsed_ns: int
 
 
 def _outcome(exc_type: type[BaseException] | None) -> str:
@@ -69,13 +78,28 @@ class EmitLatencyTrace:
         self._clock = time.monotonic_ns if clock is None else clock
         self._next_cycle_id = 0
         self._dropped_cycles = 0
+        self._raw_to_policy: deque[RawToPolicyLatency] = deque(maxlen=capacity)
+        self._dropped_raw_to_policy = 0
 
     def cycle(self) -> _Cycle:
         self._next_cycle_id += 1
         return _Cycle(self, self._next_cycle_id)
 
     def snapshot(self) -> EmitLatencySnapshot:
-        return EmitLatencySnapshot(tuple(self._cycles), self._dropped_cycles)
+        return EmitLatencySnapshot(
+            tuple(self._cycles), self._dropped_cycles,
+            tuple(self._raw_to_policy), self._dropped_raw_to_policy,
+        )
+
+    def record_raw_to_policy(self, started_ns: int, ended_ns: int) -> None:
+        """Retain only bounded monotonic timestamps and elapsed time."""
+        started = int(started_ns)
+        ended = int(ended_ns)
+        if started < 0 or ended < started:
+            return
+        if len(self._raw_to_policy) == self._raw_to_policy.maxlen:
+            self._dropped_raw_to_policy += 1
+        self._raw_to_policy.append(RawToPolicyLatency(started, ended, ended - started))
 
 
 class _Cycle:
