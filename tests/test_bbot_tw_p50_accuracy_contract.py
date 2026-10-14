@@ -351,6 +351,47 @@ class TwP50AccuracyContractTests(unittest.TestCase):
             self.assertEqual(exact_p50, 0.0)
             self.assertNotEqual(sampled_signal, exact_signal)
 
+    def test_query_sorts_private_cut_after_concurrent_style_ingestion(self) -> None:
+        class FixedIndexRandom(random.Random):
+            def randrange(self, stop: int) -> int:
+                return min(5, stop - 1)
+
+        rng = FixedIndexRandom(1)
+        observer = LiveTwP50Observer(
+            ["BTC"], sample_cap=16, rng=rng, one_minute_engine="deque"
+        )
+        history = []
+        for index in range(16):
+            ts = index * 100
+            value = float(index)
+            history.append((ts, value))
+            observer.note_spreads("BTC", ts, value, -value)
+
+        # This is the schedule that exposed the race: maintenance returns,
+        # then ingress replaces a slot before the independent query begins.
+        observer.maintain(now_ms=1_600)
+        history.append((1_600, 100.0))
+        observer.note_spreads("BTC", 1_600, 100.0, -100.0)
+        retained_before = observer.snapshot_samples()
+        rng_before = rng.getstate()
+
+        snapshots = observer.query_snapshots(
+            now_ms=1_600, computed_at_ms=1_601
+        )
+        long = next(snap for snap in snapshots if snap.side == "long")
+        self.assert_window_equal(
+            (long.p50_1m, long.n_1m, long.coverage_1m),
+            uncapped_tw_median(retained_before[("BTC", "long")], now_ms=1_600),
+        )
+        self.assertEqual(observer.snapshot_samples(), retained_before)
+        self.assertEqual(rng.getstate(), rng_before)
+
+        # Canonical emit path keeps maintenance and cut capture atomic.
+        compatible = observer.compute_snapshots(
+            now_ms=1_600, computed_at_ms=1_601
+        )
+        self.assertEqual(compatible, snapshots)
+
     def test_tw_query_does_not_mutate_retained_stream_or_rng(self) -> None:
         rng = random.Random(17)
         observer = LiveTwP50Observer(
