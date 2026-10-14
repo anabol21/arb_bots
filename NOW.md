@@ -1,6 +1,6 @@
 # NOW
 
-Снимок на 2026-10-13 ~23:02 МСК. Каждая секция — зона своего агента, чужие секции не переписывать.
+Снимок на 2026-10-14 ~09:45 МСК. Каждая секция — зона своего агента, чужие секции не переписывать.
 
 Вектор развития: [roadmap.md](roadmap.md). Этот файл — снимок, не план.
 
@@ -37,11 +37,13 @@
 Сервер, утренний снимок, скрипты юнитов. Живые ордера и would_send не веду. Архитектура: `docs/`.
 
 - Вектор: держать D зелёным (collector/compact/backup) как базу под would_send canary → 2.2 → **2.3** → 2.4… из [roadmap.md](roadmap.md); параллельно крутятся would_send-prod (стратег), HL v2 (Старшой), gear23 live (бот, tw-deque).
-- Юнит `spread-collector-next`, код `/root/spread_staging`, данные `/data/live`. SHA нет: `/root/spread_staging` не git-checkout, крутится задеплоенное дерево (последний деплой — cutover 22.09).
-- Статус 13.10 ~23:00 МСК: active с 22.09 14:07 МСК (PID 4176949, NRestarts=0, MemoryCurrent ~2.51 GiB), heartbeat 198 пар, `collect_bars=false`, `failures=0`, `rejected_records=0`, queue=0. В `/data/live` 594 новых parquet за 5 мин; это локальная публикация на VPS.
-- Compactor 13.10 22:56 МСК: 200000 строк, `row_count_match=true`, errors=0. Backup: в журнале `verify_final operation_success=true` для предыдущего объекта; текущий объект ещё переносился во время проверки. Это подтверждение проверки rclone, не независимое чтение remote storage. Топ-10 volatile отработал 13.10 09:10–09:16 МСК. Таймеры compact/backup/discovery/ops-metrics/top10/would_send-rotate/gear23-metrics-compact/theta-k1-metrics-compact active, последние service results=success.
-- Соседи на хосте (не веду): `spread-bbot-would-send-prod` active (PID 3261154, SHA `8f942d2` dirty, пул 66); `spread-collector-hl-v2` active (PID 1970420, SHA `4a76890` dirty); gear23 live standalone PID 3593028, checkpoint локально flat после трёх циклов.
-- Лимиты collector: skew/age 2000 мс, HOT_ADD max_extra=8, bars off. Диск 39/79G, свободно ~37G. Данные впервые материализуются в `/data/live`, затем compact в `/data/compacted`, резервная копия — `backup1tb:spread-compacted`; успешный локальный publish сам по себе не доказывает удалённую сохранность.
+- Юнит `spread-collector-next`, код `/root/spread_staging`, данные `/data/live`. SHA нет: `/root/spread_staging` не git-checkout, крутится задеплоенное дерево (последний деплой — cutover 22.09). Старый `spread-collector` inactive/disabled.
+- Статус 14.10 ~09:42 МСК: active с 22.09 14:07 МСК (PID 4176949, NRestarts=0, MemoryCurrent ~1.98 GiB), heartbeat 198 пар, `collect_bars=false`, `failures=0`, `rejected_records=0`, queue=0. В `/data/live` 585 новых parquet за 5 мин; это локальная публикация на VPS.
+- Compactor 14.10 09:41 МСК: 200000 строк, `row_count_match=true`, errors=0. Backup 09:44 МСК: `copyto operation_success=true` для последнего объекта в журнале rclone; прямой проверки remote storage не было. Ночной compact 03:15 МСК: gear23 `days_compacted=5 skipped=26 errors=0` (~2.93G→0.34G), θ K=1 `days_compacted=0 skipped=76 errors=0`. Топ-10 volatile отработал 14.10 09:10–09:16 МСК. Таймеры compact/backup/discovery/ops-metrics/top10/would_send-rotate/gear23-metrics-compact/theta-k1-metrics-compact active.
+- В `systemctl --failed` висят старые one-shot/canary юниты (`spread-bars-compactor`, `spread-bars-compacted-backup-transfer` с 13.08; `spread-bbot-ev2-10/11/12` с 21–23.09, disabled). Это давний хвост, не текущий сбой; не чищу без OK.
+- Соседи на хосте (не веду): `spread-bbot-would-send-prod` active (PID 3261154, SHA `8f942d2` dirty, пул 66, `position=None`); `spread-collector-hl-v2` active (PID 1970420, SHA `4a76890` dirty, 198/198/88, `dropped=0`); gear23 live standalone PID 3593028, checkpoint `completed_cycles=3`, открыт WAL long 10 USDT с 14.10 08:47 МСК.
+- Ops 24h: CPU ср. 14% / пик 34%, load ср. 0.87 / пик 2.2, RAM ср. 2.9 / пик 3.9 из 15.6 GiB, egress 16.0 GiB (пик ~5.5 Мбит/с).
+- Лимиты collector: skew/age 2000 мс, HOT_ADD max_extra=8, bars off. Диск 35/79G, свободно ~41G. Данные впервые материализуются в `/data/live`, затем compact в `/data/compacted`, резервная копия — `backup1tb:spread-compacted`; успешный локальный publish сам по себе не доказывает удалённую сохранность.
 - Слежу я (голова), утренний дайджест ~9:32 МСК. @бот — Contour B / gear23 live, @стратег — would_send, @Старшой — HL. Sentry ops отдельно, не эта секция.
 - Не поднимать старый collector. Чужие data root не чищу без явного OK. Утренний ops-снимок NOW.md коммичу сразу в main. Прочий патч в NOW.md и на сервер — только после явного «да».
 
