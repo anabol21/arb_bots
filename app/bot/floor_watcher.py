@@ -27,6 +27,7 @@ import math
 import os
 import random
 import time
+import threading
 from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -375,6 +376,7 @@ class LiveFloorObserver:
         self._states: dict[tuple[str, str], _SideBarState] = {}
         # Latest finite floor per coin/side — read-only for theta / consumers.
         self._last_floors: dict[tuple[str, str], FloorSnapshot] = {}
+        self._floor_lock = threading.Lock()
         for coin in coins:
             c = str(coin).upper()
             for side in SIDES:
@@ -445,19 +447,27 @@ class LiveFloorObserver:
         side = str(row.get("side") or "")
         if not coin or side not in SIDES:
             return
-        self._last_floors[(coin, side)] = FloorSnapshot(
+        snapshot = FloorSnapshot(
             base_coin=coin,
             side=side,
             floor_tf_select_a25=float(floor),
             bar_end_ms=int(row.get("bar_end_ms") or 0),
             computed_at_ms=int(row.get("computed_at_ms") or 0),
         )
+        with self._floor_lock:
+            self._last_floors[(coin, side)] = snapshot
 
     def last_floor_snapshot(
         self, base_coin: str, side: str
     ) -> Optional[FloorSnapshot]:
         """Read-only: latest finite floor snapshot for ``(coin, side)``, else None."""
-        return self._last_floors.get((str(base_coin).upper(), str(side)))
+        with self._floor_lock:
+            return self._last_floors.get((str(base_coin).upper(), str(side)))
+
+    def snapshot_last_floors(self) -> dict[tuple[str, str], FloorSnapshot]:
+        """Return one atomic cut of latest immutable floor snapshots."""
+        with self._floor_lock:
+            return dict(self._last_floors)
 
     def last_floor(self, base_coin: str, side: str) -> Optional[float]:
         """Read-only: latest finite ``floor_tf_select_a25``, else None."""
