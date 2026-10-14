@@ -59,3 +59,15 @@ For candidate feature construction over all 198 coins, 30 repetitions measured m
 The theta batch now reads the latest floor map once under a dedicated lock and uses that immutable-value copy for every row. This prevents one batch from mixing floor values when a 5-minute bar closes while TW-to-theta work runs in a worker thread. Floor calculations, bar close rules, p50 values, candidate ordering, and trading policy are unchanged. This provides an atomic cut of floor state only; it does not claim a cross-stream event-time join between the floor and TW snapshots.
 
 The regression test supplies a floor observer that rejects per-row reads and verifies a two-coin batch reads its floor cut once and preserves the theta arithmetic. After this follow-up, the reconstructed targeted suite passes 27 tests (Python 3.11), and the touched bot modules compile. This remains a focused test slice, not the complete repository suite or VPS validation.
+
+## Compact exact TW query path (P05/P06 prototype)
+
+The TW observer now stores each bounded reservoir in fixed-width parallel timestamp/value buffers. Reservoir replacement preserves Algorithm R selection and canonical time ordering without rebuilding a deque. Query capture takes an immutable numeric cut under the observer lock; the worker uses vectorized window/carry selection and an exact weighted-median selection algorithm instead of sorting every sample by value. p50 remains the same lower weighted median in event time. No cap, window, coverage, count, output schema, or strategy rule changed.
+
+Contract checks compare the new median selection to the sorted weighted-quantile oracle over random arrays through 4,096 values, and continue to cover carry-in, equal timestamps, aging, reservoir replacement, samples_seen, coverage, and the known cap=4096 signal divergence. A separate tie-heavy reservoir test compares retained order to the stable Algorithm R reference across eight seeds.
+
+Local synthetic measurement on Python 3.11, 198 coins / 396 sides, with every side filled to cap and then queried at one fixed cut:
+- cap 4,096: CPU median 16.05 ms, p95 20.34 ms (previous implementation: 229.94 / 240.13 ms).
+- cap 8,192: CPU median 28.75 ms, p95 35.72 ms.
+
+A one-coin, cap=256 aged-overflow ingestion fixture measured note_spreads median/p95/max of 3/5/21 μs after the change, versus 41/81/94 μs before the min-timestamp pruning gate and sorted array replacement. This is local CPU evidence only: not the complete bot, not a 198-coin event replay, not a 100% CPU quota run, and not VPS validation. Exact parity of capped p50 to the uncapped signal oracle still fails on the pinned 4096-burst fixture; performance progress does not make that signal valid.
