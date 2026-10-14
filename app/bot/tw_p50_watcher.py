@@ -277,11 +277,14 @@ class LiveTwP50Observer:
             j = self._rng.randrange(n)
             if j < self.sample_cap:
                 # Replace among non-carry body when possible.
-                body = list(ring.samples)
-                if body:
-                    idx = j % len(body)
-                    body[idx] = (int(ts_ms), float(value))
-                    ring.samples = deque(body)
+                if ring.samples:
+                    idx = j % len(ring.samples)
+                    # Mutate the selected deque slot in place. The old list
+                    # round-trip copied every retained sample on each replace.
+                    ring.samples.rotate(-idx)
+                    ring.samples.popleft()
+                    ring.samples.appendleft((int(ts_ms), float(value)))
+                    ring.samples.rotate(idx)
                     ring.timestamps_ordered = False
         if self.one_minute_engine == "legacy":
             self._prune_ring(ring, now_ms=int(ts_ms))
