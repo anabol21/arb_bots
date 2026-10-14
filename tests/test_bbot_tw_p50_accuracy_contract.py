@@ -238,6 +238,51 @@ class TwP50AccuracyContractTests(unittest.TestCase):
         self.assertEqual(observer._rings[("BTC", "long")].samples_seen, 300)
         self.assertEqual(observer._rings[("BTC", "short")].samples_seen, 300)
 
+    def test_cap8192_repeated_saturation_aging_and_accuracy_characterization(self) -> None:
+        cap = 8192
+        total_events = cap * 3
+        observer = LiveTwP50Observer(
+            ["BTC"], sample_cap=cap, rng=random.Random(8192),
+            one_minute_engine="deque",
+        )
+        source: list[tuple[int, float]] = []
+        checkpoints = {cap - 1, cap, cap * 2 - 1, total_events - 1}
+        exact_errors = []
+        coverage_errors = []
+        boolean_mismatches = []
+        floor = 0.25
+        for index in range(total_events):
+            ts = index * 7
+            value = float((index // 4_000) % 2)
+            source.append((ts, value))
+            observer.note_spreads("BTC", ts, value, -value)
+            if index not in checkpoints:
+                continue
+            sampled = next(
+                snap for snap in observer.compute_snapshots(now_ms=ts, computed_at_ms=ts)
+                if snap.side == "long"
+            )
+            exact_p50, exact_count, exact_coverage = uncapped_tw_median(source, now_ms=ts)
+            exact_errors.append(sampled.p50_1m - exact_p50)
+            coverage_errors.append(sampled.coverage_1m - exact_coverage)
+            boolean_mismatches.append(
+                (sampled.p50_1m - floor > 0.0) != (exact_p50 - floor > 0.0)
+            )
+            self.assertLessEqual(sampled.n_1m, exact_count)
+            self.assertEqual(observer._rings[("BTC", "long")].samples_seen, index + 1)
+
+        ring = observer._rings[("BTC", "long")]
+        retained = observer.snapshot_samples()[("BTC", "long")]
+        self.assertEqual(ring.samples_seen, total_events)
+        self.assertLessEqual(len(retained), cap)
+        self.assertTrue(observer.memory_bound_ok())
+        self.assertLessEqual(
+            retained[0][0], (total_events - 1) * 7 - 60_000
+        )
+        self.assertTrue(all(math.isfinite(error) for error in exact_errors))
+        self.assertTrue(all(math.isfinite(error) for error in coverage_errors))
+        self.assertEqual(len(boolean_mismatches), len(checkpoints))
+
     def test_unsorted_pre_cap_ring_is_sorted_before_reservoir_replace(self) -> None:
         class NoReplaceRandom(random.Random):
             def randrange(self, stop: int) -> int:
