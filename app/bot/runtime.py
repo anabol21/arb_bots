@@ -46,6 +46,14 @@ from app.bot.tw_p50_watcher import (
     TwP50JournalWriter,
     tw_p50_watch_enabled,
 )
+from app.bot.tw_p50_trigger import (
+    CoalescedTrigger,
+    assert_shadow_canary_context,
+    tw_p50_event_driven_enabled,
+    tw_p50_min_interval_sec,
+    wait_for_trigger,
+    wait_until_allowed,
+)
 from app.bot.theta_screener import (
     LiveThetaScreener,
     ThetaJournalWriter,
@@ -80,7 +88,7 @@ from app.bot.hot_add_warm import (
     warm_floor_from_history,
     seed_tw_p50_from_slim_ticks,
 )
-from app.bot.stub_broker import InstrumentMeta
+from app.bot.stub_broker import InstrumentMeta, StubBroker
 from app.bot.ws_books import (
     books_ready,
     compute_spreads,
@@ -594,6 +602,8 @@ class BotRuntime:
         self._book_inflight: dict[str, bool] = {c: False for c in self.coins}
         self._book_dirty: dict[str, bool] = {c: False for c in self.coins}
         self._book_last_exchange: dict[str, str] = {c: "okx" for c in self.coins}
+        self._book_last_ingress_ns: dict[str, int] = {}
+        self._tw_p50_current_event_started_ns: int | None = None
         self.stop_event = asyncio.Event()
         self._heartbeat_n = 0
         self._ma_cache: dict[str, tuple[Optional[float], Optional[float]]] = {
@@ -626,6 +636,19 @@ class BotRuntime:
         self.tw_p50_journal: TwP50JournalWriter | None = None
         self._tw_p50_flush_warned = False
         self._latency_trace = EmitLatencyTrace() if latency_trace_enabled() else None
+        self._tw_p50_event_driven = (
+            self.tw_p50_enabled and tw_p50_event_driven_enabled()
+        )
+        self._tw_p50_min_interval_sec = tw_p50_min_interval_sec()
+        self._tw_p50_trigger = (
+            CoalescedTrigger() if self._tw_p50_event_driven else None
+        )
+        self.log.info(
+            "tw_p50_event_cadence | enabled=%s | min_interval_ms=%s | metric_journal=%s",
+            int(self._tw_p50_event_driven),
+            int(self._tw_p50_min_interval_sec * 1000),
+            int(not self._tw_p50_event_driven),
+        )
         if self.tw_p50_enabled:
             self.tw_p50_observer = LiveTwP50Observer(self.coins)
             self.tw_p50_journal = TwP50JournalWriter(
@@ -652,6 +675,12 @@ class BotRuntime:
         # Gear 2.2 θ K=1 would_send (separate journal). Live canary injects
         # Contour B place_fn; stub would_send never calls broker.place.
         self.theta_trade_enabled = theta_trade_enabled(self.profile)
+        if self._tw_p50_event_driven:
+            assert_shadow_canary_context(
+                profile=self.profile,
+                mode=self.mode,
+                broker_is_stub=type(self.broker) is StubBroker,
+            )
         self.theta_trade: ThetaTradeManager | None = None
         self._theta_trade_warned = False
         self._synthetic_roll_halted = False
@@ -712,6 +741,10 @@ class BotRuntime:
         self._leverage_one: dict[tuple[str, str], str] = {}
         if self.theta_trade_enabled:
             live_send = theta_live_send_requested(self.profile)
+            if self._tw_p50_event_driven and (
+                live_send or self._terminal_private_execution
+            ):
+                raise ValueError("event-driven TW p50 is shadow-only; live execution is not allowed")
             theta_cfg = ThetaTradeConfig.from_env()
             if live_send or self.profile == "synthetic_roll":
                 theta_cfg.notional_usdt = float(self.notional)
@@ -783,6 +816,10 @@ class BotRuntime:
                     place_fn=self.broker.place if live_send else None,
                     meta_fn=self._meta if live_send else None,
                 )
+        if self._tw_p50_event_driven and self.theta_trade is None:
+            raise ValueError("event-driven TW p50 requires the policy manager")
+        if self._tw_p50_event_driven and self._latency_trace is not None:
+            self.theta_trade._decision_observer = self._record_tw_p50_policy_decision
         # Floor warm-start (standard for gear22 / when pickle present).
         self._floor_warm_path = resolve_floor_warm_path(self.data_root)
         self._floor_warm_loaded = False
@@ -985,6 +1022,7 @@ class BotRuntime:
                 on_book=self._on_book,
                 on_lifecycle=self._on_lifecycle,
                 stop_event=self.stop_event,
+                capture_monotonic=self._tw_p50_event_driven,
             ),
             name=f"okx:{coin}",
         )
@@ -996,6 +1034,7 @@ class BotRuntime:
                 on_book=self._on_book,
                 on_lifecycle=self._on_lifecycle,
                 stop_event=self.stop_event,
+                capture_monotonic=self._tw_p50_event_driven,
             ),
             name=f"bybit:{coin}",
         )
@@ -2223,6 +2262,7 @@ class BotRuntime:
                     on_book=self._on_book,
                     on_lifecycle=self._on_lifecycle,
                     stop_event=self.stop_event,
+                    capture_monotonic=self._tw_p50_event_driven,
                 ),
                 name=f"okx-{coin}",
             )
@@ -2234,6 +2274,7 @@ class BotRuntime:
                     on_book=self._on_book,
                     on_lifecycle=self._on_lifecycle,
                     stop_event=self.stop_event,
+                    capture_monotonic=self._tw_p50_event_driven,
                 ),
                 name=f"bybit-{coin}",
             )
@@ -2562,10 +2603,20 @@ class BotRuntime:
                 self._l1_ring_warned = True
                 self.log.warning("l1_ring_append_failed | coin=%s | exchange=%s", base_coin, exchange)
 
-    def _on_book(self, base_coin: str, exchange: str, book: dict[str, Any]) -> None:
+    def _on_book(
+        self,
+        base_coin: str,
+        exchange: str,
+        book: dict[str, Any],
+        received_mono_ns: int | None = None,
+    ) -> None:
         """Coalesce: one in-flight handler per coin; dirty flag drains one more run."""
-        self._maybe_record_l1(base_coin, exchange, book)
         coin = base_coin.upper()
+        if received_mono_ns is not None:
+            self._book_last_ingress_ns[coin] = int(received_mono_ns)
+        elif self._tw_p50_event_driven:
+            self._book_last_ingress_ns[coin] = time.monotonic_ns()
+        self._maybe_record_l1(base_coin, exchange, book)
         self._book_last_exchange[coin] = exchange
         if self._book_inflight.get(coin):
             self._book_dirty[coin] = True
@@ -2857,6 +2908,11 @@ class BotRuntime:
                 spread_long,
                 spread_short,
             )
+            if self._tw_p50_trigger is not None:
+                started_ns = self._book_last_ingress_ns.get(
+                    base_coin.upper(), time.monotonic_ns()
+                )
+                self._tw_p50_trigger.signal(started_ns)
         except Exception as exc:  # noqa: BLE001 — observer must not break decide
             if not self._tw_p50_flush_warned:
                 self._tw_p50_flush_warned = True
@@ -2882,19 +2938,30 @@ class BotRuntime:
                 )
 
     async def _tw_p50_emit_loop(self) -> None:
-        """~1 Hz: compute TW p50 snapshots, journal under tw_p50/ (never ticks).
+        """Compute and journal TW p50; event-driven mode is opt-in and shadow-only.
 
-        When theta is enabled, emit theta rows immediately after (same cadence).
+        The default remains ~1 Hz. Event-driven mode coalesces valid-spread
+        updates, limits recomputes to at most 20/s, and never overlaps workers.
         """
+        next_allowed_ns = 0
         while not self.stop_event.is_set():
-            try:
-                await asyncio.wait_for(
-                    self.stop_event.wait(), timeout=EMIT_INTERVAL_SEC
-                )
+            trigger = getattr(self, "_tw_p50_trigger", None)
+            reason = await wait_for_trigger(
+                trigger, self.stop_event, timeout=EMIT_INTERVAL_SEC
+            )
+            if reason == "stopped":
                 break
-            except asyncio.TimeoutError:
-                pass
+            event_started_ns = None
+            if trigger is not None:
+                if await wait_until_allowed(self.stop_event, next_allowed_ns):
+                    break
+                event_started_ns = trigger.consume()
+                next_allowed_ns = time.monotonic_ns() + int(
+                    self._tw_p50_min_interval_sec * 1e9
+                )
+            self._tw_p50_current_event_started_ns = event_started_ns
             if self.tw_p50_observer is None:
+                self._tw_p50_current_event_started_ns = None
                 continue
             with self._latency_trace.cycle() if self._latency_trace is not None else NO_TRACE as cycle:
                 try:
@@ -2909,22 +2976,63 @@ class BotRuntime:
                             "tw_p50_compute_failed | err=%s",
                             type(exc).__name__,
                         )
+                    self._tw_p50_current_event_started_ns = None
                     continue
-                # Skip sides that have never received a tick in the 1m window.
-                rows = [
-                    s.as_row()
-                    for s in snapshots
-                    if s.n_1m > 0 or s.coverage_1m > 0.0
-                ]
-                if rows:
-                    with cycle.span("tw_journal_await") if cycle is not None else NO_TRACE:
-                        await self._flush_tw_p50_rows(rows)
+                # Event-driven shadow work does not allocate or persist metric rows.
+                if trigger is None:
+                    rows = [
+                        s.as_row()
+                        for s in snapshots
+                        if s.n_1m > 0 or s.coverage_1m > 0.0
+                    ]
+                    if rows:
+                        with cycle.span("tw_journal_await") if cycle is not None else NO_TRACE:
+                            await self._flush_tw_p50_rows(rows)
                 if self.theta_enabled and self.theta_screener is not None:
-                    await self._emit_theta_from_tw(snapshots, _latency_cycle=cycle)
+                    await self._emit_theta_from_tw(
+                        snapshots,
+                        _latency_cycle=cycle,
+                        journal_metrics=trigger is None,
+                    )
+            self._tw_p50_current_event_started_ns = None
+
+    def _record_tw_p50_policy_decision(self, _decision: Any, decided_ns: int) -> None:
+        """Record raw WS callback→policy-return latency without retaining signals."""
+        started_ns = getattr(self, "_tw_p50_current_event_started_ns", None)
+        trace = getattr(self, "_latency_trace", None)
+        if started_ns is not None and trace is not None:
+            trace.record_raw_to_policy(started_ns, decided_ns)
 
     def latency_trace_snapshot(self) -> EmitLatencySnapshot | None:
         """Immutable RAM await diagnostics; call from this runtime's event loop."""
         return self._latency_trace.snapshot() if self._latency_trace is not None else None
+
+    def _latency_trace_log_fields(self) -> str:
+        snapshot = self.latency_trace_snapshot()
+        if snapshot is None:
+            return ""
+        samples = sorted(item.elapsed_ns for item in snapshot.raw_to_policy)
+        if not samples:
+            return (
+                " | raw_policy_n=0 | raw_policy_dropped=%s | emit_cycles=%s"
+                % (snapshot.dropped_raw_to_policy, len(snapshot.cycles))
+            )
+
+        def percentile(q: float) -> float:
+            index = max(0, math.ceil(q * len(samples)) - 1)
+            return samples[index] / 1_000_000.0
+
+        return (
+            " | raw_policy_n=%s | raw_policy_p50_ms=%.3f | raw_policy_p95_ms=%.3f"
+            " | raw_policy_p99_ms=%.3f | raw_policy_max_ms=%.3f"
+            " | raw_policy_dropped=%s | emit_cycles=%s | emit_cycles_dropped=%s"
+            % (
+                len(samples), percentile(0.50), percentile(0.95),
+                percentile(0.99), samples[-1] / 1_000_000.0,
+                snapshot.dropped_raw_to_policy, len(snapshot.cycles),
+                snapshot.dropped_cycles,
+            )
+        )
 
     async def _synthetic_roll_loop(self) -> None:
         """~1 Hz pool roll. Does not wait on theta snapshots."""
@@ -2990,7 +3098,11 @@ class BotRuntime:
                     await self._run_theta_trade(snaps)
 
     async def _emit_theta_from_tw(
-        self, tw_snapshots: list[Any], *, _latency_cycle: _Cycle | None = None
+        self,
+        tw_snapshots: list[Any],
+        *,
+        _latency_cycle: _Cycle | None = None,
+        journal_metrics: bool = True,
     ) -> None:
         """Follow-on: theta from TW snapshots + last floor (never ticks)."""
         if self.theta_screener is None:
@@ -3008,20 +3120,21 @@ class BotRuntime:
                     type(exc).__name__,
                 )
             return
-        # Only journal sides that had some TW activity (same filter as tw_p50).
-        active_keys = {
-            (s.base_coin, s.side)
-            for s in tw_snapshots
-            if s.n_1m > 0 or s.coverage_1m > 0.0
-        }
-        rows = [
-            s.as_row()
-            for s in theta_snaps
-            if (s.base_coin, s.side) in active_keys
-        ]
-        if rows:
-            with _latency_cycle.span("theta_journal_await") if _latency_cycle is not None else NO_TRACE:
-                await self._flush_theta_rows(rows)
+        if journal_metrics:
+            # Only journal sides that had some TW activity (same filter as tw_p50).
+            active_keys = {
+                (s.base_coin, s.side)
+                for s in tw_snapshots
+                if s.n_1m > 0 or s.coverage_1m > 0.0
+            }
+            rows = [
+                s.as_row()
+                for s in theta_snaps
+                if (s.base_coin, s.side) in active_keys
+            ]
+            if rows:
+                with _latency_cycle.span("theta_journal_await") if _latency_cycle is not None else NO_TRACE:
+                    await self._flush_theta_rows(rows)
         if self.theta_trade_enabled and self.theta_trade is not None:
             with _latency_cycle.span("manager_invocation_await") if _latency_cycle is not None else NO_TRACE:
                 await self._run_theta_trade(theta_snaps)
@@ -3406,7 +3519,7 @@ class BotRuntime:
                     pending,
                     position,
                     self.probe_done,
-                    counters,
+                    counters + self._latency_trace_log_fields(),
                 )
             )
             try:
@@ -3649,11 +3762,13 @@ class BotRuntime:
                     base_coin=coin, okx_symbol=meta.okx_symbol,
                     book_store=self.quotes[coin]["okx"], on_book=self._on_book,
                     on_lifecycle=self._on_lifecycle, stop_event=self.stop_event,
+                    capture_monotonic=self._tw_p50_event_driven,
                 ), name=f"okx-{coin}"))
                 tasks.append(asyncio.create_task(run_bybit_orderbook1(
                     base_coin=coin, bybit_symbol=meta.bybit_symbol,
                     book_store=self.quotes[coin]["bybit"], on_book=self._on_book,
                     on_lifecycle=self._on_lifecycle, stop_event=self.stop_event,
+                    capture_monotonic=self._tw_p50_event_driven,
                 ), name=f"bybit-{coin}"))
             self.log.info("ws_tasks_started | n=%s | expect=%s", len(tasks) - 1, 2 * len(self.coins))
             try:
@@ -3690,11 +3805,13 @@ class BotRuntime:
                 base_coin=coin, okx_symbol=meta.okx_symbol,
                 book_store=self.quotes[coin]["okx"], on_book=self._on_book,
                 on_lifecycle=self._on_lifecycle, stop_event=self.stop_event,
+                capture_monotonic=self._tw_p50_event_driven,
             ), name=f"okx:{coin}")
             supervisor.add(run_bybit_orderbook1(
                 base_coin=coin, bybit_symbol=meta.bybit_symbol,
                 book_store=self.quotes[coin]["bybit"], on_book=self._on_book,
                 on_lifecycle=self._on_lifecycle, stop_event=self.stop_event,
+                capture_monotonic=self._tw_p50_event_driven,
             ), name=f"bybit:{coin}")
 
         if gear23:
