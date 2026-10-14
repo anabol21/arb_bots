@@ -192,11 +192,6 @@ class TwP50AccuracyContractTests(unittest.TestCase):
         # covers many rollover cycles quickly. Compare every emitted snapshot
         # against the uncapped event history; capped Algorithm R is approximate.
         cap = 16
-        observer = LiveTwP50Observer(
-            ["BTC"], sample_cap=cap, rng=rng,
-            one_minute_engine="deque",
-        )
-        history: list[tuple[int, float]] = []
         class CountingRandom(random.Random):
             replacements = 0
 
@@ -207,6 +202,11 @@ class TwP50AccuracyContractTests(unittest.TestCase):
                 return selected
 
         rng = CountingRandom(7)
+        observer = LiveTwP50Observer(
+            ["BTC"], sample_cap=cap, rng=rng,
+            one_minute_engine="deque",
+        )
+        history: list[tuple[int, float]] = []
         samples_seen_at_checkpoints = []
         coverage_errors = []
         theta_errors = []
