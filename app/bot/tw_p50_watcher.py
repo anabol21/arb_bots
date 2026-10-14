@@ -1,7 +1,7 @@
 """Live rolling time-weighted p50 watcher for BotRuntime (public books only).
 
-Per ``(base_coin, side)`` keeps an in-memory deque of ``(ts_ms, spread)`` for
-the last minute plus one carry-in sample. Every ~1s an asyncio task computes
+Per ``(base_coin, side)`` keeps compact parallel timestamp/value buffers for
+the bounded one-minute reservoir plus one carry-in sample. Every ~1s an asyncio task computes
 the duration-weighted one-minute median (TW p50) and journals metric rows —
 never raw ticks.
 
@@ -16,11 +16,12 @@ before the window left edge covers the leading gap when possible.
 from __future__ import annotations
 
 import json
+from array import array
+from bisect import bisect_left, bisect_right
 import os
 import random
 import threading
 import time
-from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -28,7 +29,10 @@ from typing import Any, Callable, Mapping, Optional, Sequence
 
 import numpy as np
 
-from app.bot.floor_watcher import tick_hold_weights_ms, time_weighted_quantile
+from app.bot.floor_watcher import (
+    tick_hold_weights_ms,
+    time_weighted_median,
+)
 from app.bot.fsadvise import advise_dontneed
 from app.bot.paths import tw_p50_metrics_jsonl_path
 from app.bot.metrics_compact import MetricsDayCompactor, RotatingMetricsJsonl
@@ -144,18 +148,63 @@ class TwP50Snapshot:
 
 @dataclass
 class _SideRing:
-    """Bounded ring of spread samples + optional pre-window carry."""
+    """Compact parallel sample columns plus reservoir bookkeeping."""
 
-    samples: deque[tuple[int, float]] = field(default_factory=deque)
+    timestamps: array = field(default_factory=lambda: array("q"))
+    values: array = field(default_factory=lambda: array("d"))
     samples_seen: int = 0  # for reservoir (includes discarded)
     timestamps_ordered: bool = True
+    min_ts: Optional[int] = None
+
+    def __len__(self) -> int:
+        return len(self.timestamps)
+
+    @property
+    def samples(self) -> list[tuple[int, float]]:
+        """Compatibility/debug view; hot queries use immutable numeric cuts."""
+        return list(zip(self.timestamps, self.values))
+
+    def append(self, sample: tuple[int, float]) -> None:
+        self.timestamps.append(sample[0])
+        self.values.append(sample[1])
+        if self.min_ts is None or sample[0] < self.min_ts:
+            self.min_ts = sample[0]
+
+    def replace_sorted(self, index: int, sample: tuple[int, float]) -> None:
+        old_min = self.min_ts
+        old_ts = self.timestamps.pop(index)
+        self.values.pop(index)
+        left = bisect_left(self.timestamps, sample[0])
+        right = bisect_right(self.timestamps, sample[0])
+        insert_at = min(max(index, left), right)
+        self.timestamps.insert(insert_at, sample[0])
+        self.values.insert(insert_at, sample[1])
+        if old_min is None or sample[0] < old_min:
+            self.min_ts = sample[0]
+        elif old_ts == old_min:
+            self.min_ts = (int(np.min(np.frombuffer(self.timestamps, dtype=np.int64))) if self.timestamps else None)
+
+    def snapshot_arrays(self) -> tuple[np.ndarray, np.ndarray]:
+        # Bytes back the arrays so workers own an immutable cut after lock release.
+        return (
+            np.frombuffer(self.timestamps.tobytes(), dtype=np.int64),
+            np.frombuffer(self.values.tobytes(), dtype=np.float64),
+        )
+
+    def replace_arrays(self, timestamps: np.ndarray, values: np.ndarray) -> None:
+        self.timestamps = array("q")
+        self.timestamps.frombytes(np.asarray(timestamps, dtype=np.int64).tobytes())
+        self.values = array("d")
+        self.values.frombytes(np.asarray(values, dtype=np.float64).tobytes())
+        self.min_ts = (int(np.min(np.frombuffer(self.timestamps, dtype=np.int64))) if self.timestamps else None)
 
 
 def tw_p50_window(
-    samples: Sequence[tuple[int, float]],
+    samples: Sequence[tuple[int, float]] | tuple[np.ndarray, np.ndarray],
     *,
     now_ms: int,
     window_ms: int,
+    samples_are_ordered: bool = False,
 ) -> tuple[float, int, float]:
     """Duration-weighted median over ``[now-window, now]`` with carry-in.
 
@@ -167,40 +216,49 @@ def tw_p50_window(
     left = right - w_ms
     if w_ms <= 0:
         return float("nan"), 0, 0.0
-    if not samples:
-        return float("nan"), 0, 0.0
+    if isinstance(samples, tuple) and len(samples) == 2 and isinstance(samples[0], np.ndarray):
+        ts = samples[0]
+        values = samples[1]
+        if ts.size == 0:
+            return float("nan"), 0, 0.0
+    else:
+        if not samples:
+            return float("nan"), 0, 0.0
+        ts = np.fromiter(
+            (int(sample[0]) for sample in samples), dtype="int64", count=len(samples)
+        )
+        values = np.fromiter(
+            (float(sample[1]) for sample in samples), dtype="float64", count=len(samples)
+        )
+    if not samples_are_ordered:
+        order = np.argsort(ts, kind="stable")
+        ts = ts[order]
+        values = values[order]
 
-    carry_val: Optional[float] = None
-    inside_ts: list[int] = []
-    inside_val: list[float] = []
-    for ts_raw, val_raw in samples:
-        ts = int(ts_raw)
-        val = float(val_raw)
-        if ts <= left:
-            carry_val = val
-        elif ts <= right:
-            inside_ts.append(ts)
-            inside_val.append(val)
+    first_inside = int(np.searchsorted(ts, left, side="right"))
+    after_right = int(np.searchsorted(ts, right, side="right"))
+    inside_ts = ts[first_inside:after_right]
+    inside_values = values[first_inside:after_right]
+    n_inside = int(after_right - first_inside)
 
-    if carry_val is not None:
-        eff_ts = [left, *inside_ts]
-        eff_val = [float(carry_val), *inside_val]
+    if first_inside:
+        eff_ts = np.empty(n_inside + 1, dtype="int64")
+        eff_values = np.empty(n_inside + 1, dtype="float64")
+        eff_ts[0] = left
+        eff_values[0] = values[first_inside - 1]
+        eff_ts[1:] = inside_ts
+        eff_values[1:] = inside_values
     else:
         eff_ts = inside_ts
-        eff_val = inside_val
+        eff_values = inside_values
+    if eff_ts.size == 0:
+        return float("nan"), n_inside, 0.0
 
-    n_inside = len(inside_ts)
-    if not eff_ts:
-        return float("nan"), 0, 0.0
-
-    ts_arr = np.asarray(eff_ts, dtype="int64")
-    y_arr = np.asarray(eff_val, dtype="float64")
-    weights = tick_hold_weights_ms(ts_arr, last_end_ms=right)
-    # Guard: no mass before left / after right (construction should already ensure).
-    total = float(np.sum(weights)) if weights.size else 0.0
-    coverage = max(0.0, min(1.0, total / float(w_ms))) if w_ms > 0 else 0.0
-    p50 = time_weighted_quantile(y_arr, weights, 0.50)
-    return float(p50), int(n_inside), float(coverage)
+    weights = tick_hold_weights_ms(eff_ts, last_end_ms=right)
+    total = float(np.sum(weights))
+    coverage = max(0.0, min(1.0, total / float(w_ms)))
+    p50 = time_weighted_median(eff_values, weights)
+    return float(p50), n_inside, float(coverage)
 
 
 class LiveTwP50Observer:
@@ -234,8 +292,9 @@ class LiveTwP50Observer:
     def memory_bound_ok(self) -> bool:
         with self._lock:
             for ring in self._rings.values():
-                if len(ring.samples) > self.sample_cap + 1:
-                    # +1 allows a single carry-in older than RETAIN_MS.
+                if len(ring) > self.sample_cap + 1:
+                    return False
+                if len(ring.timestamps) != len(ring.values):
                     return False
         return True
 
@@ -262,67 +321,65 @@ class LiveTwP50Observer:
                 self._append_sample(ring, ts, finite)
 
     def _append_sample(self, ring: _SideRing, ts_ms: int, value: float) -> None:
-        if self.one_minute_engine == "deque" and len(ring.samples) >= self.sample_cap:
+        if self.one_minute_engine == "deque" and len(ring) >= self.sample_cap:
             left = int(ts_ms) - RETAIN_MS
-            if not ring.timestamps_ordered or ring.samples[0][0] <= left:
+            if ring.min_ts is not None and ring.min_ts <= left:
                 self._prune_ring(ring, now_ms=int(ts_ms))
         ring.samples_seen += 1
         n = ring.samples_seen
-        if len(ring.samples) < self.sample_cap:
-            if ring.samples and int(ts_ms) < ring.samples[-1][0]:
+        sample = (int(ts_ms), float(value))
+        if len(ring) < self.sample_cap:
+            if len(ring) and int(ts_ms) < ring.timestamps[-1]:
                 ring.timestamps_ordered = False
-            ring.samples.append((int(ts_ms), float(value)))
+            ring.append(sample)
         else:
-            # Algorithm R: replace index j with probability cap/n.
+            # Algorithm R: replacement index/RNG semantics remain unchanged.
             j = self._rng.randrange(n)
-            if j < self.sample_cap:
-                # Replace among non-carry body when possible.
-                if ring.samples:
-                    idx = j % len(ring.samples)
-                    # Mutate the selected deque slot in place. The old list
-                    # round-trip copied every retained sample on each replace.
-                    ring.samples.rotate(-idx)
-                    ring.samples.popleft()
-                    ring.samples.appendleft((int(ts_ms), float(value)))
-                    ring.samples.rotate(idx)
-                    ring.timestamps_ordered = False
+            if j < self.sample_cap and len(ring):
+                idx = j % len(ring)
+                ring.replace_sorted(idx, sample)
+                ring.timestamps_ordered = True
         if self.one_minute_engine == "legacy":
             self._prune_ring(ring, now_ms=int(ts_ms))
 
     def _prune_ring(self, ring: _SideRing, *, now_ms: int) -> None:
         """Drop samples older than 1m except one carry-in at/before left edge."""
         left = int(now_ms) - RETAIN_MS
-        if not ring.samples:
+        if not len(ring):
             return
         if ring.timestamps_ordered:
-            carry = None
-            while ring.samples and ring.samples[0][0] <= left:
-                carry = ring.samples.popleft()
-            if carry is not None:
-                ring.samples.appendleft(carry)
+            start = int(np.searchsorted(
+                np.frombuffer(ring.timestamps, dtype=np.int64), left, side="right"
+            ))
+            if start:
+                carry = (ring.timestamps[start - 1], ring.values[start - 1])
+                del ring.timestamps[:start]
+                del ring.values[:start]
+                ring.timestamps.insert(0, carry[0])
+                ring.values.insert(0, carry[1])
+                ring.min_ts = carry[0]
             return
-        # Reservoir replacement or out-of-order input needs a stable local rebuild.
-        ordered = sorted(ring.samples, key=lambda p: p[0])
-        carry: Optional[tuple[int, float]] = None
-        kept: list[tuple[int, float]] = []
-        for ts, val in ordered:
-            if ts <= left:
-                carry = (ts, val)
+        timestamps = np.frombuffer(ring.timestamps, dtype=np.int64)
+        values = np.frombuffer(ring.values, dtype=np.float64)
+        order = np.argsort(timestamps, kind="stable")
+        sorted_ts = timestamps[order]
+        sorted_values = values[order]
+        first_inside = int(np.searchsorted(sorted_ts, left, side="right"))
+        after_left = first_inside - 1
+        if after_left >= 0:
+            kept_ts = np.concatenate((sorted_ts[after_left:after_left + 1], sorted_ts[first_inside:]))
+            kept_values = np.concatenate((sorted_values[after_left:after_left + 1], sorted_values[first_inside:]))
+        else:
+            kept_ts = sorted_ts[first_inside:]
+            kept_values = sorted_values[first_inside:]
+        if kept_ts.size > self.sample_cap + 1:
+            if after_left >= 0:
+                kept_ts = np.concatenate((kept_ts[:1], kept_ts[-self.sample_cap:]))
+                kept_values = np.concatenate((kept_values[:1], kept_values[-self.sample_cap:]))
             else:
-                kept.append((ts, val))
-        out: list[tuple[int, float]] = []
-        if carry is not None:
-            out.append(carry)
-        out.extend(kept)
-        # Hard cap: prefer newest after carry.
-        if len(out) > self.sample_cap + 1:
-            carry_part = out[:1] if carry is not None else []
-            body = out[len(carry_part) :]
-            body = body[-(self.sample_cap) :]
-            out = carry_part + body
-            if len(out) > self.sample_cap + 1:
-                out = out[-(self.sample_cap + 1) :]
-        ring.samples = deque(out)
+                kept_ts = kept_ts[-(self.sample_cap + 1):]
+                kept_values = kept_values[-(self.sample_cap + 1):]
+        ring.replace_arrays(kept_ts, kept_values)
         ring.timestamps_ordered = True
 
     def snapshot_samples(
@@ -330,7 +387,7 @@ class LiveTwP50Observer:
     ) -> dict[tuple[str, str], list[tuple[int, float]]]:
         """Copy sample rings for off-lock compute."""
         with self._lock:
-            return {k: list(v.samples) for k, v in self._rings.items()}
+            return {k: v.samples for k, v in self._rings.items()}
 
     def maintain(self, *, now_ms: int) -> None:
         """Apply canonical age pruning without computing or publishing snapshots."""
@@ -341,32 +398,29 @@ class LiveTwP50Observer:
 
     def _copy_sample_cut(
         self, *, now_ms: int, maintain: bool
-    ) -> dict[tuple[str, str], tuple[list[tuple[int, float]], bool]]:
-        """Copy one atomic ring cut; optionally run canonical maintenance first."""
+    ) -> dict[tuple[str, str], tuple[tuple[np.ndarray, np.ndarray], bool]]:
+        """Copy one atomic numeric ring cut; optionally maintain it first."""
         with self._lock:
             if maintain:
                 for ring in self._rings.values():
                     self._prune_ring(ring, now_ms=int(now_ms))
             return {
-                key: (list(ring.samples), ring.timestamps_ordered)
+                key: (ring.snapshot_arrays(), ring.timestamps_ordered)
                 for key, ring in self._rings.items()
             }
 
     def _query_sample_cut(
         self,
-        cut: Mapping[tuple[str, str], tuple[list[tuple[int, float]], bool]],
+        cut: Mapping[tuple[str, str], tuple[tuple[np.ndarray, np.ndarray], bool]],
         *,
         now_ms: int,
         computed_at_ms: int,
     ) -> list[TwP50Snapshot]:
         out: list[TwP50Snapshot] = []
         for (coin, side), (samples, ordered) in cut.items():
-            # Ingestion may have replaced a reservoir slot since the last
-            # maintenance. Canonicalize only this private copy for the query.
-            if not ordered:
-                samples.sort(key=lambda sample: sample[0])
             p50_1m, n_1m, cov_1m = tw_p50_window(
-                samples, now_ms=now_ms, window_ms=WINDOW_1M_MS
+                samples, now_ms=now_ms, window_ms=WINDOW_1M_MS,
+                samples_are_ordered=ordered,
             )
             out.append(
                 TwP50Snapshot(
