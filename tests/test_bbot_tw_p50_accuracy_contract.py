@@ -187,6 +187,39 @@ class TwP50AccuracyContractTests(unittest.TestCase):
                         repeats.append(([s.as_row() for s in snapshots], retained, error))
                     self.assertEqual(repeats[0], repeats[1])
 
+    def test_deque_replacement_preserves_algorithm_r_retained_order(self) -> None:
+        cap = 16
+        seed = 1234
+        observer_rng = random.Random(seed)
+        observer = LiveTwP50Observer(
+            ["BTC"], sample_cap=cap, rng=observer_rng,
+            one_minute_engine="deque",
+        )
+        reference_rng = random.Random(seed)
+        reference = {"long": [], "short": []}
+        seen = {"long": 0, "short": 0}
+
+        for index in range(300):
+            ts = index * 10
+            long_value = float(index % 19)
+            short_value = -long_value
+            observer.note_spreads("BTC", ts, long_value, short_value)
+            for side, value in (("long", long_value), ("short", short_value)):
+                seen[side] += 1
+                samples = reference[side]
+                if len(samples) < cap:
+                    samples.append((ts, value))
+                else:
+                    j = reference_rng.randrange(seen[side])
+                    if j < cap:
+                        samples[j % len(samples)] = (ts, value)
+
+        retained = observer.snapshot_samples()
+        self.assertEqual(retained[("BTC", "long")], reference["long"])
+        self.assertEqual(retained[("BTC", "short")], reference["short"])
+        self.assertEqual(observer._rings[("BTC", "long")].samples_seen, 300)
+        self.assertEqual(observer._rings[("BTC", "short")].samples_seen, 300)
+
     def test_repeated_cap_with_aging_carry_and_policy_error(self) -> None:
         # Exercise repeated replacement and aging with a small cap so the test
         # covers many rollover cycles quickly. Compare every emitted snapshot
