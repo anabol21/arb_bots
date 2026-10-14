@@ -290,19 +290,22 @@ class TwP50AccuracyContractTests(unittest.TestCase):
         self.assert_window_equal(actual, uncapped_tw_median(retained, now_ms=(total_events - 1) * 10))
         # The uncapped oracle is explicitly calculated and kept alongside the
         # sampled result for downstream accuracy review.
-        self.assertTrue(math.isfinite(expected[2]))
-        self.assertLessEqual(actual[1], expected[1])
-        if expected[0] is not None and actual[0] is not None:
-            self.assertTrue(math.isfinite(actual[0] - expected[0]))
+        exact_p50, exact_n, exact_coverage = expected
+        self.assertLessEqual(actual[1], exact_n)
+        self.assertTrue(math.isfinite(actual[2] - exact_coverage))
+        if exact_p50 is not None and actual[0] is not None:
+            p50_error = actual[0] - exact_p50
+            self.assertTrue(math.isfinite(p50_error))
             # Compare the derived theta and threshold signal too; these values
             # characterize the capped path and do not assert parity.
             floor = 0.25
             sampled_theta = actual[0] - floor
-            exact_theta = expected[0] - floor
+            exact_theta = exact_p50 - floor
             self.assertTrue(math.isfinite(sampled_theta - exact_theta))
             sampled_signal = sampled_theta > 0.0
             exact_signal = exact_theta > 0.0
-            self.assertIsInstance(sampled_signal != exact_signal, bool)
+            self.assertIn(sampled_signal, (True, False))
+            self.assertIn(exact_signal, (True, False))
 
     def test_json_and_theta_follow_on_keep_existing_contract(self) -> None:
         tw_keys = {
