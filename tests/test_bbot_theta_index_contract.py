@@ -6,7 +6,9 @@ import unittest
 from unittest.mock import patch
 
 from app.bot import theta_trade_manager as manager
-from app.bot.theta_screener import ThetaSnapshot, theta_from_inputs
+from app.bot.theta_screener import LiveThetaScreener, ThetaSnapshot, theta_from_inputs
+from app.bot.floor_watcher import FloorSnapshot
+from app.bot.tw_p50_watcher import TwP50Snapshot
 
 
 def _snap(coin: str, side: str) -> ThetaSnapshot:
@@ -77,6 +79,35 @@ class ThetaIndexContractTests(unittest.TestCase):
         self.assertEqual(decision.action, "skip")
         self.assertEqual(len(seen_index_ids), len(coins))
         self.assertEqual(len(set(seen_index_ids)), 1)
+
+    def test_theta_from_tw_uses_one_atomic_floor_cut(self) -> None:
+        class FloorCut:
+            def __init__(self) -> None:
+                self.calls = 0
+
+            def snapshot_last_floors(self):
+                self.calls += 1
+                return {
+                    ("BTC", "long"): FloorSnapshot("BTC", "long", 0.1, 10, 11),
+                    ("ETH", "long"): FloorSnapshot("ETH", "long", 0.2, 10, 11),
+                }
+
+            def last_floor(self, *_args):
+                raise AssertionError("screen should consume one floor cut")
+
+        floors = FloorCut()
+        screener = LiveThetaScreener(["BTC", "ETH"], floor_observer=floors)
+        tw = [
+            TwP50Snapshot("BTC", "long", 20, 0.5, 2, 1.0, 21),
+            TwP50Snapshot("ETH", "long", 20, 0.6, 3, 1.0, 21),
+        ]
+
+        result = screener.compute_from_tw_snapshots(tw, computed_at_ms=22)
+
+        self.assertEqual(floors.calls, 1)
+        self.assertEqual([row.floor_tf_select_a25 for row in result], [0.1, 0.2])
+        self.assertAlmostEqual(result[0].theta_1m, 0.4)
+        self.assertAlmostEqual(result[1].theta_1m, 0.4)
 
 
 if __name__ == "__main__":
