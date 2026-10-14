@@ -261,6 +261,7 @@ class TwP50AccuracyContractTests(unittest.TestCase):
         self.assertTrue(all(math.isfinite(error) for error in coverage_errors))
         self.assertTrue(all(math.isfinite(error) for error in theta_errors))
         self.assertGreater(len(boolean_mismatches), 0)
+        self.assertGreater(sum(boolean_mismatches), 0)
 
     def test_default_cap_reaches_4096_repeatedly(self) -> None:
         # Validate the configured 4096 bound directly with a sustained burst.
