@@ -53,3 +53,9 @@ The observer exposes `maintain(now_ms)` and read-only `query_snapshots(now_ms, c
 A deterministic synthetic local check used 198 coins, 150 event samples per side, cap=8192, and emitted 396 TW snapshots. On Python 3.11, `compute_snapshots` used CPU median 10.11 ms, p95 10.36 ms, max 10.47 ms across 30 repeated fixed-cut queries. This is a sparse matched workload (150 samples/side, below cap) and does not represent full live burst or all concurrent floor/policy work.
 
 For candidate feature construction over all 198 coins, 30 repetitions measured median/p95/max 3.493/3.621/3.999 ms when each call rebuilt the snapshot map, versus 0.598/0.610/0.653 ms when reusing the shared index. This is an isolated CPU microbenchmark, not end-to-end signal latency or a VPS acceptance result.
+
+## Floor snapshot cut (P03 follow-up)
+
+The theta batch now reads the latest floor map once under a dedicated lock and uses that immutable-value copy for every row. This prevents one batch from mixing floor values when a 5-minute bar closes while TW-to-theta work runs in a worker thread. Floor calculations, bar close rules, p50 values, candidate ordering, and trading policy are unchanged. This provides an atomic cut of floor state only; it does not claim a cross-stream event-time join between the floor and TW snapshots.
+
+The regression test supplies a floor observer that rejects per-row reads and verifies a two-coin batch reads its floor cut once and preserves the theta arithmetic. After this follow-up, the reconstructed targeted suite passes 27 tests (Python 3.11), and the touched bot modules compile. This remains a focused test slice, not the complete repository suite or VPS validation.
