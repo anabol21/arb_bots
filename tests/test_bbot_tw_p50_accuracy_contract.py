@@ -10,7 +10,7 @@ import unittest
 from pathlib import Path
 from typing import Sequence
 
-from app.bot.floor_watcher import LiveFloorObserver
+from app.bot.floor_watcher import LiveFloorObserver, time_weighted_median, time_weighted_quantile
 from app.bot.theta_screener import LiveThetaScreener, ThetaJournalWriter
 from app.bot.tw_p50_watcher import (
     LiveTwP50Observer,
@@ -82,6 +82,17 @@ class TwP50AccuracyContractTests(unittest.TestCase):
             self.assertEqual(p50, expected[0])
         self.assertEqual(count, expected[1])
         self.assertAlmostEqual(coverage, expected[2], places=12)
+
+
+    def test_linear_weighted_median_matches_sorted_oracle(self) -> None:
+        rng = random.Random(9142)
+        for size in (1, 2, 3, 7, 32, 511, 4096):
+            for _ in range(20):
+                values = [float(rng.randrange(-50, 51)) for _ in range(size)]
+                weights = [float(rng.randrange(1, 100_000)) for _ in range(size)]
+                actual = time_weighted_median(values, weights)
+                expected = time_weighted_quantile(values, weights, 0.5)
+                self.assertEqual(actual, expected)
 
     def test_oracle_known_hold_windows(self) -> None:
         for name, samples, expected in WINDOW_CASES:
@@ -226,6 +237,37 @@ class TwP50AccuracyContractTests(unittest.TestCase):
         self.assertEqual(retained[("BTC", "short")], reference["short"])
         self.assertEqual(observer._rings[("BTC", "long")].samples_seen, 300)
         self.assertEqual(observer._rings[("BTC", "short")].samples_seen, 300)
+
+    def test_compact_reservoir_matches_stable_time_order_for_ties(self) -> None:
+        cap = 16
+        for seed in range(8):
+            observer_rng = random.Random(seed)
+            observer = LiveTwP50Observer(
+                ["BTC"], sample_cap=cap, rng=observer_rng,
+                one_minute_engine="deque",
+            )
+            reference_rng = random.Random(seed)
+            reference = {"long": [], "short": []}
+            seen = {"long": 0, "short": 0}
+            ts = 0
+            value_rng = random.Random(seed + 100)
+            for _ in range(300):
+                ts += value_rng.randrange(0, 4)  # exercise stable equal-time ordering
+                value = float(value_rng.randrange(-9, 10))
+                observer.note_spreads("BTC", ts, value, -value)
+                for side, side_value in (("long", value), ("short", -value)):
+                    samples = reference[side]
+                    seen[side] += 1
+                    if len(samples) < cap:
+                        samples.append((ts, side_value))
+                    else:
+                        j = reference_rng.randrange(seen[side])
+                        if j < cap:
+                            samples[j % len(samples)] = (ts, side_value)
+                            samples.sort(key=lambda sample: sample[0])
+            retained = observer.snapshot_samples()
+            self.assertEqual(retained[("BTC", "long")], reference["long"])
+            self.assertEqual(retained[("BTC", "short")], reference["short"])
 
     def test_repeated_cap_with_aging_carry_and_policy_error(self) -> None:
         # Exercise repeated replacement and aging with a small cap so the test
