@@ -6,7 +6,11 @@ import unittest
 from unittest.mock import patch
 
 from app.bot import theta_trade_manager as manager
-from app.bot.theta_screener import LiveThetaScreener, ThetaSnapshot, theta_from_inputs
+from app.bot.theta_screener import (
+    LiveThetaScreener,
+    ThetaSnapshot,
+    theta_from_inputs,
+)
 from app.bot.floor_watcher import FloorSnapshot
 from app.bot.tw_p50_watcher import TwP50Snapshot
 
@@ -93,7 +97,7 @@ class ThetaIndexContractTests(unittest.TestCase):
                 }
 
             def last_floor(self, *_args):
-                raise AssertionError("screen should consume one floor cut")
+                raise AssertionError("per-row reads would allow a mixed floor cut")
 
         floors = FloorCut()
         screener = LiveThetaScreener(["BTC", "ETH"], floor_observer=floors)
@@ -105,9 +109,10 @@ class ThetaIndexContractTests(unittest.TestCase):
         result = screener.compute_from_tw_snapshots(tw, computed_at_ms=22)
 
         self.assertEqual(floors.calls, 1)
-        self.assertEqual([row.floor_tf_select_a25 for row in result], [0.1, 0.2])
-        self.assertAlmostEqual(result[0].theta_1m, 0.4)
-        self.assertAlmostEqual(result[1].theta_1m, 0.4)
+        self.assertEqual(
+            [(row.floor_tf_select_a25, row.theta_1m) for row in result],
+            [(0.1, 0.4), (0.2, 0.39999999999999997)],
+        )
 
 
 if __name__ == "__main__":
