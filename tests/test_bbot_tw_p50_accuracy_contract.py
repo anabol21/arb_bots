@@ -197,6 +197,7 @@ class TwP50AccuracyContractTests(unittest.TestCase):
         )
         reference_rng = random.Random(seed)
         reference = {"long": [], "short": []}
+        ordered = {"long": True, "short": True}
         seen = {"long": 0, "short": 0}
 
         for index in range(300):
@@ -205,14 +206,20 @@ class TwP50AccuracyContractTests(unittest.TestCase):
             short_value = -long_value
             observer.note_spreads("BTC", ts, long_value, short_value)
             for side, value in (("long", long_value), ("short", short_value)):
-                seen[side] += 1
                 samples = reference[side]
+                if len(samples) >= cap and not ordered[side]:
+                    # Production sorts after any reservoir replacement before
+                    # the next append, even when no sample has aged out.
+                    samples.sort(key=lambda sample: sample[0])
+                    ordered[side] = True
+                seen[side] += 1
                 if len(samples) < cap:
                     samples.append((ts, value))
                 else:
                     j = reference_rng.randrange(seen[side])
                     if j < cap:
                         samples[j % len(samples)] = (ts, value)
+                        ordered[side] = False
 
         retained = observer.snapshot_samples()
         self.assertEqual(retained[("BTC", "long")], reference["long"])
