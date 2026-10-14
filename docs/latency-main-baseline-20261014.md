@@ -47,3 +47,9 @@ Repeating the same local cap=4096 microbenchmark after the patch gave first-4,09
 ## TW maintenance/query split (P04)
 
 The observer exposes `maintain(now_ms)` and read-only `query_snapshots(now_ms, computed_at_ms)` separately. Existing `compute_snapshots` remains the compatibility path and atomically prunes plus captures the sample cut under one lock, preserving the canonical 1 Hz schedule and outputs. A direct query copies one locked cut, sorts only its private copy if an intervening reservoir replacement made it unordered, and performs no pruning or RNG calls. Repeat-query, wrapper-parity, and maintenance/ingestion/query interleaving tests pass. A second-level review caught and helped close a lock-gap race before this contract was accepted. This prepares later coherent-cut/scheduler work without changing cadence or reservoir selection today.
+
+## Local 198-pool cost check
+
+A deterministic synthetic local check used 198 coins, 150 event samples per side, cap=8192, and emitted 396 TW snapshots. On Python 3.11, `compute_snapshots` used CPU median 10.11 ms, p95 10.36 ms, max 10.47 ms across 30 repeated fixed-cut queries. This is a sparse matched workload (150 samples/side, below cap) and does not represent full live burst or all concurrent floor/policy work.
+
+For candidate feature construction over all 198 coins, 30 repetitions measured median/p95/max 3.493/3.621/3.999 ms when each call rebuilt the snapshot map, versus 0.598/0.610/0.653 ms when reusing the shared index. This is an isolated CPU microbenchmark, not end-to-end signal latency or a VPS acceptance result.
