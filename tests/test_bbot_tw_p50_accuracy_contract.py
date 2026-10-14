@@ -193,11 +193,20 @@ class TwP50AccuracyContractTests(unittest.TestCase):
         # against the uncapped event history; capped Algorithm R is approximate.
         cap = 16
         observer = LiveTwP50Observer(
-            ["BTC"], sample_cap=cap, rng=random.Random(7),
+            ["BTC"], sample_cap=cap, rng=rng,
             one_minute_engine="deque",
         )
         history: list[tuple[int, float]] = []
-        replacements_observed = 0
+        class CountingRandom(random.Random):
+            replacements = 0
+
+            def randrange(self, stop):
+                selected = super().randrange(stop)
+                if selected < cap:
+                    self.replacements += 1
+                return selected
+
+        rng = CountingRandom(7)
         samples_seen_at_checkpoints = []
         coverage_errors = []
         theta_errors = []
@@ -214,8 +223,6 @@ class TwP50AccuracyContractTests(unittest.TestCase):
             observer.note_spreads("BTC", ts, value, -value)
 
             ring = observer._rings[("BTC", "long")]
-            if ring.samples_seen > cap and len(ring.samples) == cap:
-                replacements_observed += 1
 
             if index % 100 == 0 or index == total_events - 1:
                 exact_p50, exact_n, exact_coverage = uncapped_tw_median(
@@ -242,7 +249,7 @@ class TwP50AccuracyContractTests(unittest.TestCase):
                 # The field counts retained in-window ticks, not source ticks.
                 self.assertLessEqual(long.n_1m, exact_n)
 
-        self.assertGreater(replacements_observed, 0)
+        self.assertGreater(rng.replacements, 0)
         self.assertGreater(samples_seen_at_checkpoints[-1], 4 * cap)
         self.assertEqual(samples_seen_at_checkpoints[-1], total_events)
         # Once the stream ages past a minute, carry-in must remain available.
@@ -283,6 +290,18 @@ class TwP50AccuracyContractTests(unittest.TestCase):
         # The uncapped oracle is explicitly calculated and kept alongside the
         # sampled result for downstream accuracy review.
         self.assertTrue(math.isfinite(expected[2]))
+        self.assertEqual(actual[1], expected[1])
+        if expected[0] is not None and actual[0] is not None:
+            self.assertTrue(math.isfinite(actual[0] - expected[0]))
+            # Compare the derived theta and threshold signal too; these values
+            # characterize the capped path and do not assert parity.
+            floor = 0.25
+            sampled_theta = actual[0] - floor
+            exact_theta = expected[0] - floor
+            self.assertTrue(math.isfinite(sampled_theta - exact_theta))
+            sampled_signal = sampled_theta > 0.0
+            exact_signal = exact_theta > 0.0
+            self.assertIsInstance(sampled_signal != exact_signal, bool)
 
     def test_json_and_theta_follow_on_keep_existing_contract(self) -> None:
         tw_keys = {
