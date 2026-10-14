@@ -34,3 +34,9 @@ A separate local CPU microbenchmark (Python 3.11, one coin/two sides, deque engi
 
 The scoped trace + TW contract suites pass 21 tests in the reconstructed source slice. This is not a full-repository test run: GitHub connectivity in the shell was unavailable, so sources were fetched from the branch and exercised in a minimal `/tmp` test tree with Python 3.11 and a websocket import stub. No server or production system was contacted.
 The seeded cap=4096 burst also has a decision-level divergence at its final snapshot: sampled p50=1.0 versus exact p50=0.0, with both coverages at 1.0; for floor=0.25 and threshold theta>0, the sampled result is true while exact is false. This is a pinned approximation counterexample, not a valid expected production outcome.
+
+## First hot-path optimization result
+
+The reservoir replacement now mutates the deque slot in place using rotation and endpoint operations, removing the per-replacement Python list allocation/rebuild. A deterministic reference test models the production sort-after-replacement maintenance and confirms retained order and `samples_seen` remain identical for both sides.
+
+Repeating the same local cap=4096 microbenchmark after the patch gave first-4,096 median/p95 1/2 µs and post-overflow median/p95/max 333/659/2,478 µs, versus 366/700/2,329 µs before the patch. In this run that is about 9% lower median and 6% lower p95; max remained noisy. This is a modest local improvement, not a resource gate or 198-coin result. The dominant post-cap cost remains high; do not treat this patch as sufficient for the ≤50 ms objective.
