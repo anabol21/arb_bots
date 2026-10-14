@@ -220,6 +220,35 @@ def time_weighted_quantile(
     return float(y[j])
 
 
+def time_weighted_median(values: np.ndarray, weights: np.ndarray) -> float:
+    """Exact lower weighted median using NumPy introselect, without full sort."""
+    y = np.asarray(values, dtype="float64")
+    w = np.asarray(weights, dtype="float64")
+    if y.size == 0 or w.size != y.size:
+        return float("nan")
+    finite = np.isfinite(y) & np.isfinite(w) & (w > 0)
+    if not np.any(finite):
+        return float("nan")
+    y = y[finite]
+    w = w[finite]
+    target = float(np.sum(w)) * 0.5
+    while y.size:
+        pivot = float(np.partition(y, y.size // 2)[y.size // 2])
+        below = y < pivot
+        equal = y == pivot
+        below_weight = float(np.sum(w[below]))
+        equal_weight = float(np.sum(w[equal]))
+        if target <= below_weight:
+            y, w = y[below], w[below]
+        elif target <= below_weight + equal_weight:
+            return pivot
+        else:
+            target -= below_weight + equal_weight
+            above = y > pivot
+            y, w = y[above], w[above]
+    return float("nan")
+
+
 def tw_p05_p95_from_samples(
     sample_ts: Sequence[int],
     sample_vals: Sequence[float],
@@ -465,7 +494,7 @@ class LiveFloorObserver:
             return self._last_floors.get((str(base_coin).upper(), str(side)))
 
     def snapshot_last_floors(self) -> dict[tuple[str, str], FloorSnapshot]:
-        """Return one atomic cut of latest immutable floor snapshots."""
+        """Return one immutable-value, atomic cut of all latest floor snapshots."""
         with self._floor_lock:
             return dict(self._last_floors)
 
