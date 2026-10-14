@@ -20,7 +20,7 @@ _RECONNECT_BASE_SEC = 5.0
 _RECONNECT_CAP_SEC = 60.0
 _RECONNECT_JITTER_FRAC = 0.20  # 0–20% additive jitter
 
-OnBook = Callable[[str, str, dict[str, Any]], None]
+OnBook = Callable[..., None]
 OnLifecycle = Callable[[str, str, str], None]  # coin, exchange, event
 
 
@@ -132,6 +132,7 @@ async def _listen_loop(
     reconnect_base_sec: float = _RECONNECT_BASE_SEC,
     reconnect_cap_sec: float = _RECONNECT_CAP_SEC,
     stop_event: Optional[asyncio.Event] = None,
+    capture_monotonic: bool = False,
 ) -> None:
     """Simple reconnect loop with bounded backoff. Only sends public subscribe payloads."""
 
@@ -158,11 +159,15 @@ async def _listen_loop(
                 async for message in ws:
                     if stop_event is not None and stop_event.is_set():
                         return
+                    received_mono_ns = time.monotonic_ns() if capture_monotonic else None
                     parsed = parse_message(message)
                     if parsed is None:
                         continue
                     merge_book_update(book_store, parsed)
-                    on_book(base_coin, exchange, book_store)
+                    if received_mono_ns is None:
+                        on_book(base_coin, exchange, book_store)
+                    else:
+                        on_book(base_coin, exchange, book_store, received_mono_ns)
         except asyncio.CancelledError:
             _life("cancelled")
             if ws is not None:
@@ -193,6 +198,7 @@ async def run_okx_books5(
     on_book: OnBook,
     on_lifecycle: Optional[OnLifecycle] = None,
     stop_event: Optional[asyncio.Event] = None,
+    capture_monotonic: bool = False,
 ) -> None:
     sub = {"op": "subscribe", "args": [{"channel": "books5", "instId": okx_symbol}]}
     await _listen_loop(
@@ -206,6 +212,7 @@ async def run_okx_books5(
         on_book=on_book,
         on_lifecycle=on_lifecycle,
         stop_event=stop_event,
+        capture_monotonic=capture_monotonic,
     )
 
 
@@ -217,6 +224,7 @@ async def run_bybit_orderbook1(
     on_book: OnBook,
     on_lifecycle: Optional[OnLifecycle] = None,
     stop_event: Optional[asyncio.Event] = None,
+    capture_monotonic: bool = False,
 ) -> None:
     sub = {"op": "subscribe", "args": [f"orderbook.1.{bybit_symbol}"]}
     await _listen_loop(
@@ -230,6 +238,7 @@ async def run_bybit_orderbook1(
         on_book=on_book,
         on_lifecycle=on_lifecycle,
         stop_event=stop_event,
+        capture_monotonic=capture_monotonic,
     )
 
 
