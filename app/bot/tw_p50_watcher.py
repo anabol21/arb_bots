@@ -332,22 +332,43 @@ class LiveTwP50Observer:
         with self._lock:
             return {k: list(v.samples) for k, v in self._rings.items()}
 
+    def maintain(self, *, now_ms: int) -> None:
+        """Apply canonical age pruning without computing or publishing snapshots."""
+        now = int(now_ms)
+        with self._lock:
+            for ring in self._rings.values():
+                self._prune_ring(ring, now_ms=now)
+
     def compute_snapshots(
         self,
         *,
         now_ms: Optional[int] = None,
         computed_at_ms: Optional[int] = None,
     ) -> list[TwP50Snapshot]:
-        """Compute only the policy-used 1m TW p50; update RAM snapshots."""
+        """Compatibility entrypoint: maintain on the canonical emit cadence, then query."""
         now = int(now_ms) if now_ms is not None else int(time.time() * 1000)
         wall = (
             int(computed_at_ms)
             if computed_at_ms is not None
             else int(time.time() * 1000)
         )
+        self.maintain(now_ms=now)
+        return self.query_snapshots(now_ms=now, computed_at_ms=wall)
+
+    def query_snapshots(
+        self,
+        *,
+        now_ms: int,
+        computed_at_ms: Optional[int] = None,
+    ) -> list[TwP50Snapshot]:
+        """Read a fixed retained sample cut; does not prune or consume RNG."""
+        now = int(now_ms)
+        wall = (
+            int(computed_at_ms)
+            if computed_at_ms is not None
+            else int(time.time() * 1000)
+        )
         with self._lock:
-            for ring in self._rings.values():
-                self._prune_ring(ring, now_ms=now)
             copies = {k: list(v.samples) for k, v in self._rings.items()}
 
         out: list[TwP50Snapshot] = []
