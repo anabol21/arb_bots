@@ -323,7 +323,10 @@ class LiveTwP50Observer:
     def _append_sample(self, ring: _SideRing, ts_ms: int, value: float) -> None:
         if self.one_minute_engine == "deque" and len(ring) >= self.sample_cap:
             left = int(ts_ms) - RETAIN_MS
-            if ring.min_ts is not None and ring.min_ts <= left:
+            if (
+                not ring.timestamps_ordered
+                or (ring.min_ts is not None and ring.min_ts <= left)
+            ):
                 self._prune_ring(ring, now_ms=int(ts_ms))
         ring.samples_seen += 1
         n = ring.samples_seen
@@ -351,7 +354,7 @@ class LiveTwP50Observer:
             start = int(np.searchsorted(
                 np.frombuffer(ring.timestamps, dtype=np.int64), left, side="right"
             ))
-            if start:
+            if start > 1:
                 carry = (ring.timestamps[start - 1], ring.values[start - 1])
                 del ring.timestamps[:start]
                 del ring.values[:start]
