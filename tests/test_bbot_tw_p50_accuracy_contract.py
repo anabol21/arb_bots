@@ -238,6 +238,30 @@ class TwP50AccuracyContractTests(unittest.TestCase):
         self.assertEqual(observer._rings[("BTC", "long")].samples_seen, 300)
         self.assertEqual(observer._rings[("BTC", "short")].samples_seen, 300)
 
+    def test_unsorted_pre_cap_ring_is_sorted_before_reservoir_replace(self) -> None:
+        class NoReplaceRandom(random.Random):
+            def randrange(self, stop: int) -> int:
+                return stop - 1
+
+        cap = 16
+        observer = LiveTwP50Observer(
+            ["BTC"], sample_cap=cap, rng=NoReplaceRandom(1),
+            one_minute_engine="deque",
+        )
+        timestamps = [50_000 + 100 * index for index in range(cap)]
+        timestamps[1], timestamps[2] = timestamps[2], timestamps[1]
+        for index, ts in enumerate(timestamps):
+            observer.note_spreads("BTC", ts, float(index), -float(index))
+        ring = observer._rings[("BTC", "long")]
+        self.assertFalse(ring.timestamps_ordered)
+        self.assertGreater(ring.min_ts, 40_000)  # no sample is old enough to prune
+
+        observer.note_spreads("BTC", 52_000, 99.0, -99.0)
+
+        retained = observer.snapshot_samples()[("BTC", "long")]
+        self.assertTrue(ring.timestamps_ordered)
+        self.assertEqual([ts for ts, _ in retained], sorted(ts for ts, _ in retained))
+
     def test_compact_reservoir_matches_stable_time_order_for_ties(self) -> None:
         cap = 16
         for seed in range(8):
