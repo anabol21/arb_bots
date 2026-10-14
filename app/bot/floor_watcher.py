@@ -464,27 +464,37 @@ class LiveFloorObserver:
             )
             if row is not None:
                 rows.append(row)
-                self._maybe_store_last_floor(row)
+        self._maybe_store_last_floors(rows)
         return rows
 
     def _maybe_store_last_floor(self, row: Mapping[str, Any]) -> None:
-        """Keep latest finite ``floor_tf_select_a25`` (no formula change)."""
-        floor = _finite(row.get("floor_tf_select_a25"))
-        if floor is None:
+        """Keep latest finite floor snapshot (no formula change)."""
+        self._maybe_store_last_floors((row,))
+
+    def _maybe_store_last_floors(
+        self, rows: Sequence[Mapping[str, Any]]
+    ) -> None:
+        """Publish the completed tick's finite floors as one locked update."""
+        updates: dict[tuple[str, str], FloorSnapshot] = {}
+        for row in rows:
+            floor = _finite(row.get("floor_tf_select_a25"))
+            if floor is None:
+                continue
+            coin = str(row.get("base_coin") or "").upper()
+            side = str(row.get("side") or "")
+            if not coin or side not in SIDES:
+                continue
+            updates[(coin, side)] = FloorSnapshot(
+                base_coin=coin,
+                side=side,
+                floor_tf_select_a25=float(floor),
+                bar_end_ms=int(row.get("bar_end_ms") or 0),
+                computed_at_ms=int(row.get("computed_at_ms") or 0),
+            )
+        if not updates:
             return
-        coin = str(row.get("base_coin") or "").upper()
-        side = str(row.get("side") or "")
-        if not coin or side not in SIDES:
-            return
-        snapshot = FloorSnapshot(
-            base_coin=coin,
-            side=side,
-            floor_tf_select_a25=float(floor),
-            bar_end_ms=int(row.get("bar_end_ms") or 0),
-            computed_at_ms=int(row.get("computed_at_ms") or 0),
-        )
         with self._floor_lock:
-            self._last_floors[(coin, side)] = snapshot
+            self._last_floors.update(updates)
 
     def last_floor_snapshot(
         self, base_coin: str, side: str
