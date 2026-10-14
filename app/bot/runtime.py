@@ -26,6 +26,13 @@ from app.bot.floor_watcher import (
     floor_watch_enabled,
 )
 from app.bot.journal import JournalWriter
+from app.bot.latency_trace import (
+    NO_TRACE,
+    EmitLatencySnapshot,
+    EmitLatencyTrace,
+    _Cycle,
+    latency_trace_enabled,
+)
 from app.bot.paths import (
     ensure_repo_on_syspath,
     repo_root,
@@ -585,6 +592,7 @@ class BotRuntime:
         self.tw_p50_observer: LiveTwP50Observer | None = None
         self.tw_p50_journal: TwP50JournalWriter | None = None
         self._tw_p50_flush_warned = False
+        self._latency_trace = EmitLatencyTrace() if latency_trace_enabled() else None
         if self.tw_p50_enabled:
             self.tw_p50_observer = LiveTwP50Observer(self.coins)
             self.tw_p50_journal = TwP50JournalWriter(self.data_root)
@@ -2645,28 +2653,35 @@ class BotRuntime:
                 pass
             if self.tw_p50_observer is None:
                 continue
-            try:
-                snapshots = await asyncio.to_thread(
-                    self.tw_p50_observer.compute_snapshots
-                )
-            except Exception as exc:  # noqa: BLE001
-                if not self._tw_p50_flush_warned:
-                    self._tw_p50_flush_warned = True
-                    self.log.warning(
-                        "tw_p50_compute_failed | err=%s",
-                        type(exc).__name__,
-                    )
-                continue
-            # Skip sides that have never received a tick in the 1m window.
-            rows = [
-                s.as_row()
-                for s in snapshots
-                if s.n_1m > 0 or s.coverage_1m > 0.0
-            ]
-            if rows:
-                await self._flush_tw_p50_rows(rows)
-            if self.theta_enabled and self.theta_screener is not None:
-                await self._emit_theta_from_tw(snapshots)
+            with self._latency_trace.cycle() if self._latency_trace is not None else NO_TRACE as cycle:
+                try:
+                    with cycle.span("tw_compute_await") if cycle is not None else NO_TRACE:
+                        snapshots = await asyncio.to_thread(
+                            self.tw_p50_observer.compute_snapshots
+                        )
+                except Exception as exc:  # noqa: BLE001
+                    if not self._tw_p50_flush_warned:
+                        self._tw_p50_flush_warned = True
+                        self.log.warning(
+                            "tw_p50_compute_failed | err=%s",
+                            type(exc).__name__,
+                        )
+                    continue
+                # Skip sides that have never received a tick in the 1m window.
+                rows = [
+                    s.as_row()
+                    for s in snapshots
+                    if s.n_1m > 0 or s.coverage_1m > 0.0
+                ]
+                if rows:
+                    with cycle.span("tw_journal_await") if cycle is not None else NO_TRACE:
+                        await self._flush_tw_p50_rows(rows)
+                if self.theta_enabled and self.theta_screener is not None:
+                    await self._emit_theta_from_tw(snapshots, _latency_cycle=cycle)
+
+    def latency_trace_snapshot(self) -> EmitLatencySnapshot | None:
+        """Immutable RAM await diagnostics; call from this runtime's event loop."""
+        return self._latency_trace.snapshot() if self._latency_trace is not None else None
 
     async def _synthetic_roll_loop(self) -> None:
         """~1 Hz pool roll. Does not wait on theta snapshots."""
@@ -2731,14 +2746,17 @@ class BotRuntime:
                 if self.theta_trade_enabled and self.theta_trade is not None:
                     await self._run_theta_trade(snaps)
 
-    async def _emit_theta_from_tw(self, tw_snapshots: list[Any]) -> None:
+    async def _emit_theta_from_tw(
+        self, tw_snapshots: list[Any], *, _latency_cycle: _Cycle | None = None
+    ) -> None:
         """Follow-on: theta from TW snapshots + last floor (never ticks)."""
         if self.theta_screener is None:
             return
         try:
-            theta_snaps = await asyncio.to_thread(
-                self.theta_screener.compute_from_tw_snapshots, tw_snapshots
-            )
+            with _latency_cycle.span("theta_compute_await") if _latency_cycle is not None else NO_TRACE:
+                theta_snaps = await asyncio.to_thread(
+                    self.theta_screener.compute_from_tw_snapshots, tw_snapshots
+                )
         except Exception as exc:  # noqa: BLE001
             if not self._theta_flush_warned:
                 self._theta_flush_warned = True
@@ -2759,9 +2777,11 @@ class BotRuntime:
             if (s.base_coin, s.side) in active_keys
         ]
         if rows:
-            await self._flush_theta_rows(rows)
+            with _latency_cycle.span("theta_journal_await") if _latency_cycle is not None else NO_TRACE:
+                await self._flush_theta_rows(rows)
         if self.theta_trade_enabled and self.theta_trade is not None:
-            await self._run_theta_trade(theta_snaps)
+            with _latency_cycle.span("manager_invocation_await") if _latency_cycle is not None else NO_TRACE:
+                await self._run_theta_trade(theta_snaps)
 
     async def _run_theta_trade(self, theta_snaps: list[Any]) -> None:
         """K=1 would_send decide+fill off the theta emit (never tick WAL)."""
