@@ -182,10 +182,18 @@ class LiveThetaScreener:
             else int(time.time() * 1000)
         )
         out: list[ThetaSnapshot] = []
+        floor_cut = (
+            self.floor_observer.snapshot_last_floors()
+            if self.floor_observer is not None
+            else {}
+        )
         for tw in tw_snapshots:
-            floor_val: Optional[float] = None
-            if self.floor_observer is not None:
-                floor_val = self.floor_observer.last_floor(tw.base_coin, tw.side)
+            floor_snapshot = floor_cut.get((tw.base_coin, tw.side))
+            floor_val = (
+                floor_snapshot.floor_tf_select_a25
+                if floor_snapshot is not None
+                else None
+            )
             snap = theta_from_inputs(
                 base_coin=tw.base_coin,
                 side=tw.side,
@@ -214,6 +222,11 @@ class LiveThetaScreener:
             else int(time.time() * 1000)
         )
         out: list[ThetaSnapshot] = []
+        floor_cut = (
+            self.floor_observer.snapshot_last_floors()
+            if self.floor_observer is not None
+            else {}
+        )
         for coin in self.coins:
             for side in SIDES:
                 p50_1m: Optional[float] = None
@@ -227,9 +240,12 @@ class LiveThetaScreener:
                         coverage_1m = tw.coverage_1m
                         n_1m = tw.n_1m
                         ts_ms = int(tw.ts_ms)
-                floor_val: Optional[float] = None
-                if self.floor_observer is not None:
-                    floor_val = self.floor_observer.last_floor(coin, side)
+                floor_snapshot = floor_cut.get((coin, side))
+                floor_val = (
+                    floor_snapshot.floor_tf_select_a25
+                    if floor_snapshot is not None
+                    else None
+                )
                 # Skip sides that have never seen p50 or floor (cold start).
                 if p50_1m is None and floor_val is None:
                     continue
