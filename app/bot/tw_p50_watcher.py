@@ -339,21 +339,66 @@ class LiveTwP50Observer:
             for ring in self._rings.values():
                 self._prune_ring(ring, now_ms=now)
 
+    def _copy_sample_cut(
+        self, *, now_ms: int, maintain: bool
+    ) -> dict[tuple[str, str], tuple[list[tuple[int, float]], bool]]:
+        """Copy one atomic ring cut; optionally run canonical maintenance first."""
+        with self._lock:
+            if maintain:
+                for ring in self._rings.values():
+                    self._prune_ring(ring, now_ms=int(now_ms))
+            return {
+                key: (list(ring.samples), ring.timestamps_ordered)
+                for key, ring in self._rings.items()
+            }
+
+    def _query_sample_cut(
+        self,
+        cut: Mapping[tuple[str, str], tuple[list[tuple[int, float]], bool]],
+        *,
+        now_ms: int,
+        computed_at_ms: int,
+    ) -> list[TwP50Snapshot]:
+        out: list[TwP50Snapshot] = []
+        for (coin, side), (samples, ordered) in cut.items():
+            # Ingestion may have replaced a reservoir slot since the last
+            # maintenance. Canonicalize only this private copy for the query.
+            if not ordered:
+                samples.sort(key=lambda sample: sample[0])
+            p50_1m, n_1m, cov_1m = tw_p50_window(
+                samples, now_ms=now_ms, window_ms=WINDOW_1M_MS
+            )
+            out.append(
+                TwP50Snapshot(
+                    base_coin=coin,
+                    side=side,
+                    ts_ms=now_ms,
+                    p50_1m=_json_float(p50_1m),
+                    n_1m=n_1m,
+                    coverage_1m=float(cov_1m),
+                    computed_at_ms=computed_at_ms,
+                )
+            )
+        with self._lock:
+            for snap in out:
+                self._snapshots[(snap.base_coin, snap.side)] = snap
+        return out
+
     def compute_snapshots(
         self,
         *,
         now_ms: Optional[int] = None,
         computed_at_ms: Optional[int] = None,
     ) -> list[TwP50Snapshot]:
-        """Compatibility entrypoint: maintain on the canonical emit cadence, then query."""
+        """Compatibility path: atomically maintain and capture the canonical 1 Hz cut."""
         now = int(now_ms) if now_ms is not None else int(time.time() * 1000)
         wall = (
             int(computed_at_ms)
             if computed_at_ms is not None
             else int(time.time() * 1000)
         )
-        self.maintain(now_ms=now)
-        return self.query_snapshots(now_ms=now, computed_at_ms=wall)
+        cut = self._copy_sample_cut(now_ms=now, maintain=True)
+        return self._query_sample_cut(cut, now_ms=now, computed_at_ms=wall)
 
     def query_snapshots(
         self,
@@ -368,28 +413,8 @@ class LiveTwP50Observer:
             if computed_at_ms is not None
             else int(time.time() * 1000)
         )
-        with self._lock:
-            copies = {k: list(v.samples) for k, v in self._rings.items()}
-
-        out: list[TwP50Snapshot] = []
-        for (coin, side), samples in copies.items():
-            p50_1m, n_1m, cov_1m = tw_p50_window(
-                samples, now_ms=now, window_ms=WINDOW_1M_MS
-            )
-            snap = TwP50Snapshot(
-                base_coin=coin,
-                side=side,
-                ts_ms=now,
-                p50_1m=_json_float(p50_1m),
-                n_1m=n_1m,
-                coverage_1m=float(cov_1m),
-                computed_at_ms=wall,
-            )
-            out.append(snap)
-        with self._lock:
-            for snap in out:
-                self._snapshots[(snap.base_coin, snap.side)] = snap
-        return out
+        cut = self._copy_sample_cut(now_ms=now, maintain=False)
+        return self._query_sample_cut(cut, now_ms=now, computed_at_ms=wall)
 
     def get_snapshot(self, base_coin: str, side: str) -> Optional[TwP50Snapshot]:
         key = (str(base_coin).upper(), str(side))
