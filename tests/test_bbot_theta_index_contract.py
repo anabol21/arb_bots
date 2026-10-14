@@ -11,7 +11,7 @@ from app.bot.theta_screener import (
     ThetaSnapshot,
     theta_from_inputs,
 )
-from app.bot.floor_watcher import FloorSnapshot
+from app.bot.floor_watcher import FloorSnapshot, LiveFloorObserver
 from app.bot.tw_p50_watcher import TwP50Snapshot
 
 
@@ -113,6 +113,23 @@ class ThetaIndexContractTests(unittest.TestCase):
             [(row.floor_tf_select_a25, row.theta_1m) for row in result],
             [(0.1, 0.4), (0.2, 0.39999999999999997)],
         )
+
+    def test_floor_snapshot_cut_is_a_stable_copy(self) -> None:
+        floors = LiveFloorObserver(["BTC"])
+        floors.seed_last_floor("BTC", "long", 0.1, bar_end_ms=10, computed_at_ms=11)
+        floors.seed_last_floor("BTC", "short", 0.2, bar_end_ms=10, computed_at_ms=11)
+        first_cut = floors.snapshot_last_floors()
+
+        floors._maybe_store_last_floors([
+            {"base_coin": "BTC", "side": "long", "floor_tf_select_a25": 0.3, "bar_end_ms": 20},
+            {"base_coin": "BTC", "side": "short", "floor_tf_select_a25": 0.4, "bar_end_ms": 20},
+        ])
+        second_cut = floors.snapshot_last_floors()
+
+        self.assertEqual(first_cut[("BTC", "long")].floor_tf_select_a25, 0.1)
+        self.assertEqual(first_cut[("BTC", "short")].floor_tf_select_a25, 0.2)
+        self.assertEqual(second_cut[("BTC", "long")].floor_tf_select_a25, 0.3)
+        self.assertEqual(second_cut[("BTC", "short")].floor_tf_select_a25, 0.4)
 
 
 if __name__ == "__main__":
