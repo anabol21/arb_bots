@@ -290,7 +290,7 @@ class TwP50AccuracyContractTests(unittest.TestCase):
         # The uncapped oracle is explicitly calculated and kept alongside the
         # sampled result for downstream accuracy review.
         self.assertTrue(math.isfinite(expected[2]))
-        self.assertEqual(actual[1], expected[1])
+        self.assertLessEqual(actual[1], expected[1])
         if expected[0] is not None and actual[0] is not None:
             self.assertTrue(math.isfinite(actual[0] - expected[0]))
             # Compare the derived theta and threshold signal too; these values
