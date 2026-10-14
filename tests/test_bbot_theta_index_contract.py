@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import unittest
 from unittest.mock import patch
 
 from app.bot.theta_screener import ThetaSnapshot, theta_from_inputs
@@ -31,7 +32,8 @@ def _quotes(coins: tuple[str, ...]) -> dict:
     }
 
 
-def test_indexed_feature_build_matches_public_sequence_path() -> None:
+class ThetaIndexContractTests(unittest.TestCase):
+    def test_indexed_feature_build_matches_public_sequence_path(self) -> None:
     snapshots = [_snap("BTC", "long"), _snap("BTC", "short")]
     kwargs = {
         "coin": "BTC",
@@ -47,10 +49,10 @@ def test_indexed_feature_build_matches_public_sequence_path() -> None:
         snapshot_index={(snap.base_coin, snap.side): snap for snap in snapshots},
         **kwargs,
     )
-    assert sequence_result == index_result
+        self.assertEqual(sequence_result, index_result)
 
 
-def test_candidate_loop_reuses_one_snapshot_index() -> None:
+    def test_candidate_loop_reuses_one_snapshot_index(self) -> None:
     coins = ("BTC", "ETH", "WAL", "TRUST")
     snapshots = [_snap(coin, side) for coin in coins for side in ("long", "short")]
     seen_index_ids: list[int] = []
@@ -71,6 +73,10 @@ def test_candidate_loop_reuses_one_snapshot_index() -> None:
             ts_s=1,
         )
 
-    assert decision.action == "skip"
-    assert len(seen_index_ids) == len(coins)
-    assert len(set(seen_index_ids)) == 1
+        self.assertEqual(decision.action, "skip")
+        self.assertEqual(len(seen_index_ids), len(coins))
+        self.assertEqual(len(set(seen_index_ids)), 1)
+
+
+if __name__ == "__main__":
+    unittest.main()
