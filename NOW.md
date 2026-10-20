@@ -8,13 +8,14 @@
 
 Симуляция гира 2.2, `would_send`, `send=false`. Живых ордеров нет. Sentry env `gear22-would-send-canary`.
 
-- Юнит `spread-bbot-would-send-prod`, данные `/data/bbot-would-send-prod`; active с 10.10 23:06 МСК (PID 3261154, NRestarts=0, MemoryCurrent ~0.59 GiB, `CPUQuota=100%`).
-- Checkout на хосте `/root/spread_bbot_theta_top10_canary` (симлинк `/root/spread_bbot_would_send_prod`) = `8f942d2` **+ незакоммиченные правки** (`runtime.py`, `theta_screener.py`, `theta_trade_manager.py`, `tw_p50_watcher.py` и тесты). Это продовое дерево с Codex A/B compute-ядра, не чистый main; эффект на живом CPU отдельно не замерен. Не делать `git checkout`/`reset` на хосте.
-- Статус 13.10 ~23:00 МСК: пул 66 (база 29 + 37 экстра) после expand-only ротации 10:00 МСК; добавлены DOS и BLUR, `history_seed_done rc=0`, `drop_list=[]`. Heartbeat свежий, `pending=None`, `position=None`; сделки 13.10 (2 открытия, 2 закрытия) в `would_send=True`, `send=False`.
-- Гейты: θ_open 0.50, p50_open 0.60, min_profit 0.20, fee 0.30, K=1, notional 20 USDT; tick AGE/SKEW 10000 мс; size gate off (`BBOT_SIZE_GATE=0`, `size_ok_raw` пишется).
-- `theta/` и `tw_p50/` закрытых дней сжимаются в `metrics.jsonl.zst` на смене UTC event_date (`BBOT_METRICS_ROTATE_COMPRESS=1`, + startup sweep); `floor/` не сжимаем. За 12.10 закрытые дни сжаты, таймер ротации active.
-- В runtime есть `sentry_trade_emit status=ok` на сделках 12–13.10; локальный маркер не доказывает доставку issue в Sentry. Отдельно `fail/skipped` в просмотренном хвосте не найдено.
-- Не трогать Contour B, `/data/live`, чужие юниты. Рестарт только когда flat по `theta_trades` (не по heartbeat `position`).
+- Юнит `spread-bbot-would-send-prod`, данные `/data/bbot-would-send-prod` (`theta/`, `tw_p50/`, `theta_trades/`, `floor/`); active с 10.10 23:06 МСК, PID 3261154, NRestarts=0, `CPUQuota=100%`, `MemoryMax=2G`.
+- Checkout на хосте `/root/spread_bbot_theta_top10_canary` (симлинк `/root/spread_bbot_would_send_prod`) = `8f942d2` **+ незакоммиченные правки Codex A/B** (`runtime.py`, `theta_screener.py`, `theta_trade_manager.py`, `tw_p50_watcher.py` и тесты). Прод ≠ main. Не делать `git checkout`/`reset` на хосте.
+- Статус 20.10.2026 10:40 МСК: пул 71 (база 29 + 42 экстра), expand-only ротация 10:00 МСК (20.10 добавлены METIS, OPG, `history_seed_done rc=0`, drop пуст); потолок экстра `BBOT_HOT_ADD_MAX_EXTRA=48` (макс. 77). Heartbeat свежий, `pending=None`, `position=None`; по `theta_trades` flat.
+- Память: MemoryCurrent ~1.24 GiB, но это в основном page cache (~0.94 GiB file); RSS процесса ~310 MiB (anon ~300), рост ~1–6 MiB/сутки, пропорционален пулу, утечки не видно. Рестарт по памяти не нужен.
+- Гейты: θ_open 0.50, p50_open 0.60, min_profit 0.20, fee 0.30, K=1, notional 20 USDT; tick AGE/SKEW 10000 мс; size gate off (`BBOT_SIZE_GATE=0`); `send=false` (broker stub).
+- `theta/` и `tw_p50/` закрытых дней сжимаются в `metrics.jsonl.zst` на смене UTC (`BBOT_METRICS_ROTATE_COMPRESS=1`); 19.10 сжат.
+- Следит: Sentry-рутина стратега.
+- Не трогать Contour B, `/data/live`, collector, чужие юниты. Рестарт только когда flat по `theta_trades` (не по heartbeat `position`).
 
 ## Contour B (бот)
 
