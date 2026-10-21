@@ -19,19 +19,21 @@
 
 ## Contour B (бот)
 
-Контур гира 2.3 (динамический пул) на real net, `send=true`, номинал 10 USDT. Запущен standalone (не systemd).
+Контур гира 2.3 (динамический пул) на real net, `send=true`, номинал 10 USDT. Live canary gear23 (B2.3), запущен standalone (не systemd). Планы и вектор — в [roadmap.md](roadmap.md), здесь только состояние.
 
-- Вектор: довести 2.3 до «готово» по [roadmap.md](roadmap.md): hot-add монеты торгуют наравне с базой. Фандинг в `close_min_profit` и PnL пока не учитывается, фикс отложен до бэктеста (2.6 в roadmap): на TRUST за ~32 ч удержания фандинг съел ~105% gross, net ≈ −0.034 USDT.
-- Код: работающее дерево `gear23-b2.3-tw-deque-20261010` — копия без `.git`. В нём присутствуют функция плеча 1x и гейт `one_x_unconfirmed` из патча `3c719bc`; точное соответствие commit SHA не проверить. Плечо на биржах этим чтением не подтверждалось.
-- Пул 66 = база 29 + 37 hot-add из `/data/bbot-would-send-prod/hot_add_delta.csv` (expand-only). Новая монета до подтверждения плеча 1x стоит на гейте `one_x_unconfirmed` по коду.
+- Статус 21.10.2026 ~10:30 МСК: PID 543732 с 18.10 20:45:33 МСК, standalone `python -m app.bot`, лаунчер `/tmp/gear23-tradeobs-launch-20261018T1744Z.sh`, runroot `/root/b-private-b-exp/response-manager/20261005T194200Z-gear22-longrun`, лог `bbot-gear23-b2.3.log` (время в логе UTC).
+- Код: дерево `/root/b-private-b-exp/response-manager-code/gear23-b2.3-tw-deque-20261010-tradeobs-20261018T1741Z` (tradeobs: изменены `place_send.py`, `trade_history.py`, `theta_trade_manager.py` + тесты trade-observation).
+- Пул 71 = база 29 + 42 hot-add из `/data/bbot-would-send-prod/hot_add_delta.csv` (expand-only): 20.10 10:00 МСК hot-add METIS и OPG, 21.10 10:01 МСК hot-add MEW. Hot-add с плечом 1x, freshness AGE/SKEW 10 s.
 - Гейты: θ_open 0.50, p50_open 0.60, min_profit 0.20, fee 0.30, min_θ_close 0.05, K=1; tick AGE/SKEW 10000 мс; `terminal_private`, policy gear22.
-- Отчёт 13.10 (~23:00 МСК):
-  - Текущий PID 3593028 с 12.10 15:32:26 МСК, standalone `python -m app.bot`, cwd `/root/b-private-b-exp/response-manager-code/gear23-b2.3-tw-deque-20261010`, runroot `/root/b-private-b-exp/response-manager/20261005T194200Z-gear22-longrun`, лог `bbot-gear23-b2.3.log`. Heartbeat свежий; пул 66. Checkpoint: `completed_cycles=3`, `pending=false`, `position={}`, `execution_halt_reason=null`. Это локальное состояние, не REST-подтверждение flat на биржах.
-  - Последняя закрытая сделка текущего запуска — RSR 13.10 10:49 МСК. Runtime записал `sentry_trade_emit status=ok` для её открытия и закрытия; `fail/skipped` в просмотренном хвосте нет. Локальный `status=ok` не подтверждает доставку в Sentry; прямого Sentry→Codex webhook/плагина сейчас нет, watch опрашивает журналы раз в час.
-  - Пост-трейд `dashboard.html` и `chronometry.json` в runroot не обнаружены, маркеров `chronometry_wrote`/`chronometry_failed` в runtime нет. Причина установлена по работающему дереву: `terminal_private` использует `ThetaTradeManager(place_fn=self._synthetic_live_place)` → `place_live`, а единственный вызов `emit_after_dual_ack` находится в неиспользуемом здесь `private/live_broker.py`. Генератор не вызывался. Подключение отчёта к этому пути и проверка до деплоя остаются перед «готово».
-  - `open_window_deadline_utc=null`, процесс активен: нового окна открытий сейчас не требуется. При остановке решение принимать по свежему checkpoint и журналу, без автоматического рестарта.
-- Метрики сжимает `spread-bbot-gear23-metrics-compact.timer` раз в сутки в 03:15 МСК (Parquet, JSONL удаляется); таймер active, последний service result=success.
-- Слежу я (бот): тихий часовой watch по журналам. Не трогать без явного OK Миши: процесс, лаунчер, runroot, плечи на биржах. Контур не пишет в `/data/live` и в данные would_send-prod, оттуда только читает `hot_add_delta.csv` и history.
+- Sentry trade events работают: `sentry_trade_emit status=ok` подтверждено на сделках после рестарта.
+- REST-постпроверка `trade_history` после tradeobs-фикса: coverage complete на всех сделках после рестарта (SAND `d6d91247`, CT `57ae1236`); прежние `ValueError` coverage incomplete (RSR 17.10, SAND `a873` 18.10) больше не воспроизводятся. Метрики `theta`/`tw_p50`/`floor`/`step_chrono`/`trades` пишутся.
+- Сделки с рестарта:
+  - SAND long `d6d91247` закрыт 19.10 09:33 МСК, net +$0.015.
+  - CT long `57ae1236` 19.10 10:43 → 16:34 МСК, net +$0.031 (Bybit closedPnl mismatch $0.150 полностью = funding за hold).
+  - MEW long `5d423ce8` открыт 21.10 10:01:23 МСК, позиция открыта сейчас (hot-add за 6.6 с до входа).
+- Открытые вопросы: journal fill ~+1050–1070 мс после сигнала при биржевом исполнении +25–40 мс (`wait_fill` ждёт повтор private-сообщения); частые короткие `auth_failed` переподключения private WS OKX/Bybit, восстанавливаются сами.
+- Метрики сжимает `spread-bbot-gear23-metrics-compact.timer` раз в сутки в 03:15 МСК (Parquet, JSONL удаляется); работает ежедневно.
+- Слежу я (бот): часовой watch в :47 МСК + Sentry-рутина, дашборд после каждой сделки. Не трогать без явного OK Миши: процесс, лаунчер, runroot, плечи на биржах. Контур не пишет в `/data/live` и в данные would_send-prod, оттуда только читает `hot_add_delta.csv` и history.
 
 ## Ops / collector (голова)
 
