@@ -34,9 +34,11 @@ def _okx_item(
     state: str = "live",
     settle: str = "USDT",
     inst_type: str = "SWAP",
+    inst_category: str = "1",
 ) -> dict[str, str]:
     return {
         "instId": f"{base}-USDT-SWAP",
+        "instCategory": inst_category,
         "baseCcy": base,
         "quoteCcy": "USDT",
         "instType": inst_type,
@@ -145,6 +147,10 @@ class HotAddCryptoGateTests(unittest.TestCase):
         self.assertFalse(is_hot_add_crypto("AAPL", symbol_type=""))
         self.assertFalse(is_hot_add_crypto("NEWCOIN", symbol_type="forex"))
         self.assertFalse(is_hot_add_crypto("NEWCOIN", symbol_type="mystery"))
+        self.assertTrue(is_hot_add_crypto("AXIS", symbol_type="innovation"))
+        self.assertTrue(is_hot_add_crypto("AXIS", symbol_type="INNOVATION"))
+        self.assertFalse(is_hot_add_crypto("EWT", symbol_type="ETF"))
+        self.assertFalse(is_hot_add_crypto("BILL", symbol_type="innovation"))
         self.assertTrue(is_hot_add_crypto("NEWCOIN", symbol_type=""))
 
 
