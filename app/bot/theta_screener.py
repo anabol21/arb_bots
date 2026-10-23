@@ -100,6 +100,8 @@ class ThetaSnapshot:
     floor_tf_select_a25: Optional[float]
     theta_1m: Optional[float]
     computed_at_ms: int
+    coverage_1m: Optional[float] = None
+    n_1m: Optional[int] = None
 
     def as_row(self) -> dict[str, Any]:
         return {
@@ -122,6 +124,8 @@ def theta_from_inputs(
     p50_1m: Any,
     floor: Any,
     computed_at_ms: Optional[int] = None,
+    coverage_1m: Optional[float] = None,
+    n_1m: Optional[int] = None,
 ) -> ThetaSnapshot:
     """Build one theta snapshot from raw p50 + floor inputs."""
     floor_f, th1 = compute_theta(p50_1m, floor)
@@ -138,6 +142,8 @@ def theta_from_inputs(
         floor_tf_select_a25=floor_f,
         theta_1m=th1,
         computed_at_ms=wall,
+        coverage_1m=coverage_1m,
+        n_1m=n_1m,
     )
 
 
@@ -184,6 +190,8 @@ class LiveThetaScreener:
                 p50_1m=tw.p50_1m,
                 floor=floor_val,
                 computed_at_ms=wall,
+                coverage_1m=tw.coverage_1m,
+                n_1m=tw.n_1m,
             )
             out.append(snap)
             self._snapshots[(snap.base_coin, snap.side)] = snap
@@ -206,11 +214,15 @@ class LiveThetaScreener:
         for coin in self.coins:
             for side in SIDES:
                 p50_1m: Optional[float] = None
+                coverage_1m: Optional[float] = None
+                n_1m: Optional[int] = None
                 ts_ms = now
                 if self.tw_p50_observer is not None:
                     tw = self.tw_p50_observer.get_snapshot(coin, side)
                     if tw is not None:
                         p50_1m = tw.p50_1m
+                        coverage_1m = tw.coverage_1m
+                        n_1m = tw.n_1m
                         ts_ms = int(tw.ts_ms)
                 floor_val: Optional[float] = None
                 if self.floor_observer is not None:
@@ -225,6 +237,8 @@ class LiveThetaScreener:
                     p50_1m=p50_1m,
                     floor=floor_val,
                     computed_at_ms=wall,
+                    coverage_1m=coverage_1m,
+                    n_1m=n_1m,
                 )
                 out.append(snap)
                 self._snapshots[(snap.base_coin, snap.side)] = snap

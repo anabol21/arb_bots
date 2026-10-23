@@ -175,6 +175,36 @@ class ManagerTests(unittest.TestCase):
             meta_fn=_meta,
         )
 
+    def test_decision_context_is_journaled(self) -> None:
+        from app.bot.theta_screener import ThetaSnapshot
+
+        seed, coin, _side = _find_seed(POOL, (17,))
+        mgr = self._manager(random.Random(seed))
+        snapshot = ThetaSnapshot(
+            base_coin=coin,
+            side="long",
+            ts_ms=1_700_000_000_000,
+            p50_1m=0.31,
+            floor_tf_select_a25=0.12,
+            theta_1m=0.19,
+            computed_at_ms=1_700_000_000_001,
+        )
+        quotes = _quotes()
+        quotes[coin]["okx"].update(local_recv_ts_ms=1_700_000_000_002)
+        mgr.on_theta_snapshots(
+            [snapshot], quotes=quotes, coin_order=POOL, now_ms=1_700_000_000_000
+        )
+
+        context = self.calls[0]["extra"]["decision_context"]
+        self.assertEqual(context["schema_version"], "bbot.trade_decision_context.v1")
+        self.assertEqual(context["state"]["long"]["p50_1m"], 0.31)
+        self.assertEqual(context["book"]["okx"]["bid_size"], 1000.0)
+        rows = _rows(theta_trades_jsonl_path(self.root, "2023-11-14"))
+        journal_contexts = [row["decision_context"] for row in rows if row.get("decision_context")]
+        self.assertEqual(len(journal_contexts), 2)
+        self.assertEqual(journal_contexts[0], context)
+        self.assertEqual(journal_contexts[1], context)
+
     def test_second_17_does_not_send(self) -> None:
         seed, _coin, _side = _find_seed(POOL, (17,))
         mgr = self._manager(random.Random(seed))

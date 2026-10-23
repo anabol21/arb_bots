@@ -237,6 +237,9 @@ flowchart TB
   privateSend --> terminal["terminal order result\nACK is not fill"]
   terminal -->|both exact fills| journal["intent StepChrono\nwall-ms + native monotonic signal"]
   journal --> slot["single owner updates K=1 slot"]
+  terminal -->|confirmed successful trade only| observation["trade observation JSONL append + fsync"]
+  observation -->|separate bounded worker; GET only| history["Bybit execution/transaction history\nOKX fills/bills history"]
+  history -->|individual facts + page coverage| observation
   slot --> flat{"close REST-flat confirmed?"}
   flat -->|cycles < 10| observers
   flat -->|cycle 10| stop["stop flat; no forced close"]
@@ -251,6 +254,8 @@ flowchart TB
   ack -->|ok| wire["private/wire/.../wire.jsonl"]
   live --> thetaLive["theta_trades.jsonl\nwould_send=true send=true/false"]
 ```
+
+Offline reconciliation lives in `validation/summarize_trade_observation.py`; it reads the existing trade JSONL and does not run in the send path. The theoretical gross uses only the open/close signal-vector bid/ask and unrounded target quantity. Actual gross minus theoretical gross is decomposed into price-only slippage at theoretical quantity and a separate quantity/notional effect; per-event price contributions and the decomposition residual are emitted. Actual history fills must match the event intent, venue instrument, and expected client/order identity when present. History coverage rows and cursor keys carry `trade_intent_id`, `trade_event`, and `event_signal_ts_ms` apart from the existing entry-date partition tag; they also include the original requested interval. Coverage is verified per event, venue, instrument, requested interval, represented sub-windows, and each cursor chain. This exposes missing windows between persisted pages. If a crash occurs before any coverage row or failure marker for an entire collection request, there is no request manifest to establish the intended interval, so the result remains explicitly incomplete. Account-level funding facts are source-deduplicated and shown as unassigned; they never become per-trade actual PnL.
 
 The terminal-private Canary29 branch is an opt-in mode inside the existing `python -m app.bot` process; it does not introduce a second runner or change the systemd contours. On 2026-10-05, an isolated VPS-local run used this path for ten completed open→terminal close→REST-flat cycles, then exited flat at its configured cap. The source commit and actual VPS-local run artifacts are recorded in [the campaign report](docs/canary29-live-run-2026-10-05.md). The run did not validate mounted or remote-storage durability.
 
@@ -410,11 +415,63 @@ Created by `resolve_data_root()`: `journal/`, `floor/`, `tw_p50/`, `theta/`, `th
 | `/data/bbot-gear22-live-canary` | theta_trades + floor/tw/theta metrics; `BBOT_PRIVATE_DATA_ROOT=.../private` |
 | `/data/bbot-theta-k1-canary` | claimed in docs for would_send canary; **unit not in this tree** — **TODO verify** |
 
-Also: `{root}/floor/event_date=*/metrics.jsonl` (`bbot.floor.v1`); `tw_p50/.../metrics.jsonl`; `theta/.../metrics.jsonl`; `theta_trades/.../trades.jsonl`; `theta_trades/.../step_chrono.jsonl` (`synthetic_roll` place steps only); `{root}/state/pending.json`, `state/floor_warm.pkl`.
+Also: `{root}/floor/event_date=*/metrics.jsonl` (`bbot.floor.v1`); `tw_p50/.../metrics.jsonl`; `theta/.../metrics.jsonl`; `theta_trades/.../trades.jsonl`; `theta_trades/.../step_chrono.jsonl` (terminal-private and synthetic-roll place steps); `{root}/state/pending.json`, `state/floor_warm.pkl`.
+
+For the standard `gear22_live_canary` `terminal_private` policy path (not the
+same-profile `synthetic` policy), a confirmed terminal open or close appends
+one `bbot.trade_observation.v1` row
+(`record_type=trade_observation`) to the same `theta_trades/event_date=*/trades.jsonl`
+after the existing `bbot.synthetic_roll.v1` lifecycle row and slot checkpoint.
+The row links to that intent's existing `step_chrono.jsonl` records and stores
+the immutable signal L1 vector plus common-cycle/worker timing; it is not an
+execution ledger. A separate bounded worker then uses only signed GET history
+reads (`/v5/execution/list`, `/v5/account/transaction-log`,
+`/api/v5/trade/fills-history`, `/api/v5/account/bills-archive`) and appends
+individual execution/fee/funding facts plus per-page coverage to that same
+JSONL. Each page is fsynced before its cursor advances; source IDs are deduped
+by venue and instrument. Execution facts are accepted only when the venue's
+returned client order ID matches the deterministic ID of this successful
+terminal send and the instrument matches. For Bybit, once a target order ID is
+established by that match, additional rows for the same order with an omitted
+`orderLinkId` may be attributed by `orderId`; those facts record
+`correlation_basis=known_order_id`. Rows without a matching client ID or a
+previously established target order ID are skipped. Bybit TRADE fee summaries
+are also filtered through the order IDs recovered from those matched executions.
+Funding has no order ID and always remains an account/instrument-level fact with
+`trade_id=null`; bot-trade candidates are diagnostic metadata only. The worker
+does not observe balances, positions, or external account activity, so even a
+single journal candidate cannot prove that a funding cashflow belongs to that
+trade. Candidate intervals use only matched execution facts' exchange event
+timestamps: after both opening legs have exchange fill times and before the
+first closing-leg exchange fill time. Equal or missing boundaries are marked
+separately as unknown and are never resolved with local receive or wall-clock
+times. Bybit positive fees are expenses and positive funding is received; OKX
+fee and bill signs are preserved as returned. OKX `fillTime` and record `ts`
+are both kept, but only `fillTime` can establish an execution boundary; `ts`
+alone stays a record timestamp and leaves the boundary unknown. Exchange event
+time is kept distinct from local first-observed time. The reader runs after the terminal task and slot are
+released; history errors only add incomplete coverage/diagnostics and never
+change trade state. Failed, partial, skipped, and other profile events do not
+produce rich observation/history records. Readers that restore trade state
+must continue to filter on the lifecycle schema and ignore tagged records.
+When an operator resumes an already-open position into a new run, a distinct,
+idempotent `trade_history_recovery_context` row carries the verified source
+open interval into the new journal for funding attribution; it is not a
+lifecycle transition and is ignored by position replay.
+
+`validation/summarize_trade_observation.py` is an offline reader for this
+append-only JSONL. It derives theoretical prices only from the open/close
+signal vectors, actual VWAP only from matched execution facts, and fee rates
+only from each venue/event's fee and notional evidence. Account-level funding
+remains visible but unassigned, so actual net PnL stays explicitly incomplete;
+quantity mismatches, missing conversions, malformed lines, coverage gaps, and
+conflicting duplicate IDs are reported rather than absorbed into a residual.
+Local monotonic spans, local receive/observation wall times, and exchange fill
+times remain separate fields and are never subtracted across clock domains.
 
 The terminal live canary also writes `{root}/canary_state.json` as an atomic local checkpoint. It is operational state, not an exchange account ledger or proof of remote/mounted durability; a fresh startup REST snapshot remains authoritative for positions and active orders.
 
-`synthetic_roll` step chronometry also appends a `block=send_timing` row after `ws_send` exits when the dual sender returns timing markers. It carries `intent_id`, `signal_ts_ms`, and `phase`, plus `send_timing_monotonic_ns` keyed by `bybit` and `okx`: `queue_enqueued_ns`, `dequeued_ns`, `callback_started_ns`, `callback_returned_ns`, `owner_ws_send_started_ns`, and `owner_ws_send_returned_ns`. These are absolute process monotonic nanoseconds, with unavailable markers stored as null. The row excludes frames, credentials, and order/request ids, and uses the existing local JSONL flush/fsync; it does not establish a remote durable copy.
+`terminal_private` and `synthetic_roll` place chronometry append `block=send_timing` after `ws_send` exits when the dual sender returns timing markers. It carries `intent_id`, `signal_ts_ms`, and `phase`, plus `send_timing_monotonic_ns` keyed by `bybit` and `okx`: `queue_enqueued_ns`, `dequeued_ns`, `callback_started_ns`, `callback_returned_ns`, `owner_ws_send_started_ns`, and `owner_ws_send_returned_ns`. These are absolute process monotonic nanoseconds, with unavailable markers stored as null. The row excludes frames, credentials, and order/request ids, and uses the existing local JSONL flush/fsync; it does not establish a remote durable copy.
 
 ### B-private
 

@@ -24,6 +24,8 @@ _BYBIT_POS = "/v5/position/list"
 _BYBIT_OPEN = "/v5/order/realtime"
 _OKX_POS = "/api/v5/account/positions"
 _OKX_OPEN = "/api/v5/trade/orders-pending"
+_BYBIT_HISTORY = {"/v5/execution/list", "/v5/account/transaction-log"}
+_OKX_HISTORY = {"/api/v5/trade/fills-history", "/api/v5/account/bills-archive"}
 
 
 class BaselineError(RuntimeError):
@@ -96,7 +98,7 @@ def _bybit_signed_get(
     timeout_sec: float = 15.0,
     http_get_json: Optional[Callable[..., Mapping[str, Any]]] = None,
 ) -> Mapping[str, Any]:
-    if path not in {_BYBIT_POS, _BYBIT_OPEN}:
+    if path not in {_BYBIT_POS, _BYBIT_OPEN, *_BYBIT_HISTORY}:
         raise BaselineError("bybit baseline path not allowlisted")
     ts = str(int(time.time() * 1000))
     recv = 5000
@@ -125,10 +127,11 @@ def _okx_signed_get(
     credentials: LiveCredentials,
     base: str,
     path_with_query: str,
+    venue: str = "live",
     timeout_sec: float = 15.0,
     http_get_json: Optional[Callable[..., Mapping[str, Any]]] = None,
 ) -> Mapping[str, Any]:
-    """Signed OKX GET using R1 live header/signing shape (UA/Accept/ISO ts).
+    """Signed OKX GET using the live/demo header/signing shape (UA/Accept/ISO ts).
 
     Path allowlist stays local so trade/orders-pending remains reachable without
     weakening ``rest_readonly`` deny fragments.
@@ -138,8 +141,10 @@ def _okx_signed_get(
         build_okx_readonly_headers,
     )
 
+    if venue not in {"live", "testnet"}:
+        raise BaselineError("okx baseline venue not allowlisted")
     path_only = path_with_query.split("?", 1)[0]
-    if path_only not in {_OKX_POS, _OKX_OPEN}:
+    if path_only not in {_OKX_POS, _OKX_OPEN, *_OKX_HISTORY}:
         raise BaselineError("okx baseline path not allowlisted")
     if not credentials.passphrase:
         raise BaselineError("okx baseline requires passphrase")
@@ -148,9 +153,9 @@ def _okx_signed_get(
         api_secret=credentials.api_secret,
         passphrase=credentials.passphrase,
         path=path_with_query,
-        simulated_trading=False,
+        simulated_trading=venue == "testnet",
     )
-    assert_okx_headers_for_venue(headers, "live")
+    assert_okx_headers_for_venue(headers, venue)
     getter = http_get_json or _http_get_json
     return getter(f"{base}{path_with_query}", headers, timeout_sec=timeout_sec)
 
