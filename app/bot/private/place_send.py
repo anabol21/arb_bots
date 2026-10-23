@@ -21,6 +21,7 @@ import logging
 import os
 import time
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
@@ -45,7 +46,7 @@ WaitFn = Callable[[], None]
 ReadFrameFn = Callable[[float], str]
 
 # Shared bound for both venues. One ack/ping must not end the wait.
-SYNTHETIC_FILL_WAIT_SEC = 5.0
+SYNTHETIC_FILL_WAIT_SEC = 60.0
 _WIRE_LOG = logging.getLogger("bbot.private.wire")
 
 
@@ -65,6 +66,8 @@ class PlaceSendResult:
     intent_id: Optional[str] = None
     okx_filled_qty: Optional[str] = None
     bybit_filled_qty: Optional[str] = None
+    okx_submitted_qty: Optional[str] = None
+    bybit_submitted_qty: Optional[str] = None
     send_attempted: bool = False
 
 
@@ -676,8 +679,15 @@ def _place(
             ("bybit", _book_body("bybit", bybit_px), now_ms, "fill", None),
         ]
     elif recv_fn is not None:
-        for venue in ("okx", "bybit"):
-            seen.extend(_frames_from_recv(venue, recv_fn(venue)))
+        with ThreadPoolExecutor(
+            max_workers=2, thread_name_prefix="bbot-fill"
+        ) as readers:
+            futures = {
+                venue: readers.submit(recv_fn, venue)
+                for venue in ("okx", "bybit")
+            }
+            for venue in ("okx", "bybit"):
+                seen.extend(_frames_from_recv(venue, futures[venue].result()))
     chrono.exit("wait_fill")
     chrono.flush()
 
@@ -820,6 +830,8 @@ def _place(
         intent_id=iid,
         okx_filled_qty=fill_qty["okx"],
         bybit_filled_qty=fill_qty["bybit"],
+        okx_submitted_qty=dec_str(sized.okx_sz),
+        bybit_submitted_qty=dec_str(sized.bybit_qty),
         send_attempted=True,
     )
 

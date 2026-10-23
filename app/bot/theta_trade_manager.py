@@ -21,16 +21,18 @@ per tick; the size gate and K=1 slot stay here. This module does not import
 from __future__ import annotations
 
 import json
+import copy
 import math
 import os
 import time
+import threading
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Mapping, Optional, Sequence
 
-from app.bot.paths import theta_trades_jsonl_path
+from app.bot.paths import theta_step_chrono_jsonl_path, theta_trades_jsonl_path
 from app.bot.sentry_setup import capture_trade_event
 from app.bot.stub_broker import legs_for_spread_side, signal_price_for_leg
 from app.bot.theta_screener import ThetaSnapshot
@@ -175,6 +177,25 @@ def _finite(value: Any) -> Optional[float]:
     if out != out or out in (float("inf"), float("-inf")):
         return None
     return out
+
+
+def _observation_stamp() -> dict[str, int]:
+    return {"wall_ms": int(time.time() * 1000), "monotonic_ns": time.monotonic_ns()}
+
+
+def _observation_cycle_context(
+    context: Optional[Mapping[str, Any]], stage: str
+) -> dict[str, Any]:
+    out = dict(context or {})
+    out["timing"] = dict(out.get("timing") or {})
+    out["timing"][stage] = _observation_stamp()
+    return out
+
+
+def _freeze_quotes(
+    quotes: Mapping[str, Mapping[str, Mapping[str, Any]]],
+) -> dict[str, Any]:
+    return copy.deepcopy(dict(quotes))
 
 
 def build_feature_snapshot(
@@ -972,6 +993,7 @@ class ThetaTradeJournalWriter:
 
     def __init__(self, data_root: Path) -> None:
         self.data_root = Path(data_root)
+        self._append_lock = threading.RLock()
         text = str(self.data_root.resolve())
         for bad in ("/data/live", "/data/bars", "/data/compacted", "/data/spool"):
             if text == bad or text.startswith(bad + os.sep):
@@ -995,19 +1017,283 @@ class ThetaTradeJournalWriter:
             ).date().isoformat()
             by_date.setdefault(event_date, []).append(row)
         written: list[Path] = []
-        for event_date, batch in by_date.items():
-            path = theta_trades_jsonl_path(self.data_root, event_date)
-            with path.open("a", encoding="utf-8") as fh:
-                for rec in batch:
-                    line = json.dumps(
-                        dict(rec), separators=(",", ":"), ensure_ascii=False
-                    )
-                    fh.write(line)
-                    fh.write("\n")
-                fh.flush()
-                os.fsync(fh.fileno())
-            written.append(path)
+        with self._append_lock:
+            for event_date, batch in by_date.items():
+                path = theta_trades_jsonl_path(self.data_root, event_date)
+                with path.open("a", encoding="utf-8") as fh:
+                    for rec in batch:
+                        line = json.dumps(
+                            dict(rec), separators=(",", ":"), ensure_ascii=False
+                        )
+                        fh.write(line)
+                        fh.write("\n")
+                    fh.flush()
+                    os.fsync(fh.fileno())
+                written.append(path)
         return written
+
+    def append_trade_observation(self, row: Mapping[str, Any]) -> list[Path]:
+        """Append a tagged observation through the same local fsync path."""
+        return self.append_rows([row])
+
+    def trade_history_cursor(
+        self, trade_id: str, venue: str, endpoint: str, kind: str,
+        instrument: str, start_ms: int, end_ms: int, cursor: str,
+        signal_ts_ms: int, *, trade_intent_id: str = "", trade_event: str = "",
+        requested_start_ms: Optional[int] = None,
+        requested_end_ms: Optional[int] = None,
+    ) -> tuple[str, bool]:
+        """Resume one history page from its last fsynced coverage row."""
+        event_date = datetime.fromtimestamp(signal_ts_ms / 1000, tz=timezone.utc).date().isoformat()
+        path = theta_trades_jsonl_path(self.data_root, event_date)
+        key_prefix = "|".join((trade_id, venue, endpoint, kind, instrument,
+                               str(start_ms), str(end_ms),
+                               str(start_ms if requested_start_ms is None else requested_start_ms),
+                               str(end_ms if requested_end_ms is None else requested_end_ms),
+                               trade_intent_id, trade_event))
+        if not path.is_file():
+            return cursor, False
+        pages: dict[str, tuple[str, bool]] = {}
+        with self._append_lock, path.open("r", encoding="utf-8") as fh:
+            for line in fh:
+                try:
+                    row = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if not isinstance(row, Mapping):
+                    continue
+                if (row.get("record_type") != "trade_history_coverage"
+                        or not str(row.get("coverage_key") or "").startswith(key_prefix + "|")):
+                    continue
+                pages[str(row.get("cursor_in") or "")] = (
+                    str(row.get("cursor_out") or ""), row.get("status") == "complete"
+                )
+        current = cursor
+        seen: set[str] = set()
+        while current in pages and current not in seen:
+            seen.add(current)
+            following, complete = pages[current]
+            if complete:
+                return following, True
+            if not following or following == current:
+                return current, False
+            current = following
+        return current, False
+
+    def _trade_observation_rows(self) -> list[Mapping[str, Any]]:
+        root = self.data_root / "theta_trades"
+        if not root.is_dir():
+            return []
+        rows: list[Mapping[str, Any]] = []
+        for path in sorted(root.glob("event_date=*/trades.jsonl")):
+            try:
+                with path.open("r", encoding="utf-8") as fh:
+                    for line in fh:
+                        try:
+                            row = json.loads(line)
+                        except json.JSONDecodeError:
+                            continue
+                        if (isinstance(row, Mapping)
+                                and row.get("record_type") in {
+                                    "trade_observation", "trade_history_recovery_context",
+                                    "trade_history_fact",
+                                }):
+                            rows.append(row)
+            except OSError:
+                continue
+        return rows
+
+    def append_trade_history_recovery_context(
+        self, observation: Mapping[str, Any], *, source_data_root: str,
+    ) -> list[Path]:
+        """Persist source open interval once for post-resume funding attribution."""
+        trade_id = str(observation.get("trade_id") or "")
+        entry_ts = int(observation.get("entry_signal_ts_ms") or observation.get("signal_ts_ms") or 0)
+        if not trade_id or not entry_ts or observation.get("event") != "open":
+            raise ValueError("trade_history_recovery_context_identity_invalid")
+        key = f"{trade_id}|{observation.get('intent_id')}|{source_data_root}"
+        path = theta_trades_jsonl_path(
+            self.data_root,
+            datetime.fromtimestamp(entry_ts / 1000, tz=timezone.utc).date().isoformat(),
+        )
+        with self._append_lock:
+            if path.is_file():
+                with path.open("r", encoding="utf-8") as fh:
+                    for line in fh:
+                        try:
+                            row = json.loads(line)
+                        except json.JSONDecodeError:
+                            continue
+                        if (isinstance(row, Mapping)
+                                and row.get("record_type") == "trade_history_recovery_context"
+                                and row.get("recovery_key") == key):
+                            return [path]
+            context = {
+                "record_type": "trade_history_recovery_context",
+                "status": "source_open_confirmed",
+                "recovery_key": key,
+                "trade_id": trade_id,
+                "intent_id": observation.get("intent_id"),
+                "event": "open",
+                "base_coin": str(observation.get("base_coin") or "").upper(),
+                "bybit_symbol": observation.get("bybit_symbol"),
+                "okx_instrument": observation.get("okx_instrument"),
+                "side": str(observation.get("side") or "").lower(),
+                "entry_signal_ts_ms": entry_ts,
+                "signal_ts_ms": entry_ts,
+                "place_result_fill_wall_ms": observation.get("place_result_fill_wall_ms"),
+                "bybit_order_link_id": observation.get("bybit_order_link_id"),
+                "okx_client_order_id": observation.get("okx_client_order_id"),
+                "source_data_root": source_data_root,
+            }
+            return self.append_rows([context])
+
+    def funding_trade_candidates(
+        self, *, base_coin: str, side: str, event_ms: int,
+        venue: str, instrument: str, trade_event: str,
+    ) -> dict[str, list[str]]:
+        """Return journal-scoped funding candidates using exchange times only.
+
+        Funding remains account-level and unassigned regardless of candidate
+        count because external account positions are not observed. An interval
+        uses only matched history execution timestamps, never local wall clocks;
+        an equality or missing exchange boundary is reported separately.
+        """
+        with self._append_lock:
+            rows = self._trade_observation_rows()
+        events: dict[tuple[str, str], Mapping[str, Any]] = {}
+        execution_times: dict[tuple[str, str, str], list[int]] = {}
+        for row in rows:
+            trade_id = str(row.get("trade_id") or "")
+            instrument_field = "bybit_symbol" if venue == "bybit" else "okx_instrument"
+            if not trade_id:
+                continue
+            if row.get("record_type") == "trade_history_fact":
+                if (row.get("fact_type") == "execution" and row.get("venue") == venue
+                        and row.get("instrument") == instrument):
+                    intent_id = str(row.get("trade_intent_id") or "")
+                    event = str(row.get("trade_event") or "").lower()
+                    # Funding attribution candidates require a true execution
+                    # fill time. OKX record `ts` is intentionally not a fill
+                    # boundary when `fillTime` is absent.
+                    try:
+                        exchange_ms = int(row.get("exchange_fill_time_ms"))
+                    except (TypeError, ValueError):
+                        continue
+                    if intent_id and event in {"open", "close"}:
+                        execution_times.setdefault((trade_id, event, intent_id), []).append(exchange_ms)
+                continue
+            if (str(row.get("base_coin") or "").upper() != base_coin.upper()
+                    or str(row.get(instrument_field) or "") != instrument):
+                continue
+            event = str(row.get("event") or "").lower()
+            if event in {"open", "close", "open_long", "open_short", "close_long", "close_short"}:
+                if str(row.get("side") or "").lower() == side.lower():
+                    events[(trade_id, event)] = row
+        candidates: set[str] = set()
+        unknown: set[str] = set()
+        boundary: set[str] = set()
+        for (trade_id, event), open_row in events.items():
+            if event not in {"open", "open_long", "open_short"}:
+                continue
+            open_intent = str(open_row.get("intent_id") or "")
+            open_times = execution_times.get((trade_id, "open", open_intent), [])
+            close_row = next((r for (tid, ev), r in events.items()
+                              if tid == trade_id and ev in {"close", "close_long", "close_short"}), None)
+            close_ms: Optional[int] = None
+            if close_row is not None:
+                close_intent = str(close_row.get("intent_id") or "")
+                close_times = execution_times.get((trade_id, "close", close_intent), [])
+                if not close_times:
+                    unknown.add(trade_id)
+                    continue
+                close_ms = min(close_times)
+            if not open_times:
+                unknown.add(trade_id)
+                continue
+            # A full dual-leg position exists only after both opening legs fill;
+            # it ceases to be fully hedged when the first closing leg fills.
+            open_ms = max(open_times)
+            if event_ms == open_ms or (close_ms is not None and event_ms == close_ms):
+                boundary.add(trade_id)
+            elif event_ms > open_ms and (close_ms is None or event_ms < close_ms):
+                candidates.add(trade_id)
+        return {
+            "candidate_trade_ids": sorted(candidates),
+            "unknown_boundary_trade_ids": sorted(unknown),
+            "equal_boundary_trade_ids": sorted(boundary),
+        }
+
+    def trade_history_execution_order_ids(
+        self, *, trade_id: str, venue: str, symbol: str, order_link_id: str,
+    ) -> set[str]:
+        """Recover exact matched Bybit order IDs after a persisted page cursor."""
+        root = self.data_root / "theta_trades"
+        ids: set[str] = set()
+        with self._append_lock:
+            for path in sorted(root.glob("event_date=*/trades.jsonl")) if root.is_dir() else []:
+                try:
+                    with path.open("r", encoding="utf-8") as fh:
+                        for line in fh:
+                            try:
+                                row = json.loads(line)
+                            except json.JSONDecodeError:
+                                continue
+                            if (isinstance(row, Mapping)
+                                    and row.get("record_type") == "trade_history_fact"
+                                    and row.get("trade_id") == trade_id
+                                    and row.get("venue") == venue
+                                    and row.get("instrument") == symbol
+                                    and row.get("order_link_id") == order_link_id
+                                    and row.get("order_id")):
+                                ids.add(str(row["order_id"]))
+                except OSError:
+                    continue
+        return ids
+
+    def append_trade_history_page(
+        self, facts: Sequence[Mapping[str, Any]], coverage: Mapping[str, Any],
+        *, signal_ts_ms: int,
+    ) -> list[Path]:
+        """Fsync a page's facts and coverage together; dedupe by source and page IDs."""
+        event_date = datetime.fromtimestamp(signal_ts_ms / 1000, tz=timezone.utc).date().isoformat()
+        path = theta_trades_jsonl_path(self.data_root, event_date)
+        fact_keys: set[str] = set()
+        page_saved = False
+        with self._append_lock:
+            root = self.data_root / "theta_trades"
+            existing_paths = sorted(root.glob("event_date=*/trades.jsonl")) if root.is_dir() else []
+            for existing_path in existing_paths:
+                try:
+                    fh_context = existing_path.open("r", encoding="utf-8")
+                except OSError:
+                    continue
+                with fh_context as fh:
+                    for line in fh:
+                        try:
+                            row = json.loads(line)
+                        except json.JSONDecodeError:
+                            continue
+                        if not isinstance(row, Mapping):
+                            continue
+                        if row.get("record_type") == "trade_history_fact":
+                            key = row.get("dedupe_key")
+                            if key:
+                                fact_keys.add(str(key))
+                        elif (existing_path == path
+                              and row.get("record_type") == "trade_history_coverage"
+                              and row.get("coverage_key") == coverage.get("coverage_key")):
+                            page_saved = True
+            if page_saved:
+                return [path]
+            rows = []
+            for fact in facts:
+                key = str(fact.get("dedupe_key") or "")
+                if key and key not in fact_keys:
+                    rows.append({**dict(fact), "signal_ts_ms": int(signal_ts_ms)})
+                    fact_keys.add(key)
+            rows.append({**dict(coverage), "signal_ts_ms": int(signal_ts_ms)})
+            return self.append_rows(rows)
 
 
 class ThetaTradeManager:
@@ -1033,6 +1319,7 @@ class ThetaTradeManager:
         pre_send_guard_fn: Optional[Callable[..., Optional[str]]] = None,
         entry_allowed_fn: Optional[Callable[[], bool]] = None,
         state_change_fn: Optional[Callable[[], None]] = None,
+        trade_history_fn: Optional[Callable[[Mapping[str, Any]], None]] = None,
     ) -> None:
         self.data_root = Path(data_root)
         self.config = config or ThetaTradeConfig.from_env()
@@ -1046,6 +1333,8 @@ class ThetaTradeManager:
         self._pre_send_guard_fn = pre_send_guard_fn
         self._entry_allowed_fn = entry_allowed_fn
         self._state_change_fn = state_change_fn
+        self._trade_history_fn = trade_history_fn
+        self._history_tasks: set[Any] = set()
         self.last_policy_status: dict[str, Any] = {}
         self.execution_mode = str(execution_mode).strip().lower()
         if self.execution_mode not in {"inline", "terminal_private"}:
@@ -1808,6 +2097,8 @@ class ThetaTradeManager:
         signal_ts: int,
         signal_mono_ns: Optional[int] = None,
         snapshots: Sequence[ThetaSnapshot] = (),
+        signal_size: Optional[Mapping[str, Any]] = None,
+        cycle_context: Optional[Mapping[str, Any]] = None,
         okx_s: Mapping[str, Any],
         bybit_s: Mapping[str, Any],
     ) -> list[dict[str, Any]]:
@@ -1818,7 +2109,9 @@ class ThetaTradeManager:
         """
         if self._place_fn is None or decision.action not in ("open", "close"):
             return []
+        worker_started = _observation_stamp()
         if decision.action == "open":
+            entry_signal_ts_ms = int(signal_ts)
             trade_id = str(uuid.uuid4())
             intent_id = trade_id
             coin = decision.base_coin
@@ -1831,6 +2124,7 @@ class ThetaTradeManager:
             if pos is None:
                 return []
             trade_id = pos.trade_id
+            entry_signal_ts_ms = int(pos.open_signal_ts_ms)
             intent_id = str(uuid.uuid4())
             coin = pos.base_coin
             side = pos.side
@@ -1956,6 +2250,17 @@ class ThetaTradeManager:
             "signal_mono_ns": signal_mono_ns,
             "decision_context": decision_context,
         }
+        quote_keys = (
+            "bid_price", "ask_price", "bid_size", "ask_size",
+            "ts_exchange", "local_recv_ts_ms", "delivery_latency_ms",
+        )
+        signal_vector = {
+            venue: {
+                key: snapshot_book(book).get(key)
+                for key in quote_keys
+            }
+            for venue, book in (("okx", okx_s), ("bybit", bybit_s))
+        }
         self.slot.pending = True
         keep_pending = False
         try:
@@ -1992,8 +2297,8 @@ class ThetaTradeManager:
                 self._log(
                     f"theta_trade_execution_halted | reason={self.execution_halt_reason}"
                 )
+            fill_ts_i = int(fill_ts if fill_ts is not None else time.time() * 1000)
             if completed and decision.action == "open":
-                fill_ts_i = int(fill_ts if fill_ts is not None else time.time() * 1000)
                 fill_spread = spread_for_side(okx_s, bybit_s, side)
                 self.slot.position = OpenPosition(
                     trade_id=trade_id,
@@ -2015,6 +2320,119 @@ class ThetaTradeManager:
                 )
             elif completed and decision.action == "close":
                 self.slot.position = None
+            if (
+                completed
+                and self.execution_mode == "terminal_private"
+                and result is not None
+                and bool(getattr(result, "completed", False))
+                and (cycle_context or {}).get("trade_observation_enabled") is True
+            ):
+                try:
+                    timing = dict((cycle_context or {}).get("timing") or {})
+                    timing["manager_consumed"] = dict(
+                        (cycle_context or {}).get("timing", {}).get("manager_consumed")
+                        or {}
+                    )
+                    timing["decision_ready"] = dict(
+                        (cycle_context or {}).get("timing", {}).get("decision_ready")
+                        or {}
+                    )
+                    timing["sizing_complete"] = dict(
+                        (cycle_context or {}).get("timing", {}).get("sizing_complete")
+                        or {}
+                    )
+                    timing["worker_started"] = worker_started
+                    timing["place_result_consumed"] = _observation_stamp()
+                    okx_book = signal_vector["okx"]
+                    bybit_book = signal_vector["bybit"]
+                    event_date = datetime.fromtimestamp(
+                        int(signal_ts) / 1000.0, tz=timezone.utc
+                    ).date().isoformat()
+                    observation = {
+                        "schema_version": "bbot.trade_observation.v1",
+                        "record_type": "trade_observation",
+                        "status": "terminal_completed_history_pending",
+                        "run_id": (cycle_context or {}).get("run_id"),
+                        "cycle_id": (cycle_context or {}).get("cycle_id"),
+                        "trade_id": trade_id,
+                        "intent_id": intent_id,
+                        # Deterministic client IDs identify this event's exact
+                        # terminal send items when reading venue history.
+                        "bybit_order_link_id": f"b{str(intent_id).replace('-', '')[:32]}"[:36],
+                        "okx_client_order_id": f"o{str(intent_id).replace('-', '')[:32]}"[:32],
+                        "event": decision.action,
+                        "entry_signal_ts_ms": entry_signal_ts_ms,
+                        "base_coin": str(coin).upper(),
+                        "bybit_symbol": getattr(meta, "bybit_symbol", None),
+                        "okx_instrument": getattr(meta, "okx_symbol", None),
+                        "side": side,
+                        "open_trade_id": trade_id,
+                        "close_of_trade_id": trade_id if decision.action == "close" else None,
+                        "signal_ts_ms": int(signal_ts),
+                        "place_result_fill_wall_ms": (
+                            int(fill_ts) if fill_ts is not None else None
+                        ),
+                        "place_result_fill_wall_source": (
+                            "max_local_receive_wall_ms_from_terminal_frames"
+                            if fill_ts is not None
+                            else None
+                        ),
+                        "terminal_okx_filled_qty": okx_filled_qty,
+                        "terminal_bybit_filled_qty": bybit_filled_qty,
+                        "terminal_coin_qty": getattr(result, "coin_qty", None),
+                        "actual_terminal_filled_qty_by_venue": {
+                            "okx": okx_filled_qty,
+                            "bybit": bybit_filled_qty,
+                        },
+                        "planned_submitted_coin_qty": getattr(result, "coin_qty", None),
+                        "planned_submitted_coin_qty_by_venue": {
+                            "okx": getattr(result, "coin_qty", None),
+                            "bybit": getattr(result, "coin_qty", None),
+                        },
+                        "planned_submitted_qty_by_venue": {
+                            "okx": getattr(result, "okx_submitted_qty", None),
+                            "bybit": getattr(result, "bybit_submitted_qty", None),
+                        },
+                        "target_notional_usdt": float(self.config.notional_usdt),
+                        "theoretical_fee_round_trip_pp": self._fee_round_trip_pp(),
+                        "decision": (cycle_context or {}).get("decision"),
+                        "signal_vector": {
+                            "okx": okx_book,
+                            "bybit": bybit_book,
+                        },
+                        "signal_source_ts": {
+                            "okx_exchange_ts": okx_book.get("ts_exchange"),
+                            "okx_local_recv_ts_ms": okx_book.get("local_recv_ts_ms"),
+                            "bybit_exchange_ts": bybit_book.get("ts_exchange"),
+                            "bybit_local_recv_ts_ms": bybit_book.get("local_recv_ts_ms"),
+                        },
+                        "planned_qty": {
+                            key: (signal_size or {}).get(key)
+                            for key in ("okx_planned_qty", "bybit_planned_qty")
+                        },
+                        "unrounded_computed_coin_qty_by_venue": {
+                            "okx": ((signal_size or {}).get("okx_planned_qty")
+                                    if decision.action == "open" else None),
+                            "bybit": ((signal_size or {}).get("bybit_planned_qty")
+                                      if decision.action == "open" else None),
+                        },
+                        "execution_detail_status": "pending_read_only_history",
+                        "chronometry_ref": {
+                            "path": str(
+                                theta_step_chrono_jsonl_path(self.data_root, event_date)
+                                .relative_to(self.data_root)
+                            ),
+                            "event_date": event_date,
+                            "intent_id": intent_id,
+                        },
+                        "timing": timing,
+                    }
+                    return [observation]
+                except Exception as exc:  # noqa: BLE001 — observation must not affect a completed trade
+                    self._log(
+                        "trade_observation_build_failed | "
+                        f"intent_id={intent_id} | err={type(exc).__name__}"
+                    )
             return []
         finally:
             if not keep_pending:
@@ -2027,6 +2445,8 @@ class ThetaTradeManager:
         signal_ts: int,
         signal_mono_ns: Optional[int],
         snapshots: Sequence[ThetaSnapshot] = (),
+        signal_size: Optional[Mapping[str, Any]] = None,
+        cycle_context: Optional[Mapping[str, Any]] = None,
         okx_s: Mapping[str, Any],
         bybit_s: Mapping[str, Any],
     ) -> list[dict[str, Any]]:
@@ -2040,6 +2460,13 @@ class ThetaTradeManager:
         async def run() -> None:
             import asyncio
 
+            observations: list[dict[str, Any]] = []
+            history_observation: Optional[dict[str, Any]] = None
+            if (
+                isinstance(cycle_context, dict)
+                and cycle_context.get("trade_observation_enabled") is True
+            ):
+                cycle_context.setdefault("timing", {})["worker_submitted"] = _observation_stamp()
             worker = asyncio.create_task(
                 asyncio.to_thread(
                     self._execute_injected_place,
@@ -2047,13 +2474,17 @@ class ThetaTradeManager:
                     signal_ts=signal_ts,
                     signal_mono_ns=signal_mono_ns,
                     snapshots=snapshots,
+                    signal_size=signal_size,
+                    cycle_context=cycle_context,
                     okx_s=okx_s,
                     bybit_s=bybit_s,
                 ),
                 name="theta-private-place-worker",
             )
             try:
-                await asyncio.shield(worker)
+                observations = await asyncio.shield(worker)
+                if observations:
+                    observations[0]["timing"]["worker_finished"] = _observation_stamp()
             except asyncio.CancelledError:
                 self._terminal_place_task = worker
                 worker.add_done_callback(
@@ -2083,11 +2514,56 @@ class ThetaTradeManager:
                             "theta_trade_execution_halted | "
                             f"reason={self.execution_halt_reason}"
                         )
+                if observations:
+                    try:
+                        started = _observation_stamp()
+                        observations[0]["timing"]["append_started"] = started
+                        begin = time.monotonic_ns()
+                        self.journal.append_trade_observation(observations[0])
+                        elapsed_ms = (time.monotonic_ns() - begin) / 1_000_000
+                        self._log(
+                            "trade_observation_append | status=ok | "
+                            f"intent_id={observations[0].get('intent_id')} | "
+                            f"duration_ms={elapsed_ms:.3f}"
+                        )
+                        history_observation = observations[0]
+                    except Exception as exc:  # noqa: BLE001 — never change trade state
+                        self._log(
+                            "trade_observation_append | status=fail | "
+                            f"intent_id={observations[0].get('intent_id')} | "
+                            f"err={type(exc).__name__}"
+                        )
                 if self._terminal_place_task is asyncio.current_task():
                     self._terminal_place_task = None
+            if history_observation is not None:
+                self._schedule_trade_history(history_observation)
 
         self._terminal_place_task = asyncio.create_task(run(), name="theta-private-place")
         return []
+
+    def _schedule_trade_history(self, observation: Mapping[str, Any]) -> None:
+        """Launch read-only enrichment independently from the terminal K=1 task."""
+        import asyncio
+
+        if self._trade_history_fn is None:
+            return
+        task = asyncio.create_task(
+            asyncio.to_thread(self._trade_history_fn, dict(observation)),
+            name="theta-readonly-trade-history",
+        )
+        self._history_tasks.add(task)
+
+        def done(completed: Any) -> None:
+            self._history_tasks.discard(completed)
+            try:
+                completed.result()
+            except Exception as exc:  # history is diagnostic-only
+                self._log(
+                    "trade_history_collection | status=fail | "
+                    f"trade_id={observation.get('trade_id')} | err={type(exc).__name__}"
+                )
+
+        task.add_done_callback(done)
 
     def _record_policy_status(
         self, decision: ThetaDecision, *, evaluated_at_ms: int
@@ -2151,10 +2627,19 @@ class ThetaTradeManager:
         quotes: Mapping[str, Mapping[str, Mapping[str, Any]]],
         coin_order: Optional[Sequence[str]] = None,
         now_ms: Optional[int] = None,
+        cycle_context: Optional[Mapping[str, Any]] = None,
     ) -> list[dict[str, Any]]:
         """Async emit-loop entry: ``fill_ts = signal_ts + BBOT_FILL_DELAY_MS``."""
         import asyncio
 
+        trade_observation_enabled = (
+            self.execution_mode == "terminal_private"
+            and isinstance(cycle_context, Mapping)
+            and cycle_context.get("trade_observation_enabled") is True
+        )
+        if trade_observation_enabled:
+            quotes = _freeze_quotes(quotes)
+            cycle_context = _observation_cycle_context(cycle_context, "manager_consumed")
         tick_ms = int(now_ms if now_ms is not None else time.time() * 1000)
         decision = self._decide(
             snapshots,
@@ -2165,6 +2650,27 @@ class ThetaTradeManager:
         decision = self._record_policy_status(decision, evaluated_at_ms=tick_ms)
         signal_ts_ms = int(time.time() * 1000) if now_ms is None else int(now_ms)
         signal_mono_ns = time.monotonic_ns()
+        if (
+            trade_observation_enabled
+            and isinstance(cycle_context, dict)
+        ):
+            cycle_context["decision"] = {
+                "action": decision.action,
+                "reason": decision.reason,
+                "reject_reason": decision.reject_reason,
+                "base_coin": decision.base_coin,
+                "side": decision.side,
+                "theta_1m": decision.theta_1m,
+                "opposite_theta_1m": decision.opposite_theta_1m,
+                "potential_pp": decision.potential_pp,
+                "policy_action": getattr(decision.policy_decision, "action", None),
+                "policy_reason": getattr(decision.policy_decision, "reason", None),
+                "theta_threshold": float(self.config.theta_thr),
+                "notional_usdt": float(self.config.notional_usdt),
+                "fee_round_trip_pp": self._fee_round_trip_pp(),
+                "signal_ts_ms": signal_ts_ms,
+            }
+            cycle_context["timing"]["decision_ready"] = _observation_stamp()
 
         async def _async_sleep(seconds: float) -> None:
             await asyncio.sleep(seconds)
@@ -2179,6 +2685,7 @@ class ThetaTradeManager:
                 quotes=quotes,
                 now_ms=signal_ts_ms,
                 signal_mono_ns=signal_mono_ns,
+                cycle_context=cycle_context,
             )
         finally:
             self._sleep_fn = prev
@@ -2191,6 +2698,7 @@ class ThetaTradeManager:
         quotes: Mapping[str, Mapping[str, Mapping[str, Any]]],
         now_ms: Optional[int] = None,
         signal_mono_ns: Optional[int] = None,
+        cycle_context: Optional[Mapping[str, Any]] = None,
     ) -> list[dict[str, Any]]:
         """Async twin of ``execute_decision`` (await fill delay)."""
         import asyncio
@@ -2257,12 +2765,20 @@ class ThetaTradeManager:
                 decision, snapshots=snapshots, quotes=quotes, now_ms=signal_ts
             )
 
+        if (
+            isinstance(cycle_context, dict)
+            and cycle_context.get("trade_observation_enabled") is True
+        ):
+            cycle_context.setdefault("timing", {})["sizing_complete"] = _observation_stamp()
+
         if self.execution_mode == "terminal_private":
             return self._schedule_terminal_private_place(
                 decision,
                 signal_ts=signal_ts,
                 signal_mono_ns=signal_mono_ns,
                 snapshots=snapshots,
+                signal_size=signal_size,
+                cycle_context=cycle_context,
                 okx_s=okx_s,
                 bybit_s=bybit_s,
             )

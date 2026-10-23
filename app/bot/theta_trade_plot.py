@@ -59,7 +59,11 @@ def find_trade_events(
     rows: Sequence[dict[str, Any]], trade_id: str
 ) -> list[dict[str, Any]]:
     tid = str(trade_id)
-    out = [r for r in rows if str(r.get("trade_id") or "") == tid]
+    out = [
+        r
+        for r in rows
+        if str(r.get("trade_id") or "") == tid and "record_type" not in r
+    ]
     out.sort(key=lambda r: int(r.get("signal_ts_ms") or 0))
     return out
 

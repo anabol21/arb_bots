@@ -15,6 +15,7 @@ import signal
 import sys
 import tempfile
 import time
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping, Optional
@@ -679,6 +680,7 @@ class BotRuntime:
         resume_raw = (os.environ.get("BBOT_CANARY_RESUME_MANIFEST") or "").strip()
         self._canary29_resume_manifest_path = Path(resume_raw) if resume_raw else None
         self._canary29_resume_manifest: Optional[dict[str, Any]] = None
+        self._canary29_recovery_trade_observation: Optional[dict[str, Any]] = None
         if self._terminal_private_execution and self._canary29_resume_manifest_path is not None:
             self._canary29_resume_manifest = _read_canary_json(
                 self._canary29_resume_manifest_path
@@ -763,6 +765,11 @@ class BotRuntime:
                     state_change_fn=(
                         self._write_canary_state
                         if self._terminal_private_execution
+                        else None
+                    ),
+                    trade_history_fn=(
+                        self._collect_trade_history
+                        if self._terminal_private_execution and self.profile == "gear22_live_canary"
                         else None
                     ),
                 )
@@ -1430,6 +1437,22 @@ class BotRuntime:
                 for line in journal_path.read_text(encoding="utf-8").splitlines()
                 if line
             )
+        open_observation = next((
+            row for row in reversed(rows)
+            if row.get("record_type") == "trade_observation"
+            and row.get("event") == "open"
+            and row.get("trade_id") == intent_id
+            and row.get("status") == "terminal_completed_history_pending"
+        ), None)
+        has_close_observation = any(
+            row.get("record_type") == "trade_observation"
+            and row.get("event") == "close"
+            and row.get("trade_id") == intent_id
+            and row.get("status") == "terminal_completed_history_pending"
+            for row in rows
+        )
+        if open_observation is not None and not has_close_observation:
+            self._canary29_recovery_trade_observation = dict(open_observation)
         if any(
             str(row.get("status") or "").lower() in {"abort", "aborted", "unknown"}
             or str(row.get("event") or "").lower() in {"abort", "send_abort"}
@@ -2888,6 +2911,8 @@ class BotRuntime:
                 pass
             if self.tw_p50_observer is None:
                 continue
+            cycle_context = self._trade_observation_cycle_context()
+            self._trade_observation_stamp(cycle_context, "vector_compute_started")
             try:
                 snapshots = await asyncio.to_thread(
                     self.tw_p50_observer.compute_snapshots
@@ -2900,6 +2925,7 @@ class BotRuntime:
                         type(exc).__name__,
                     )
                 continue
+            self._trade_observation_stamp(cycle_context, "tw_vector_ready")
             # Skip sides that have never received a tick in the 1m window.
             rows = [
                 s.as_row()
@@ -2909,7 +2935,7 @@ class BotRuntime:
             if rows:
                 await self._flush_tw_p50_rows(rows)
             if self.theta_enabled and self.theta_screener is not None:
-                await self._emit_theta_from_tw(snapshots)
+                await self._emit_theta_from_tw(snapshots, cycle_context=cycle_context)
 
     async def _synthetic_roll_loop(self) -> None:
         """~1 Hz pool roll. Does not wait on theta snapshots."""
@@ -2959,6 +2985,8 @@ class BotRuntime:
                 pass
             if self.theta_screener is None:
                 continue
+            cycle_context = self._trade_observation_cycle_context()
+            self._trade_observation_stamp(cycle_context, "vector_compute_started")
             try:
                 snaps = await asyncio.to_thread(self.theta_screener.compute_snapshots)
             except Exception as exc:  # noqa: BLE001
@@ -2969,15 +2997,25 @@ class BotRuntime:
                         type(exc).__name__,
                     )
                 continue
+            self._trade_observation_stamp(cycle_context, "vector_ready")
             if snaps:
                 await self._flush_theta_rows([s.as_row() for s in snaps])
                 if self.theta_trade_enabled and self.theta_trade is not None:
-                    await self._run_theta_trade(snaps)
+                    await self._run_theta_trade(snaps, cycle_context=cycle_context)
 
-    async def _emit_theta_from_tw(self, tw_snapshots: list[Any]) -> None:
+    async def _emit_theta_from_tw(
+        self,
+        tw_snapshots: list[Any],
+        *,
+        cycle_context: Optional[dict[str, Any]] = None,
+    ) -> None:
         """Follow-on: theta from TW snapshots + last floor (never ticks)."""
         if self.theta_screener is None:
             return
+        if cycle_context is None:
+            cycle_context = self._trade_observation_cycle_context()
+            self._trade_observation_stamp(cycle_context, "tw_vector_ready")
+            self._trade_observation_stamp(cycle_context, "vector_compute_started")
         try:
             theta_snaps = await asyncio.to_thread(
                 self.theta_screener.compute_from_tw_snapshots, tw_snapshots
@@ -2990,6 +3028,7 @@ class BotRuntime:
                     type(exc).__name__,
                 )
             return
+        self._trade_observation_stamp(cycle_context, "vector_ready")
         # Only journal sides that had some TW activity (same filter as tw_p50).
         active_keys = {
             (s.base_coin, s.side)
@@ -3004,9 +3043,77 @@ class BotRuntime:
         if rows:
             await self._flush_theta_rows(rows)
         if self.theta_trade_enabled and self.theta_trade is not None:
-            await self._run_theta_trade(theta_snaps)
+            await self._run_theta_trade(theta_snaps, cycle_context=cycle_context)
 
-    async def _run_theta_trade(self, theta_snaps: list[Any]) -> None:
+    def _trade_observation_cycle_context(self) -> dict[str, Any]:
+        if (
+            not self._terminal_private_execution
+            or self.profile != "gear22_live_canary"
+            or self._canary29_policy != "gear22"
+        ):
+            return {}
+        session = self._private_warm
+        return {
+            "trade_observation_enabled": True,
+            "cycle_id": str(uuid.uuid4()),
+            "run_id": getattr(session, "run_id", None),
+            "timing": {
+                "cycle_started": {
+                    "wall_ms": int(time.time() * 1000),
+                    "monotonic_ns": time.monotonic_ns(),
+                }
+            },
+        }
+
+    @staticmethod
+    def _trade_observation_stamp(context: dict[str, Any], stage: str) -> None:
+        if context:
+            context.setdefault("timing", {})[stage] = {
+                "wall_ms": int(time.time() * 1000),
+                "monotonic_ns": time.monotonic_ns(),
+            }
+
+    def _collect_trade_history(self, observation: Mapping[str, Any]) -> None:
+        """Read venue history off the send path; the trade manager contains errors."""
+        from app.bot.private.trade_history import TradeHistoryCollector
+        from app.bot.private.venue import endpoints_for_venue, resolve_venue
+
+        session = self._private_warm
+        if session is None or self.theta_trade is None:
+            raise RuntimeError("trade_history_private_session_missing")
+        coin = str(observation.get("base_coin") or "").upper()
+        entry_ts = int(observation.get("entry_signal_ts_ms") or observation.get("signal_ts_ms") or 0)
+        if not coin or not entry_ts:
+            raise ValueError("trade_history_observation_missing_identity")
+        meta = self._meta(coin)
+        collector = TradeHistoryCollector(
+            bybit_credentials=session.bybit_credentials,
+            okx_credentials=session.okx_credentials,
+            endpoints=endpoints_for_venue(resolve_venue()),
+            journal=self.theta_trade.journal,
+        )
+        collector.collect(
+            trade_id=str(observation.get("trade_id") or ""),
+            bybit_symbol=str(meta.bybit_symbol),
+            okx_instrument=str(meta.okx_symbol),
+            bybit_order_link_id=str(observation.get("bybit_order_link_id") or ""),
+            okx_client_order_id=str(observation.get("okx_client_order_id") or ""),
+            intent_id=str(observation.get("intent_id") or ""),
+            trade_event=str(observation.get("event") or ""),
+            base_coin=coin,
+            side=str(observation.get("side") or ""),
+            start_ms=max(0, entry_ts - 60_000),
+            end_ms=max(int(time.time() * 1000), int(observation.get("place_result_fill_wall_ms") or 0)),
+            signal_ts_ms=entry_ts,
+            event_signal_ts_ms=int(observation.get("signal_ts_ms") or 0),
+        )
+
+    async def _run_theta_trade(
+        self,
+        theta_snaps: list[Any],
+        *,
+        cycle_context: Optional[dict[str, Any]] = None,
+    ) -> None:
         """K=1 would_send decide+fill off the theta emit (never tick WAL)."""
         if self.theta_trade is None or (
             not theta_snaps
@@ -3033,6 +3140,7 @@ class BotRuntime:
                     if self._gear23_hot_add_enabled
                     else self._trade_coin_order()
                 ),
+                cycle_context=cycle_context,
             )
             if (
                 self._canary29_window_elapsed()
@@ -3539,6 +3647,23 @@ class BotRuntime:
                         await asyncio.to_thread(self._canary29_assert_startup_flat)
                     else:
                         await asyncio.to_thread(self._canary29_resume_position)
+                        if self._canary29_recovery_trade_observation and self.theta_trade is not None:
+                            try:
+                                await asyncio.to_thread(
+                                    self.theta_trade.journal.append_trade_history_recovery_context,
+                                    self._canary29_recovery_trade_observation,
+                                    source_data_root=str(
+                                        self._canary29_resume_manifest.get("source_data_root")
+                                    ),
+                                )
+                            except Exception as exc:  # context is diagnostic only
+                                self.log.warning(
+                                    "trade_history_recovery_context | status=fail | err=%s",
+                                    type(exc).__name__,
+                                )
+                            self.theta_trade._schedule_trade_history(
+                                self._canary29_recovery_trade_observation
+                            )
                     if (
                         self._canary29_resume_manifest_path is None
                         and self.theta_trade is not None
