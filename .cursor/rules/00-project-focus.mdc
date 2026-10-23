@@ -1,37 +1,24 @@
 ---
-description: Defines the three project tracks, current priority, and frozen boundaries
+description: Defines project contours and shared boundaries for all Cursor work
 alwaysApply: true
 ---
 
 # Project Focus
 
-Work belongs to one functional track:
+Classify work by the affected contour; do not infer permission to change a neighboring contour:
 
-1. **Collection and storage** — `app/screaner_b_o.py`, schema, persistence, VPS, mount, compaction, backup. Current priority.
-2. **Historical model** — `model.ipynb` and `docs/strategy-gears.md`. Simulation only. Gear **2.2 exists and is closed** as an observation contour (dummy replay + frozen knobs; not 2.5, not 3, not live-ready).
-3. **Glue** — architecture joining collection, model, and trades. Spec: `docs/b-v0-block-diagram.md`. Unlocked: live VPS stub bot in `app/bot/**` (no D paths); B-private in `app/bot/private/**` (testnet first, live orders after an explicit live gate). Private APIs stay out of `app/screaner_b_o.py`.
+- **D — Collector/Data:** public market data, persistence, compaction, and backup.
+- **M — Model/Research:** features, historical experiments, and simulation.
+- **B — Bot:** public observation, policy, private execution, and position state.
+- **Ops:** deployment, monitoring, incidents, and operational dashboards.
 
-Before acting:
+Before a substantial change, identify its files, boundary, and proportionate check. Small isolated work needs no agent chain. Cross-contour, data-integrity, private-send, or production claims need an independent check appropriate to that risk.
 
-- name the track and pipeline block;
-- assign one implementing agent per file;
-- define the independent review or validation gate;
-- prefer a narrow, falsifiable step over a broad rewrite.
+Preserve these boundaries:
 
-Frozen unless explicitly unlocked:
+- Keep private APIs and keys out of the collector. Private execution stays within the current private boundary in `app/bot/private/**`.
+- Keep live send fail-closed. The code path and all three settings (`BBOT_BROKER=private_live`, `VENUE=live`, `LIVE_ORDERS=1`) must match an explicitly approved campaign scope. User approval covers launching or materially changing a campaign, deployment/restart, risk limits, configuration, or the live contract; individual orders execute autonomously under the approved policy and risk gates. Approval does not extend to a new campaign or wider scope. Prefer testnet/demo where available and compatible; honor documented exceptions only for their named campaign and scope.
+- Distinguish local, VPS, and remote-storage evidence. Do not infer production status from a dated report or `NOW.md` alone.
+- Preserve behavior when a new option is disabled where applicable. Do not broaden one task into unrelated strategy, ingest, or operations changes.
 
-- WebSocket ingest
-- exchange parsing
-- spread calculation
-- trading logic inside `app/screaner_b_o.py`
-- live order routing and private trading APIs **outside** `app/bot/private/**` (B-private chat: testnet first; live send needs an explicit user phrase)
-
-Environment claims must distinguish local development, VPS runtime, and mounted remote storage.
-
-Do not claim:
-
-- storage correctness without a VPS-oriented mounted-storage validation plan;
-- model profitability from a short historical run;
-- live-bot readiness from completion of a model gear.
-
-Use `.cursor/agents/orchestrator.md` for routing and `AGENTS.md` for repository-wide safety policy.
+Use `.cursor/rules/` for matching technical areas and `.cursor/agents/` only when a specialist materially helps. Their availability does not make delegation or a multi-step handoff mandatory. Shared role and risk guidance is in [`../../docs/agent-architecture.md`](../../docs/agent-architecture.md); `AGENTS.md` is the repository-wide policy. Select Cursor models using Cursor configuration, not the Codex ladder.

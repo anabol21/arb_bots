@@ -171,8 +171,10 @@ def is_crypto(
 
 # Bybit linear instruments-info: crypto perps use empty symbolType; TradFi
 # uses stock / forex / commodity / xstocks (docs v5 tradfi-integration).
-NON_CRYPTO_SYMBOL_TYPES = frozenset({"stock", "forex", "commodity", "xstocks"})
-CRYPTO_SYMBOL_TYPES = frozenset({"", "crypto"})
+# "innovation" = Bybit Innovation Zone crypto listings (34 already in pool).
+# "etf" is TradFi (normalize_symbol_type lowercases Bybit "ETF").
+NON_CRYPTO_SYMBOL_TYPES = frozenset({"stock", "forex", "commodity", "xstocks", "etf"})
+CRYPTO_SYMBOL_TYPES = frozenset({"", "crypto", "innovation"})
 
 
 def normalize_symbol_type(symbol_type: Optional[str] = None) -> str:

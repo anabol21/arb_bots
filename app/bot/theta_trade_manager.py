@@ -272,6 +272,31 @@ def theta_trade_enabled(
     )
 
 
+
+
+def size_gate_enabled(
+    env: Optional[Mapping[str, str]] = None,
+) -> bool:
+    """Liquidity size gate on/off.
+
+    Default **on** (live / gear23 unchanged). Disable for stub would_send via
+    ``BBOT_SIZE_GATE=0`` or ``BBOT_SKIP_SIZE_CHECK=1``. When off, ``size_check``
+    still computes available/planned sizes but always returns ``size_ok=True``.
+    """
+    e = env if env is not None else os.environ
+    skip = str(e.get("BBOT_SKIP_SIZE_CHECK") or "").strip().lower()
+    if skip in ("1", "true", "on", "yes"):
+        return False
+    if skip in ("0", "false", "off", "no"):
+        return True
+    gate = str(e.get("BBOT_SIZE_GATE") or "").strip().lower()
+    if gate in ("0", "false", "off", "no"):
+        return False
+    if gate in ("1", "true", "on", "yes"):
+        return True
+    return True
+
+
 def _env_float(env: Mapping[str, str], key: str, default: float) -> float:
     raw = str(env.get(key) or "").strip()
     if not raw:
@@ -367,8 +392,21 @@ def size_check(
     okx_ct_val: Any = None,
     required_okx_contracts: Any = None,
     required_bybit_qty: Any = None,
+    size_gate: bool = True,
 ) -> dict[str, Any]:
-    """Notional must fit available size on both chosen legs."""
+    """Notional must fit available size on both chosen legs.
+
+    When OKX ``ct_val`` / ``_private_size_gate`` is present, available OKX size
+    is ``contracts × ct_val`` (base). Optional ``required_okx_contracts`` /
+    ``required_bybit_qty`` override planned qty for close-from-fill. Without
+    ``ct_val`` (would_send stub), OKX size stays raw L1 — backward compatible.
+    Journal may carry ``okx_available_contracts`` / ``okx_ct_val`` when the
+    private gate is active.
+
+    ``size_gate=False`` (stub would_send via ``BBOT_SIZE_GATE=0``) still fills
+    available/planned size fields but always returns ``size_ok=True`` so the
+    gate does not block opens/closes. Default ``True`` keeps live / gear23.
+    """
     spread_side = spread_side_for(side, event=event)
     okx_leg, bybit_leg = legs_for_spread_side(spread_side)
     okx_px = signal_price_for_leg(dict(okx), okx_leg)
@@ -416,9 +454,12 @@ def size_check(
         and bybit_sz is not None
         and float(bybit_sz) >= float(planned_bybit)
     )
-    size_ok = bool(okx_ok and bybit_ok)
+    raw_ok = bool(okx_ok and bybit_ok)
+    size_ok = True if not size_gate else raw_ok
     return {
         "size_ok": size_ok,
+        "size_gate": bool(size_gate),
+        "size_ok_raw": raw_ok,
         "notional_usdt": float(notional_usdt),
         "book_depth": int(book_depth),
         "okx_leg_side": okx_leg,
@@ -516,6 +557,7 @@ class ThetaTradeConfig:
     slot_k: int = DEFAULT_SLOT_K
     notional_usdt: float = DEFAULT_NOTIONAL_USDT
     book_depth: int = DEFAULT_BOOK_DEPTH
+    size_gate: bool = True
     policy_params: Optional[PolicyParams] = None
 
     @classmethod
@@ -540,6 +582,7 @@ class ThetaTradeConfig:
             slot_k=max(1, _env_int(e, "BBOT_SLOT_K", DEFAULT_SLOT_K)),
             notional_usdt=_env_float(e, "BBOT_NOTIONAL_USDT", DEFAULT_NOTIONAL_USDT),
             book_depth=max(1, _env_int(e, "BBOT_BOOK_DEPTH", DEFAULT_BOOK_DEPTH)),
+            size_gate=size_gate_enabled(e),
             policy_params=policy_params,
         )
 
@@ -677,6 +720,7 @@ def decide_theta_k1(
     quotes: Mapping[str, Mapping[str, Mapping[str, Any]]],
     notional_usdt: float,
     book_depth: int = 1,
+    size_gate: bool = True,
     coin_order: Optional[Sequence[str]] = None,
     policy_params: Optional[PolicyParams] = None,
     ts_s: Optional[int] = None,
@@ -735,6 +779,7 @@ def decide_theta_k1(
                 book_depth=book_depth,
                 required_okx_contracts=pos.okx_filled_qty,
                 required_bybit_qty=pos.bybit_filled_qty,
+                size_gate=size_gate,
             )
             pot_pp = potential_profit_pp(feat, state, params.fee_round_trip_pp)
             own = by_key.get((pos.base_coin, pos.side))
@@ -825,6 +870,7 @@ def decide_theta_k1(
                 event="open",
                 notional_usdt=notional_usdt,
                 book_depth=book_depth,
+                size_gate=size_gate,
             )
             if not size_info["size_ok"]:
                 if first_size_reject is None:
@@ -1325,6 +1371,36 @@ class ThetaTradeManager:
             return float(DEFAULT_OBSERVE_PARAMS.fee_round_trip_pp)
         return float(params.fee_round_trip_pp)
 
+    def _fee_round_trip_pp(self) -> float:
+        """Same round-trip fee ``potential_pp`` subtracts (frozen default 0.30)."""
+        params = self.config.policy_params
+        if params is None:
+            return float(DEFAULT_OBSERVE_PARAMS.fee_round_trip_pp)
+        return float(params.fee_round_trip_pp)
+
+    def abort_coin_if_held(self, coin: str, *, reason: str = "hot_drop") -> bool:
+        """Clear K=1 slot when it holds/pends ``coin`` (hot-drop tear-down).
+
+        Returns True when the slot was cleared. Does not place broker cancels
+        (would_send stub has nothing on the wire; live_send canary should not
+        hot-drop under a live position without an explicit close path).
+        """
+        coin_u = str(coin).strip().upper()
+        if not coin_u:
+            return False
+        pos = self.slot.position
+        held = pos is not None and str(pos.base_coin).upper() == coin_u
+        # pending alone: we cannot know the coin without a position; if pending
+        # and position already set to this coin, clear both.
+        if not held:
+            return False
+        self.slot.position = None
+        self.slot.pending = False
+        self._log(
+            f"theta_trade_abort_coin | base_coin={coin_u} | reason={reason}"
+        )
+        return True
+
     def _books_for(self, quotes: Mapping[str, Any], coin: str) -> tuple[dict, dict]:
         books = quotes.get(coin) or {}
         return dict(books.get("okx") or {}), dict(books.get("bybit") or {})
@@ -1427,6 +1503,9 @@ class ThetaTradeManager:
             "fill_bybit_available_size": fill_size.get("bybit_available_size"),
             "signal_okx_planned_qty": signal_size.get("okx_planned_qty"),
             "signal_bybit_planned_qty": signal_size.get("bybit_planned_qty"),
+            # Present when private OKX size gate / ct_val is active; None on would_send stub.
+            "okx_available_contracts": signal_size.get("okx_available_contracts"),
+            "okx_ct_val": signal_size.get("okx_ct_val"),
             "book_signal": {
                 "okx": snapshot_book(signal_okx),
                 "bybit": snapshot_book(signal_bybit),
@@ -1495,6 +1574,7 @@ class ThetaTradeManager:
                     event=size_event,
                     notional_usdt=self.config.notional_usdt,
                     book_depth=self.config.book_depth,
+                    size_gate=self.config.size_gate,
                 )
                 row = {
                     "schema_version": SCHEMA_VERSION,
@@ -1518,6 +1598,8 @@ class ThetaTradeManager:
                     "signal_bybit_available_size": size_info.get("bybit_available_size"),
                     "okx_planned_qty": size_info.get("okx_planned_qty"),
                     "bybit_planned_qty": size_info.get("bybit_planned_qty"),
+                    "okx_available_contracts": size_info.get("okx_available_contracts"),
+                    "okx_ct_val": size_info.get("okx_ct_val"),
                     "book_signal": {
                         "okx": snapshot_book(okx),
                         "bybit": snapshot_book(bybit),
@@ -1557,6 +1639,7 @@ class ThetaTradeManager:
             event=decision.action,
             notional_usdt=self.config.notional_usdt,
             book_depth=self.config.book_depth,
+            size_gate=self.config.size_gate,
         )
         if not signal_size.get("size_ok"):
             # Belt-and-suspenders (decide already gated) for open and close.
@@ -1610,6 +1693,7 @@ class ThetaTradeManager:
                 event=decision.action,
                 notional_usdt=self.config.notional_usdt,
                 book_depth=self.config.book_depth,
+                size_gate=self.config.size_gate,
             )
             pnl_fields: dict[str, Any] = {}
             if decision.action == "open":
@@ -1858,6 +1942,7 @@ class ThetaTradeManager:
                 event=decision.action,
                 notional_usdt=self.config.notional_usdt,
                 book_depth=self.config.book_depth,
+                size_gate=self.config.size_gate,
             )
             sent_ok = abort is None
             pnl_fields: dict[str, Any] = {}
@@ -1986,6 +2071,7 @@ class ThetaTradeManager:
                 quotes=quotes,
                 notional_usdt=self.config.notional_usdt,
                 book_depth=self.config.book_depth,
+                size_gate=self.config.size_gate,
                 coin_order=coin_order,
                 policy_params=self.config.policy_params,
                 ts_s=ts_s,
@@ -1997,6 +2083,7 @@ class ThetaTradeManager:
             coin_order=coin_order,
             notional_usdt=float(self.config.notional_usdt),
             book_depth=int(self.config.book_depth),
+            size_gate=bool(self.config.size_gate),
             thr=float(self.config.theta_thr),
             policy_params=self.config.policy_params,
             ts_s=int(ts_s),
@@ -2648,6 +2735,7 @@ class ThetaTradeManager:
                 okx_ct_val=okx_s.get("ct_val"),
                 required_okx_contracts=(pos.okx_filled_qty if pos else None),
                 required_bybit_qty=(pos.bybit_filled_qty if pos else None),
+                size_gate=self.config.size_gate,
             )
         else:
             signal_size = decision.size_info or size_check(
@@ -2657,6 +2745,7 @@ class ThetaTradeManager:
                 event=decision.action,
                 notional_usdt=self.config.notional_usdt,
                 book_depth=self.config.book_depth,
+                size_gate=self.config.size_gate,
             )
         if not signal_size.get("size_ok"):
             decision = ThetaDecision(
@@ -2731,6 +2820,7 @@ class ThetaTradeManager:
                 event=decision.action,
                 notional_usdt=self.config.notional_usdt,
                 book_depth=self.config.book_depth,
+                size_gate=self.config.size_gate,
             )
             pnl_fields: dict[str, Any] = {}
             if decision.action == "open":

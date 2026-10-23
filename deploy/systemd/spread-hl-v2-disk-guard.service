@@ -1,0 +1,14 @@
+# Fail-closed disk guard for HL v2. Stops HL collector if free space or HL Σ exceed budget.
+# Install: cp deploy/scripts/spread-hl-v2-disk-guard.sh /usr/local/sbin/ && chmod +x
+# Does not touch prod collector-next.
+
+[Unit]
+Description=Spread HL v2 disk guard (one-shot)
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=root
+ExecStart=/bin/bash /usr/local/sbin/spread-hl-v2-disk-guard.sh
+StandardOutput=append:/var/log/spread/hl-v2-disk-guard.log
+StandardError=append:/var/log/spread/hl-v2-disk-guard.log

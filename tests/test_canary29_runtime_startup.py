@@ -23,6 +23,7 @@ from app.bot.theta_trade_manager import (
     ThetaTradeConfig,
     ThetaTradeManager,
 )
+from app.bot.theta_screener import ThetaSnapshot
 
 
 class Canary29MetadataTests(unittest.TestCase):
@@ -54,7 +55,7 @@ class Canary29MetadataTests(unittest.TestCase):
 
 
 class Canary29PrivateShutdownTests(unittest.IsolatedAsyncioTestCase):
-    async def test_private_stop_waits_for_inflight_place(self) -> None:
+    async def test_default_path_private_shutdown_waits_before_clear(self) -> None:
         runtime = object.__new__(BotRuntime)
         runtime._terminal_private_execution = True
         runtime.stop_event = asyncio.Event()
@@ -74,19 +75,40 @@ class Canary29PrivateShutdownTests(unittest.IsolatedAsyncioTestCase):
         runtime.theta_trade = SimpleNamespace(_terminal_place_task=task)
         runtime.stop_event.set()  # SIGTERM is delivered to the main runtime only.
         await started.wait()
-        wait_for_place = asyncio.create_task(runtime._await_terminal_place_before_shutdown())
-        await asyncio.sleep(0)
-        self.assertFalse(runtime._private_stop_event.is_set())
-        self.assertFalse(wait_for_place.done())
+        with (
+            patch.object(runtime, "_write_canary_state") as checkpoint,
+            patch.object(runtime, "_stop_synthetic_private_send") as stop_private,
+        ):
+            wait_for_place = asyncio.create_task(runtime._finish_private_shutdown())
+            await asyncio.sleep(0)
+            self.assertFalse(runtime._private_stop_event.is_set())
+            self.assertFalse(wait_for_place.done())
 
-        finish.set()
-        self.assertTrue(await wait_for_place)
-        with patch("app.bot.private.ws_warm_session.clear_process_warm_session"):
-            runtime._stop_synthetic_private_send()
-        self.assertTrue(runtime._private_stop_event.is_set())
+            finish.set()
+            self.assertTrue(await wait_for_place)
+            checkpoint.assert_called_once_with()
+            stop_private.assert_called_once_with()
 
 
 class Gear22LongCanaryContractTests(unittest.TestCase):
+    def test_terminal_private_rejects_legacy_hot_add_path(self) -> None:
+        env = {
+            "BBOT_MODE": "policy",
+            "BBOT_PROFILE": "gear22_live_canary",
+            "BBOT_THETA_EXECUTION": "terminal_private",
+            "BBOT_THETA_LIVE_SEND": "1",
+            "BBOT_THETA_TRADE": "1",
+            "BBOT_BROKER": "private_live",
+            "VENUE": "live",
+            "LIVE_ORDERS": "1",
+            "BBOT_HOT_ADD": "1",
+        }
+        with patch.dict(os.environ, env, clear=False):
+            with self.assertRaisesRegex(
+                ValueError, "terminal_private hot-add requires Gear 2.3 private readiness gates"
+            ):
+                BotRuntime()
+
     def test_resume_refuses_live_source_pid(self) -> None:
         self.assertFalse(_canary29_source_stopped(os.getpid()))
 
@@ -339,6 +361,51 @@ class Gear22LongCanaryContractTests(unittest.TestCase):
 
 
 class Gear22CheckpointFailureTests(unittest.IsolatedAsyncioTestCase):
+    async def test_terminal_place_worker_receives_decision_context(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            calls: dict[str, object] = {}
+
+            def place(**kwargs: object) -> SimpleNamespace:
+                calls.update(kwargs)
+                return SimpleNamespace(completed=False, keep_pending=False)
+
+            manager = ThetaTradeManager(
+                data_root=Path(tmp),
+                config=ThetaTradeConfig(),
+                execution_mode="terminal_private",
+                place_fn=place,
+                meta_fn=lambda _coin: None,
+            )
+            snapshot = ThetaSnapshot(
+                base_coin="RVN",
+                side="long",
+                ts_ms=900,
+                p50_1m=0.12,
+                floor_tf_select_a25=0.08,
+                theta_1m=0.04,
+                computed_at_ms=1000,
+                coverage_1m=0.75,
+                n_1m=3,
+            )
+            manager._schedule_terminal_private_place(
+                ThetaDecision(
+                    action="open", base_coin="RVN", side="long",
+                    reason="signal", theta_1m=0.04,
+                ),
+                signal_ts=1000,
+                signal_mono_ns=None,
+                snapshots=[snapshot],
+                okx_s={"bid_price": 1.0, "ask_price": 1.0},
+                bybit_s={"bid_price": 1.0, "ask_price": 1.0},
+            )
+            assert manager._terminal_place_task is not None
+            await manager._terminal_place_task
+
+        context = calls["extra"]["decision_context"]
+        self.assertEqual(context["schema_version"], "bbot.trade_decision_context.v1")
+        self.assertEqual(context["state"]["long"]["coverage_1m"], 0.75)
+        self.assertEqual(context["state"]["long"]["n_1m"], 3)
+
     async def test_checkpoint_failure_requests_runtime_stop_and_retains_pending(self) -> None:
         runtime = object.__new__(BotRuntime)
         runtime.theta_trade = SimpleNamespace(

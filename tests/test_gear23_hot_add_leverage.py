@@ -19,6 +19,7 @@ from app.bot.hot_add import bbot_hot_add_set_leverage_enabled
 from app.bot.private.leverage_one import (
     LeverageTarget,
     _bybit_readback_is_one,
+    _bybit_get_all_pages,
     set_and_verify_leverage_one,
 )
 from app.bot.private.order_sign import LiveCredentials
@@ -234,7 +235,8 @@ class HotAddLeverageTests(unittest.TestCase):
                 return {"retCode": 0, "result": {"list": []}}
             return {"retCode": 0, "result": {"list": [{"symbol": target.bybit_symbol,
                     "leverage": "1", "buyLeverage": "1", "sellLeverage": "1",
-                    "size": "0", "positionIdx": 0}]}}
+                    "size": "0", "positionIdx": 0, "positionStatus": "Normal",
+                    "updatedTime": "1791640000000"}]}}
 
         self.assertTrue(set_and_verify_leverage_one(
             target,
@@ -295,7 +297,8 @@ class HotAddLeverageTests(unittest.TestCase):
                 return {"retCode": 0, "result": {"list": []}}
             rows = [
                 {"symbol": target.bybit_symbol, "size": "0", "positionIdx": idx,
-                 "leverage": "1", "buyLeverage": "1", "sellLeverage": "1"}
+                 "leverage": "1", "buyLeverage": "1", "sellLeverage": "1",
+                 "positionStatus": "Normal", "updatedTime": "1791640000000"}
                 for idx in (1, 2)
             ]
             return {"retCode": 0, "result": {"list": rows}}
@@ -314,8 +317,112 @@ class HotAddLeverageTests(unittest.TestCase):
             "result": {"list": [{
                 "symbol": target.bybit_symbol, "size": "0", "positionIdx": 3,
                 "leverage": "1", "buyLeverage": "1", "sellLeverage": "1",
+                "positionStatus": "Normal", "updatedTime": "1791640000000",
             }]},
         }, target.bybit_symbol))
+
+    def test_bybit_readback_ignores_empty_pagination_placeholder(self) -> None:
+        target = "AEONUSDT"
+        self.assertTrue(_bybit_readback_is_one({
+            "retCode": 0,
+            "result": {"list": [
+                {"symbol": target, "size": "0", "positionIdx": 0,
+                 "leverage": "1", "positionStatus": "Normal",
+                 "updatedTime": "1791292865176"},
+                {"symbol": target, "size": "0", "positionIdx": 0,
+                 "leverage": "10", "positionStatus": "", "updatedTime": ""},
+            ]},
+        }, target))
+
+    def test_bybit_readback_rejects_conflicting_current_rows(self) -> None:
+        target = "AEONUSDT"
+        self.assertFalse(_bybit_readback_is_one({
+            "retCode": 0,
+            "result": {"list": [
+                {"symbol": target, "size": "0", "positionIdx": 0,
+                 "leverage": "1", "positionStatus": "Normal",
+                 "updatedTime": "1791292865176"},
+                {"symbol": target, "size": "0", "positionIdx": 0,
+                 "leverage": "10", "positionStatus": "Normal",
+                 "updatedTime": "1791292865176"},
+            ]},
+        }, target))
+
+    def test_flat_preflight_follows_bybit_position_and_order_cursors(self) -> None:
+        target = LeverageTarget("NEW", "NEW-USDT-SWAP", "NEWUSDT")
+        creds = LiveCredentials("key", "secret", "pass")
+        posts: list[str] = []
+        position_calls = 0
+        order_calls = 0
+
+        def post(url, _headers, _body):
+            posts.append(url)
+            if "okx" in url:
+                return 200, {"code": "0", "data": [{"lever": "1"}]}
+            return 200, {"retCode": 0, "result": {}}
+
+        def get(url, _headers, *, timeout_sec):
+            nonlocal position_calls, order_calls
+            if "/api/v5/account/positions" in url:
+                return {"code": "0", "data": []}
+            if "/api/v5/trade/orders-pending" in url:
+                return {"code": "0", "data": []}
+            if "/api/v5/account/leverage-info" in url:
+                return {"code": "0", "data": [{
+                    "instId": target.okx_symbol, "lever": "1", "mgnMode": "cross",
+                }]}
+            if "/v5/order/realtime" in url:
+                order_calls += 1
+                result = {"list": []}
+                if "cursor=" not in url:
+                    result["nextPageCursor"] = "orders-next"
+                return {"retCode": 0, "result": result}
+            if "/v5/position/list" in url:
+                position_calls += 1
+                if position_calls >= 3:  # post-set readback
+                    result = {"list": [{
+                        "symbol": target.bybit_symbol, "leverage": "1",
+                        "buyLeverage": "1", "sellLeverage": "1",
+                        "size": "0", "positionIdx": 0,
+                        "positionStatus": "Normal", "updatedTime": "1791640000000",
+                    }]}
+                    if position_calls == 3:
+                        result["nextPageCursor"] = "readback-next"
+                    return {"retCode": 0, "result": result}
+                result = {"list": [{
+                    "symbol": target.bybit_symbol, "size": "0", "positionIdx": 0,
+                }]}
+                if "cursor=" not in url:
+                    result["nextPageCursor"] = "positions-next"
+                return {"retCode": 0, "result": result}
+            self.fail(f"unexpected GET path: {url}")
+
+        self.assertTrue(set_and_verify_leverage_one(
+            target,
+            okx_credentials=creds,
+            bybit_credentials=creds,
+            endpoints=endpoints_for_venue("live"),
+            post_fn=post,
+            get_fn=get,
+        ))
+        self.assertEqual(position_calls, 4)
+        self.assertEqual(order_calls, 2)
+        self.assertEqual(len(posts), 2)
+
+    def test_bybit_cursor_cycle_fails_closed(self) -> None:
+        creds = LiveCredentials("key", "secret")
+
+        def repeated_cursor(_url, _headers, *, timeout_sec):
+            return {"retCode": 0, "result": {"list": [], "nextPageCursor": "same"}}
+
+        with self.assertRaisesRegex(RuntimeError, "leverage_preflight_failed"):
+            _bybit_get_all_pages(
+                credentials=creds,
+                base="https://api.bybit.com",
+                path="/v5/position/list",
+                query="category=linear&symbol=NEWUSDT&limit=200",
+                get_fn=repeated_cursor,
+            )
 
     def test_preflight_exposure_prevents_all_setter_calls(self) -> None:
         target = LeverageTarget("NEW", "NEW-USDT-SWAP", "NEWUSDT")

@@ -157,6 +157,7 @@ def normalize_okx_item(item: Mapping[str, Any]) -> dict[str, str]:
         "base_coin": base,
         "quote_coin": quote,
         "settle_ccy": str(item.get("settleCcy") or "").strip(),
+        "inst_category": str(item.get("instCategory") or "").strip(),
         "tick_size": str(item.get("tickSz") or "").strip(),
         "lot_size": str(item.get("lotSz") or "").strip(),
         "min_size": str(item.get("minSz") or "").strip(),
@@ -279,6 +280,12 @@ def run_discovery(
         for row in bybit_f
         if str(row.get("symbol_norm", "")).strip()
     }
+    # OKX instCategory: 1=crypto, 3=stock/ETF, 4=commodity (BB/QNT-style collisions).
+    okx_category = {
+        str(row.get("symbol_norm", "")).strip(): str(row.get("inst_category") or "")
+        for row in okx_f
+        if str(row.get("symbol_norm", "")).strip()
+    }
     crypto_intersection: list[dict[str, str]] = []
     skipped_non_crypto: list[str] = []
     for row in intersection:
@@ -286,6 +293,9 @@ def run_discovery(
         if not coin:
             continue
         if not is_hot_add_crypto(coin, symbol_type=bybit_symbol_type.get(coin, "")):
+            skipped_non_crypto.append(coin)
+            continue
+        if okx_category.get(coin, "") != "1":
             skipped_non_crypto.append(coin)
             continue
         crypto_intersection.append(row)

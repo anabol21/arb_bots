@@ -296,6 +296,8 @@ __all__ = [
     "DROP_ENV",
     "MAX_EXTRA_ENV",
     "POLL_SEC_ENV",
+    "SET_LEVERAGE_ENV",
+    "bbot_hot_add_set_leverage_enabled",
     "BotHotAddController",
     "bbot_hot_add_delta_path",
     "bbot_hot_add_drop_path",

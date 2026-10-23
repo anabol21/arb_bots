@@ -1,0 +1,12 @@
+[Unit]
+Description=Run HL v2 compactor every 5 minutes
+
+[Timer]
+OnBootSec=3min
+OnUnitActiveSec=5min
+AccuracySec=30s
+Persistent=true
+Unit=spread-compactor-hl-v2.service
+
+[Install]
+WantedBy=timers.target

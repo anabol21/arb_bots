@@ -1415,7 +1415,7 @@ class ClOrdIdTests(unittest.TestCase):
     def tearDown(self) -> None:
         clear_all()
 
-    def _place(self, intent_id: str):
+    def _place(self, intent_id: str, extra: dict | None = None):
         def recv(venue: str) -> str:
             return _report_order_body(venue, self.ws.sent, price="2")
 
@@ -1436,7 +1436,30 @@ class ClOrdIdTests(unittest.TestCase):
             leverage_one=True, inst_id_code=193761,
             intent_id=intent_id,
             recv_fn=recv,
+            extra=extra,
         )
+
+    def test_live_trade_rows_preserve_vps_decision_context(self) -> None:
+        context = {
+            "schema_version": "bbot.trade_decision_context.v1",
+            "action": "open",
+            "base_coin": "SOL",
+            "position_side": "long",
+            "decision_reason": "synthetic_roll",
+            "spread_side": "open_long",
+            "spread_long_pct": 0.25,
+            "spread_short_pct": -0.25,
+            "selected_spread_pct": 0.25,
+            "state": {"long": {"coverage_1m": 0.75, "n_1m": 3}},
+        }
+
+        result = self._place("decision-context-live", extra={"decision_context": context})
+
+        self.assertTrue(result.completed, result.abort)
+        rows = _read(theta_trades_jsonl_path(self.root, "2023-11-14"))
+        trade_rows = [row for row in rows if row.get("status") in {"pending", "open"}]
+        self.assertEqual([row["status"] for row in trade_rows], ["pending", "open"])
+        self.assertEqual([row["decision_context"] for row in trade_rows], [context, context])
 
     def test_uuid_intent_cl_ord_id_is_alphanumeric(self) -> None:
         intent = "50db2540-3a43-4bb9-9972-5beda0d6a5d0"

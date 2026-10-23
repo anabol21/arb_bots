@@ -1,217 +1,35 @@
-# AGENTS.md
+# Инструкции для работы с arb_bots
 
-## Overview & Scope
-This repository contains a crypto-arbitrage spread collection and data-engineering pipeline.
+## Проект и источники истины
 
-The main runtime entrypoint is:
+В проекте связаны четыре области: **D** — публичный сбор и данные; **M** — исследования и историческая модель; **B** — политика бота и исполнение; **Ops** — эксплуатация, наблюдаемость и сопровождение. Изменение одной области само по себе не разрешает менять остальные.
 
-- `app/screaner_b_o.py`
+- [`architecture.md`](architecture.md) описывает техническую систему, границы и fail-closed гейты.
+- [`roadmap.md`](roadmap.md) задаёт направление разработки, но не подтверждает готовность runtime.
+- [`NOW.md`](NOW.md) — последний записанный операционный снимок и распределение владельцев наблюдения. Он не заменяет свежую проверку VPS и не разрешает деплой.
+- [`docs/agent-architecture.md`](docs/agent-architecture.md) задаёт общую политику работы агентов.
+- [`docs/agents/codex.md`](docs/agents/codex.md) содержит только правила среды Codex; [.cursor/rules/](.cursor/rules/) и [.cursor/agents/](.cursor/agents/) остаются механизмами Cursor. Если вы работаете в Codex, прочитайте `docs/agents/codex.md` до делегирования субагентов. Его модельная лестница относится только к Codex, не к Cursor и Grok.
 
-The same runtime may be used in different contexts:
+При расхождении сначала установите, относится ли текст к техническому устройству, плану, последнему наблюдению или процессу разработки. Не считайте датированный отчёт текущим статусом. Не разрешайте неоднозначность в пользу более рискованного действия; при неразрешимом конфликте полномочий спросите пользователя.
 
-- local development
-- VPS runtime
-- mounted remote storage reachable from the VPS
+## Общие инварианты
 
-Agents must always distinguish these contexts explicitly when reasoning about bugs, validation, and runtime behavior.
+- Сохраняйте изоляцию D/M/B и границу приватного исполнения `app/bot/private/**`; private API и ключи не переносятся в публичный сборщик.
+- Изменения исполнения остаются fail-closed. Реальная отправка требует кодового пути и всех гейтов из `architecture.md` (`BBOT_BROKER=private_live`, `VENUE=live`, `LIVE_ORDERS=1`) в пределах утверждённого scope. Явное разрешение пользователя требуется на запуск новой live-кампании или её существенное изменение, деплой/рестарт, изменение лимитов, конфигурации либо live-контракта. Отдельные заявки могут исполняться автономно по утверждённой policy внутри разрешённой кампании; согласование каждой заявки не требуется. Разрешение одной кампании не переносится на новую кампанию или расширенный scope. `would_send`, canary или запись в `NOW.md` сами по себе разрешением не являются.
+- Не обещайте прибыль и не выводите надёжность VPS или удалённого хранения из локальной проверки.
+- Не раскрывайте секреты в коде, документах, команде, журнале или сообщении.
+- Сохраняйте исходное поведение при выключенных новых возможностях, когда это применимо. Предпочитайте узкий проверяемый diff.
 
-## Architecture context (required)
-Before non-trivial work, read:
-1. `architecture.md`
-2. Then the specific module files linked from Module Map / Critical Paths
+## Работа с изменениями и эксплуатацией
 
-When you change topology (new process, send path, journal layout, contour boundary):
-update `architecture.md` in the same change.
-Do not put secrets in docs.
+Определите затронутый контур и риск по фактическим файлам. Один агент отвечает за реализацию каждого изменяемого файла; независимый проверяющий не исправляет свой объект проверки. Для небольшого изолированного изменения достаточно целевой проверки. Независимая проверка нужна, когда меняются межконтурный контракт, данные/восстановление, приватная отправка или производственное утверждение. Делегирование необязательно.
 
-## Current Priority
-Current repository priority is data-engineering reliability, not strategy expansion.
+Запуск или существенное изменение live-кампании, деплой/рестарт, изменение лимитов или конфигурации, правка службы и воздействие на рабочие данные требуют явного разрешения пользователя. Заявки внутри уже разрешённой кампании могут исполняться автономно согласно утверждённым policy и risk gates. Перед разрешённым изменением получите свежие данные о целевом хосте, коде, процессах и конфигурации; для B также проверьте позиции, pending и readiness. Подготовьте ограниченную канарейку и откат. Не используйте `NOW.md` как подтверждение текущего состояния.
 
-Primary focus:
-- reliable persistence of spread data
-- runtime stability on VPS
-- correctness of storage behavior on mounted remote storage
-- observability of write/flush/save behavior
-- validation of alternative storage designs
-- reproducibility for later replay, backtest, and research
+Работайте в предоставленном checkout и сохраняйте пользовательские изменения. Не создавайте дополнительный worktree без явного запроса. Не меняйте рабочие данные или VPS ради локальной проверки.
 
-The storage architecture is NOT considered finally decided.
+В отчёте укажите результат, затронутые файлы, фактически выполненные проверки и известные ограничения. Используйте объём отчёта, соответствующий риску задачи; универсальная форма из фиксированного числа разделов не требуется.
 
-Agents may evaluate multiple persistence strategies, including:
-- direct writes to mounted storage
-- local staging plus background upload
-- hybrid or fallback-based approaches
+## Маршрутизация
 
-The goal is not to defend one preferred design.
-The goal is to identify the most reliable design under realistic runtime constraints.
-
-## Frozen Areas
-Unless the user explicitly unlocks them, treat these areas as frozen:
-- websocket ingest logic
-- exchange parsing
-- spread calculation
-- signal/trading logic inside `app/screaner_b_o.py`
-- live order routing outside `app/bot/private/**` (B-private: testnet first)
-- unrelated strategy experimentation
-
-Do not modify frozen areas just because storage behavior is problematic.
-
-## Agent Role
-Act as a skeptical data-engineering and reliability assistant.
-
-Optimize for:
-- correctness
-- explicit invariants
-- observability
-- failure visibility
-- restart safety
-- reproducibility
-- small reviewable diffs
-
-Do NOT optimize for:
-- large rewrites
-- speculative abstractions
-- architecture astronautics
-- “clever” but untestable solutions
-
-## Core Working Principles
-- Prefer explicit failure over silent corruption.
-- Prefer small experiments over early architectural commitment.
-- Prefer instrumentation before optimization.
-- Prefer local, narrow refactors over broad repo-wide rewrites.
-- Prefer evidence from runtime behavior over intuition.
-- Never confuse local success with VPS success.
-- Never confuse VPS success with confirmed remote-storage correctness.
-
-## Environment Model
-Every storage-related task must explicitly name:
-
-1. where the code is edited
-2. where the script is executed
-3. where runtime logs are emitted
-4. where files are first materialized
-5. where files are considered durably stored
-
-If any of these are unclear, the task is under-specified and the agent should say so.
-
-## Build, Test & Validation Commands
-Use fast, scoped, non-destructive commands first.
-
-Repository inspection:
-```bash
-cd /Users/mishatrubik/Desktop/spread && find . -maxdepth 4 -type f | sort
-```
-
-Python syntax check:
-```bash
-cd /Users/mishatrubik/Desktop/spread && python3 -m py_compile app/screaner_b_o.py
-```
-
-Mount validation:
-```bash
-cd /Users/mishatrubik/Desktop/spread && python3 validation/check_mount.py
-```
-
-Lifecycle validation:
-```bash
-cd /Users/mishatrubik/Desktop/spread && python3 validation/check_file_lifecycle.py
-```
-
-Use these as starting points. Add more targeted commands only when required by the task.
-
-## Conventions & Patterns
-- Main runtime script: `app/screaner_b_o.py`
-- Storage-related helpers should gradually move into:
-  - `app/storage/`
-  - `app/schema/`
-  - `app/utils/`
-- Validation logic belongs in `validation/`
-- Documentation and operational instructions belong in `docs/`
-- Strategy gear roadmap: `docs/strategy-gears.md`
-- Research and offline analysis belong in `research/`
-- Keep runtime code and offline research code separate
-- Prefer structured logs over ad-hoc print debugging
-- Keep path handling explicit and centralized when possible
-
-## Development tracks (lines of work, not necessarily git branches)
-1. **Data collection / storage reliability** — VPS, mount, persistence (`app/screaner_b_o.py`). Current reliability priority.
-2. **Model** — build and validate the strategy on **simulated historical runs** only (`model.ipynb`, gear ladder in `docs/strategy-gears.md`: **1.0** closed → **1.5** regime screener → **2** multi-coin fixed model **closed (contour; 2.2 out of scope)** → **2.2** **closed** as observation contour — 1 Hz dummy replay in `research/gear22_backtest/`, frozen knobs, `spread_last` fill not `Trade_Lat`; not 1.0 simulator gate, not size, not search, not live-ready → **2.5** size policy (blocked until explicit unlock) → **3** parameter search on anomaly episodes). Validation remains **backtest / historical simulation**, not live trading. An async live trading bot is **out of scope** for the model track.
-3. **Glue** — architecture joining collection, model, and trades. Spec: `docs/b-v0-block-diagram.md`. Track 3 may implement a **live VPS stub bot** in `app/bot/**` (not `private/`) that must not interfere with the D collector. **B-private** is unlocked (2026-08-18) in `app/bot/private/**`: testnet/demo first, live orders after an explicit live gate. Private APIs stay out of the collector. Starters: `docs/b-bot-starter-prompt.md`, `docs/b-private-starter-prompt.md`.
-
-Strategy documentation does not replace the storage-reliability priority. Live-bot integration belongs to track 3; gear 1.0 closure was simulator-only.
-
-## Architectural Decision Discipline
-For storage architecture tasks, do not jump directly to implementation.
-
-First compare up to three candidate designs, such as:
-1. direct write to mounted storage
-2. local staging + background uploader
-3. hybrid / fallback model
-
-For each candidate, reason about:
-- data integrity risk
-- runtime blocking risk
-- restart recovery
-- mount dependency
-- observability
-- operational complexity
-- silent-loss risk
-
-Then recommend the next experiment or implementation step.
-
-## Dos and Don’ts
-
-Do:
-- inspect runtime/logging/storage assumptions before changing code
-- name the suspected failure mode before patching
-- ask whether the issue belongs to runtime, storage, validation, or schema
-- add observability before adding concurrency or retries
-- propose minimal experiments to reduce uncertainty
-- separate architecture exploration from code implementation
-- keep code changes incremental and reviewable
-
-Do not:
-- rewrite ingest because of storage bugs
-- commit to a storage pattern without comparison
-- claim local-only success as proof of production correctness
-- mix research/report code into runtime modules
-- introduce broad abstractions without evidence they are needed
-- silently swallow exceptions in persistence paths
-- make destructive operational assumptions about VPS or storage
-
-## Safety & Guardrails
-Never do without explicit approval:
-- delete or bulk-move datasets
-- truncate runtime logs
-- kill unrelated VPS processes
-- edit SSH credentials, keys, secrets, or mount configs
-- modify remote storage contents destructively
-- change service/process manager configuration
-- mass-rename runtime paths that may affect production behavior
-
-Safe operations:
-- read-only inspection of paths, logs, mount state, and file states
-- syntax checks
-- creation of validation scripts
-- addition of structured logging
-- local refactors confined to storage/reliability scope
-- design comparison documents and experiment plans
-
-## Required Output Format
-For every substantial task, answer in this structure:
-
-1. Pipeline block
-2. Existing files/modules involved
-3. Candidate interpretations or candidate designs
-4. Key risks and failure modes
-5. Minimal patch or experiment plan
-6. VPS/storage validation plan
-7. Success criteria
-8. Recommended next step
-
-## Git & PR Rules
-- One task, one focused diff.
-- Keep schema, writer/uploader, and validation changes logically separated when possible.
-- Every storage-related fix must include a validation plan.
-- Prefer reviewable incremental changes over full rewrites.
-- If architecture is still uncertain, propose the experiment before the refactor.
+Используйте контекстные правила Cursor и описания специалистов только для соответствующей области. Общая схема ролей, независимого review и эскалации описана в [`docs/agent-architecture.md`](docs/agent-architecture.md). Не переносите настройки моделей Cursor в Codex или наоборот.

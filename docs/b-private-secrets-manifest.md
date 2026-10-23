@@ -1,3 +1,5 @@
+> **HISTORY (этап 1, без send, 2026-08-19).** Имена путей, venue и флагов ниже по-прежнему полезны. Запрет «этап 1 не вызывает place / не открывает private WS» относится к harness того этапа, не к текущему контуру B. Не удалять и не вписывать значения ключей. Живая отправка сейчас: `BBOT_BROKER=private_live` и `VENUE=live` и `LIVE_ORDERS=1`. Канон имён: [`../architecture.md`](../architecture.md) §7.
+
 # B-private — манифест секретов / путей / venue
 
 Дата: 2026-08-19. Владелец: B Private Runtime.  
