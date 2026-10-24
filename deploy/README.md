@@ -9,6 +9,8 @@ Artifacts for VPS production/staging packaging:
 | `deploy/systemd/spread-backup-transfer.service` + `.timer` | Tick compacted transfer every 5m (offset) |
 | `deploy/systemd/spread-bars-backup-transfer.service` + `.timer` | Bars hive → `backup1tb:spread-bars` every 5m |
 | `deploy/cron/spread-maintenance.cron` | Cron alternative + ops alerts |
+| `deploy/systemd/spread-canary-pool-dyn-append.service` + `.timer` | Gear 2.3 canary own-delta expansion @ 10:10 MSK |
+| `deploy/scripts/gear23-pool-dyn-launch.sh` | Launcher template (secrets by reference only) |
 | `deploy/logrotate/spread` | Rotate `/var/log/spread/*` (copytruncate) |
 | `docs/prod-unit-snippets.md` | Short install notes |
 | `validation/ops_alerts.py` | Disk/backlog/compactor alerts |

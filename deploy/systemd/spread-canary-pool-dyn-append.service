@@ -1,0 +1,25 @@
+# Canary-owned gear23 pool expansion. Does NOT write the shared would_send
+# file /data/bbot-would-send-prod/hot_add_delta.csv.
+#
+# Install (after explicit live-campaign approval; this checkout does not deploy):
+#   cp app/bot/canary_pool_dyn_append.py /root/pool12/dyn/canary_pool_dyn_append.py
+#   cp deploy/systemd/spread-canary-pool-dyn-append.service /etc/systemd/system/
+#   cp deploy/systemd/spread-canary-pool-dyn-append.timer /etc/systemd/system/
+#   systemctl daemon-reload
+#   # enable the timer only after the bot has been restarted onto
+#   # gear23-pool-dyn-launch.sh (last_launcher.txt contains that mark).
+#
+# VPS semantics: ExecStart path /root/pool12/dyn/canary_pool_dyn_append.py
+# and flock /run/canary-pool-dyn.lock stay as on the host.
+
+[Unit]
+Description=Contour-B canary (gear23) daily pool expansion: append top-10 volatile coins not yet in pool (own delta file, never remove, cap 30)
+After=network-online.target spread-top10-volatile-spread.service spread-bbot-would-send-prod-rotate.service
+
+[Service]
+Type=oneshot
+User=root
+Nice=10
+ExecStart=/usr/bin/flock -n /run/canary-pool-dyn.lock /root/venv/bin/python /root/pool12/dyn/canary_pool_dyn_append.py --apply
+StandardOutput=append:/var/log/spread/canary-pool-dyn-append.log
+StandardError=append:/var/log/spread/canary-pool-dyn-append.log
