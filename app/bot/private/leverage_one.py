@@ -10,6 +10,7 @@ not recorded, and the place path must not send.
 from __future__ import annotations
 
 import json
+import logging
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
@@ -32,6 +33,17 @@ LEVER_ONE = "1"
 
 # Bybit: leverage already equals the value we posted.
 _BYBIT_UNCHANGED = 110043
+
+LOG = logging.getLogger("bbot.private.leverage_one")
+_REDACT_MARKERS = (
+    "OK-ACCESS",
+    "X-BAPI",
+    "api_secret",
+    "api_key",
+    "passphrase",
+    "Authorization",
+    "BEGIN ",
+)
 
 PostFn = Callable[[str, Mapping[str, str], str], tuple[int, Mapping[str, Any]]]
 GetFn = Callable[..., Mapping[str, Any]]
@@ -58,6 +70,157 @@ def _is_one(raw: object) -> bool:
         return Decimal(str(raw)) == Decimal(LEVER_ONE)
     except Exception:  # noqa: BLE001 — venue field boundary
         return False
+
+
+def _clip(value: object, *, limit: int = 160) -> str:
+    if value is None:
+        return "-"
+    text = " ".join(str(value).split())
+    if not text:
+        return "-"
+    return text if len(text) <= limit else text[: limit - 3] + "..."
+
+
+def _safe_exc_text(exc: BaseException) -> str:
+    text = _clip(exc)
+    lowered = text.lower()
+    if any(marker.lower() in lowered for marker in _REDACT_MARKERS):
+        return "<redacted>"
+    return text
+
+
+def _exc_fields(exc: BaseException | None) -> tuple[str, str]:
+    if exc is None:
+        return "-", "-"
+    root = exc
+    while root.__cause__ is not None:
+        root = root.__cause__
+    if root is not exc:
+        return f"{type(exc).__name__}/{type(root).__name__}", _safe_exc_text(root)
+    return type(exc).__name__, _safe_exc_text(exc)
+
+
+def _first_response_row(data: Mapping[str, Any] | None) -> Mapping[str, Any] | None:
+    if not data:
+        return None
+    rows = data.get("data")
+    if isinstance(rows, list) and rows and isinstance(rows[0], Mapping):
+        return rows[0]
+    result = data.get("result")
+    if isinstance(result, Mapping):
+        rows = result.get("list")
+        if isinstance(rows, list) and rows and isinstance(rows[0], Mapping):
+            return rows[0]
+        return result
+    return None
+
+
+def _row_for_symbol(
+    data: Mapping[str, Any] | None,
+    *,
+    symbol: str,
+    symbol_key: str,
+) -> Mapping[str, Any] | None:
+    if not data or not symbol:
+        return _first_response_row(data)
+    rows: list[Any] = []
+    raw_rows = data.get("data")
+    if isinstance(raw_rows, list):
+        rows = raw_rows
+    else:
+        result = data.get("result")
+        if isinstance(result, Mapping) and isinstance(result.get("list"), list):
+            rows = result["list"]
+    matching = [
+        row
+        for row in rows
+        if isinstance(row, Mapping) and str(row.get(symbol_key) or "") == symbol
+    ]
+    if matching:
+        return matching[0]
+    return _first_response_row(data)
+
+
+def _field_from_row(row: Mapping[str, Any] | None, *keys: str) -> str:
+    if not row:
+        return "-"
+    for key in keys:
+        if row.get(key) not in (None, ""):
+            return _clip(row.get(key), limit=32)
+    return "-"
+
+
+def _venue_code(data: Mapping[str, Any] | None) -> str:
+    if not data:
+        return "-"
+    if data.get("code") not in (None, ""):
+        return _clip(data.get("code"), limit=32)
+    if data.get("retCode") not in (None, ""):
+        return _clip(data.get("retCode"), limit=32)
+    row = _first_response_row(data)
+    if row and row.get("sCode") not in (None, ""):
+        return _clip(row.get("sCode"), limit=32)
+    return "-"
+
+
+def _venue_msg(data: Mapping[str, Any] | None) -> str:
+    if not data:
+        return "-"
+    for key in ("msg", "retMsg"):
+        if data.get(key) not in (None, ""):
+            return _clip(data.get(key))
+    row = _first_response_row(data)
+    if row and row.get("sMsg") not in (None, ""):
+        return _clip(row.get("sMsg"))
+    return "-"
+
+
+def _log_leverage_step_failed(
+    *,
+    venue: str,
+    step: str,
+    symbol: str,
+    reason: str,
+    coin: str = "",
+    http_status: object = None,
+    response: Mapping[str, Any] | None = None,
+    exc: BaseException | None = None,
+    requested_leverage: str = LEVER_ONE,
+    requested_mgn_mode: str = "-",
+    observed_leverage: object = None,
+    observed_mgn_mode: object = None,
+) -> None:
+    """Log a set/readback/preflight failure without secrets or auth headers."""
+    if exc is not None and http_status is None:
+        http_status = getattr(exc, "http_status", None)
+    row = _first_response_row(response)
+    if observed_leverage is None:
+        observed_leverage = _field_from_row(
+            row, "lever", "leverage", "buyLeverage", "sellLeverage"
+        )
+    if observed_mgn_mode is None:
+        observed_mgn_mode = _field_from_row(row, "mgnMode", "tradeMode", "marginMode")
+    exc_type, exc_text = _exc_fields(exc)
+    LOG.warning(
+        "leverage_one_step_failed | venue=%s | step=%s | symbol=%s | coin=%s | "
+        "reason=%s | http_status=%s | code=%s | msg=%s | "
+        "requested_leverage=%s | requested_mgn_mode=%s | "
+        "observed_leverage=%s | observed_mgn_mode=%s | exc_type=%s | exc=%s",
+        venue or "-",
+        step or "-",
+        symbol or "-",
+        coin or "-",
+        reason or "-",
+        _clip(http_status, limit=16) if http_status is not None else "-",
+        _venue_code(response),
+        _venue_msg(response),
+        _clip(requested_leverage, limit=16),
+        _clip(requested_mgn_mode, limit=16),
+        _clip(observed_leverage, limit=32),
+        _clip(observed_mgn_mode, limit=32),
+        exc_type,
+        exc_text,
+    )
 
 
 def _assert_body_is_lever_one(body: str) -> dict[str, Any]:
@@ -118,7 +281,9 @@ def _http_post(url: str, headers: Mapping[str, str], body: str) -> tuple[int, di
     try:
         data = json.loads(raw) if raw else {}
     except json.JSONDecodeError as exc:
-        raise RuntimeError("leverage_set_failed") from exc
+        err = RuntimeError("leverage_set_failed")
+        setattr(err, "http_status", status)
+        raise err from exc
     if not isinstance(data, dict):
         raise RuntimeError("leverage_set_failed")
     return status, data
@@ -231,6 +396,7 @@ def set_leverage_one(
         if okx_symbol:
             _confirm_okx(
                 symbol=okx_symbol,
+                coin=target.coin,
                 credentials=okx_credentials,
                 endpoints=endpoints,
                 poster=poster,
@@ -239,6 +405,7 @@ def set_leverage_one(
         if bybit_symbol:
             _confirm_bybit(
                 symbol=bybit_symbol,
+                coin=target.coin,
                 credentials=bybit_credentials,
                 endpoints=endpoints,
                 poster=poster,
@@ -271,6 +438,14 @@ def set_and_verify_leverage_one(
             raise
         raise RuntimeError("leverage_preflight_failed") from exc
     except Exception as exc:  # noqa: BLE001 — fail closed before setter
+        _log_leverage_step_failed(
+            venue="-",
+            step="preflight",
+            symbol=target.okx_symbol or target.bybit_symbol,
+            coin=target.coin,
+            reason="preflight_failed",
+            exc=exc,
+        )
         raise RuntimeError("leverage_preflight_failed") from exc
     confirmed = set_leverage_one(
         [target],
@@ -298,10 +473,36 @@ def set_and_verify_leverage_one(
         path=okx_path,
         simulated_trading=endpoints.okx_simulated_trading,
     )
-    okx_data = getter(
-        f"{endpoints.okx_rest}{okx_path}", okx_headers, timeout_sec=15.0
-    )
+    try:
+        okx_data = getter(
+            f"{endpoints.okx_rest}{okx_path}", okx_headers, timeout_sec=15.0
+        )
+    except Exception as exc:  # noqa: BLE001 — fail closed, log venue/step
+        _log_leverage_step_failed(
+            venue="okx",
+            step="readback",
+            symbol=target.okx_symbol,
+            coin=target.coin,
+            reason="readback_failed",
+            exc=exc,
+            requested_mgn_mode="cross",
+        )
+        if str(exc) == "leverage_readback_failed":
+            raise
+        raise RuntimeError("leverage_readback_failed") from exc
     if not _okx_readback_is_one(okx_data, target.okx_symbol):
+        row = _row_for_symbol(okx_data, symbol=target.okx_symbol, symbol_key="instId")
+        _log_leverage_step_failed(
+            venue="okx",
+            step="readback",
+            symbol=target.okx_symbol,
+            coin=target.coin,
+            reason="readback_unconfirmed",
+            response=okx_data if isinstance(okx_data, Mapping) else None,
+            requested_mgn_mode="cross",
+            observed_leverage=_field_from_row(row, "lever", "leverage"),
+            observed_mgn_mode=_field_from_row(row, "mgnMode"),
+        )
         raise RuntimeError("leverage_readback_unconfirmed")
 
     query = (
@@ -317,10 +518,73 @@ def set_and_verify_leverage_one(
             get_fn=getter,
         )
     except RuntimeError as exc:
+        _log_leverage_step_failed(
+            venue="bybit",
+            step="readback",
+            symbol=target.bybit_symbol,
+            coin=target.coin,
+            reason="readback_failed",
+            exc=exc,
+        )
         raise RuntimeError("leverage_readback_failed") from exc
     if not _bybit_readback_is_one(bybit_data, target.bybit_symbol):
+        row = _row_for_symbol(
+            bybit_data, symbol=target.bybit_symbol, symbol_key="symbol"
+        )
+        _log_leverage_step_failed(
+            venue="bybit",
+            step="readback",
+            symbol=target.bybit_symbol,
+            coin=target.coin,
+            reason="readback_unconfirmed",
+            response=bybit_data if isinstance(bybit_data, Mapping) else None,
+            observed_leverage=_field_from_row(
+                row, "leverage", "buyLeverage", "sellLeverage"
+            ),
+            observed_mgn_mode=_field_from_row(row, "tradeMode", "marginMode"),
+        )
         raise RuntimeError("leverage_readback_unconfirmed")
     return True
+
+
+def _preflight_get(
+    venue: str,
+    symbol: str,
+    coin: str,
+    fn: Callable[[], Mapping[str, Any]],
+) -> Mapping[str, Any]:
+    try:
+        return fn()
+    except Exception as exc:  # noqa: BLE001 — fail closed, log venue/step
+        _log_leverage_step_failed(
+            venue=venue,
+            step="preflight",
+            symbol=symbol,
+            coin=coin,
+            reason="preflight_get_failed",
+            exc=exc,
+        )
+        raise
+
+
+def _require_preflight_flat(
+    venue: str,
+    symbol: str,
+    coin: str,
+    ok: bool,
+    response: Mapping[str, Any] | None,
+) -> None:
+    if ok:
+        return
+    _log_leverage_step_failed(
+        venue=venue,
+        step="preflight",
+        symbol=symbol,
+        coin=coin,
+        reason="not_flat",
+        response=response if isinstance(response, Mapping) else None,
+    )
+    raise RuntimeError("leverage_preflight_not_flat")
 
 
 def _preflight_flat(
@@ -348,49 +612,89 @@ def _preflight_flat(
         f"category=linear&symbol={target.bybit_symbol}"
         "&settleCoin=USDT&limit=200"
     )
-    bybit_positions = _bybit_get_all_pages(
-        credentials=bybit_credentials,
-        base=endpoints.bybit_rest,
-        path=_BYBIT_POS,
-        query=bybit_position_query,
-        get_fn=get_fn,
+    bybit_positions = _preflight_get(
+        "bybit",
+        target.bybit_symbol,
+        target.coin,
+        lambda: _bybit_get_all_pages(
+            credentials=bybit_credentials,
+            base=endpoints.bybit_rest,
+            path=_BYBIT_POS,
+            query=bybit_position_query,
+            get_fn=get_fn,
+        ),
     )
-    if not _bybit_position_flat(bybit_positions, target.bybit_symbol):
-        raise RuntimeError("leverage_preflight_not_flat")
+    _require_preflight_flat(
+        "bybit",
+        target.bybit_symbol,
+        target.coin,
+        _bybit_position_flat(bybit_positions, target.bybit_symbol),
+        bybit_positions,
+    )
 
-    bybit_orders = _bybit_get_all_pages(
-        credentials=bybit_credentials,
-        base=endpoints.bybit_rest,
-        path=_BYBIT_OPEN,
-        query=(
-            f"category=linear&symbol={target.bybit_symbol}"
-            "&openOnly=0&limit=50"
+    bybit_orders = _preflight_get(
+        "bybit",
+        target.bybit_symbol,
+        target.coin,
+        lambda: _bybit_get_all_pages(
+            credentials=bybit_credentials,
+            base=endpoints.bybit_rest,
+            path=_BYBIT_OPEN,
+            query=(
+                f"category=linear&symbol={target.bybit_symbol}"
+                "&openOnly=0&limit=50"
+            ),
+            get_fn=get_fn,
         ),
-        get_fn=get_fn,
     )
-    if not _bybit_open_orders_flat(bybit_orders, target.bybit_symbol):
-        raise RuntimeError("leverage_preflight_not_flat")
+    _require_preflight_flat(
+        "bybit",
+        target.bybit_symbol,
+        target.coin,
+        _bybit_open_orders_flat(bybit_orders, target.bybit_symbol),
+        bybit_orders,
+    )
 
-    okx_positions = _okx_signed_get(
-        credentials=okx_credentials,
-        base=endpoints.okx_rest,
-        path_with_query=(
-            f"{_OKX_POS}?{urlencode({'instId': target.okx_symbol, 'instType': 'SWAP'})}"
+    okx_positions = _preflight_get(
+        "okx",
+        target.okx_symbol,
+        target.coin,
+        lambda: _okx_signed_get(
+            credentials=okx_credentials,
+            base=endpoints.okx_rest,
+            path_with_query=(
+                f"{_OKX_POS}?{urlencode({'instId': target.okx_symbol, 'instType': 'SWAP'})}"
+            ),
+            http_get_json=get_fn,
         ),
-        http_get_json=get_fn,
     )
-    if not _okx_position_flat(okx_positions, target.okx_symbol):
-        raise RuntimeError("leverage_preflight_not_flat")
-    okx_orders = _okx_signed_get(
-        credentials=okx_credentials,
-        base=endpoints.okx_rest,
-        path_with_query=(
-            f"{_OKX_OPEN}?{urlencode({'instId': target.okx_symbol, 'instType': 'SWAP'})}"
+    _require_preflight_flat(
+        "okx",
+        target.okx_symbol,
+        target.coin,
+        _okx_position_flat(okx_positions, target.okx_symbol),
+        okx_positions,
+    )
+    okx_orders = _preflight_get(
+        "okx",
+        target.okx_symbol,
+        target.coin,
+        lambda: _okx_signed_get(
+            credentials=okx_credentials,
+            base=endpoints.okx_rest,
+            path_with_query=(
+                f"{_OKX_OPEN}?{urlencode({'instId': target.okx_symbol, 'instType': 'SWAP'})}"
+            ),
+            http_get_json=get_fn,
         ),
-        http_get_json=get_fn,
     )
-    if not _okx_open_orders_flat(okx_orders, target.okx_symbol):
-        raise RuntimeError("leverage_preflight_not_flat")
+    _require_preflight_flat(
+        "okx",
+        target.okx_symbol,
+        target.coin,
+        _okx_open_orders_flat(okx_orders, target.okx_symbol),
+        okx_orders,
+    )
 
 
 def _bybit_get_all_pages(
@@ -506,17 +810,45 @@ def _confirm_okx(
     endpoints: VenueEndpoints,
     poster: PostFn,
     confirmed: dict[tuple[str, str], str],
+    coin: str = "",
 ) -> None:
     path = OKX_SET_LEVERAGE_PATH
     body = _okx_body(symbol)
     headers = _okx_headers(credentials=credentials, path=path, body=body)
     url = f"{endpoints.okx_rest}{path}"
     try:
-        _status, data = poster(url, headers, body)
-    except Exception:  # noqa: BLE001 — fail closed, no send later
+        status, data = poster(url, headers, body)
+    except Exception as exc:  # noqa: BLE001 — fail closed, no send later
+        _log_leverage_step_failed(
+            venue="okx",
+            step="set",
+            symbol=symbol,
+            coin=coin,
+            reason="set_exception",
+            exc=exc,
+            requested_mgn_mode="cross",
+        )
         return
-    if _okx_confirmed(data):
+    if isinstance(data, Mapping) and _okx_confirmed(data):
         confirmed[("okx", symbol)] = LEVER_ONE
+        return
+    row = _row_for_symbol(
+        data if isinstance(data, Mapping) else None,
+        symbol=symbol,
+        symbol_key="instId",
+    )
+    _log_leverage_step_failed(
+        venue="okx",
+        step="set",
+        symbol=symbol,
+        coin=coin,
+        reason="set_unconfirmed",
+        http_status=status,
+        response=data if isinstance(data, Mapping) else None,
+        requested_mgn_mode="cross",
+        observed_leverage=_field_from_row(row, "lever"),
+        observed_mgn_mode=_field_from_row(row, "mgnMode"),
+    )
 
 
 def _confirm_bybit(
@@ -526,14 +858,42 @@ def _confirm_bybit(
     endpoints: VenueEndpoints,
     poster: PostFn,
     confirmed: dict[tuple[str, str], str],
+    coin: str = "",
 ) -> None:
     path = BYBIT_SET_LEVERAGE_PATH
     body = _bybit_body(symbol)
     headers = _bybit_headers(credentials=credentials, body=body)
     url = f"{endpoints.bybit_rest}{path}"
     try:
-        _status, data = poster(url, headers, body)
-    except Exception:  # noqa: BLE001 — fail closed, no send later
+        status, data = poster(url, headers, body)
+    except Exception as exc:  # noqa: BLE001 — fail closed, no send later
+        _log_leverage_step_failed(
+            venue="bybit",
+            step="set",
+            symbol=symbol,
+            coin=coin,
+            reason="set_exception",
+            exc=exc,
+        )
         return
-    if _bybit_confirmed(data):
+    if isinstance(data, Mapping) and _bybit_confirmed(data):
         confirmed[("bybit", symbol)] = LEVER_ONE
+        return
+    row = _row_for_symbol(
+        data if isinstance(data, Mapping) else None,
+        symbol=symbol,
+        symbol_key="symbol",
+    )
+    _log_leverage_step_failed(
+        venue="bybit",
+        step="set",
+        symbol=symbol,
+        coin=coin,
+        reason="set_unconfirmed",
+        http_status=status,
+        response=data if isinstance(data, Mapping) else None,
+        observed_leverage=_field_from_row(
+            row, "leverage", "buyLeverage", "sellLeverage"
+        ),
+        observed_mgn_mode=_field_from_row(row, "tradeMode", "marginMode"),
+    )
