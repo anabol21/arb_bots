@@ -1,0 +1,10 @@
+{
+  "settlements": 490860,
+  "by_coin_hours": 330706,
+  "by_coin_both": 160154,
+  "by_exchange_hours": 4365,
+  "coins": 450,
+  "errors": 0,
+  "window_start_utc": "2026-04-01",
+  "window_end_utc_exclusive": "2026-10-23"
+}

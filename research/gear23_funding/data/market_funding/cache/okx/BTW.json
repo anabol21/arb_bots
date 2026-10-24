@@ -1,0 +1,1 @@
+{"exchange": "okx", "base_coin": "BTW", "symbol": "BTW-USDT-SWAP", "start_ms": 1775001600000, "end_ms": 1792713600000, "complete": true, "n": 1, "rows": [{"ts_ms": 1792670400000, "funding_rate": -0.0001602652563639, "realized_rate": -0.0001602652563639}]}

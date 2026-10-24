@@ -1,0 +1,13 @@
+{
+  "coins": 336,
+  "missing_symbol": [],
+  "collector_not_in_joint": [
+    "ICX",
+    "LRC"
+  ],
+  "errors": 0,
+  "window_start_utc": "2026-07-20",
+  "window_end_utc_exclusive": "2026-10-23",
+  "candle_start_ms": 1784502000000,
+  "end_ms": 1792713600000
+}

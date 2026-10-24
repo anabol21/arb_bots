@@ -1,0 +1,57 @@
+{
+  "paired_round_trips": 25,
+  "pairing_problems": [
+    {
+      "problem": "close_without_open",
+      "coin": "RVN",
+      "intent_id": "aa115561-7ddf-4717-bc90-ae602f504a0f",
+      "ts": 1791240126464.0
+    },
+    {
+      "problem": "open_without_close",
+      "coin": "RSR",
+      "intent_id": "7a009ac6-c3ce-410a-a4cb-ef1a54896e42",
+      "ts": 1791781038072.0
+    }
+  ],
+  "funding_events_assigned": 96,
+  "funding_events_unassigned": 4,
+  "fee_complete_trades": 25,
+  "price_pp_sum": 12.465,
+  "price_plus_funding_pp_sum": 1.4685,
+  "full_pp_sum": -5.8887,
+  "full_pp_sum_near_kept": -1.9264,
+  "full_pp_sum_hurdle_kept": -2.3381,
+  "near_excluded": 5,
+  "hurdle_excluded": 1,
+  "price_loss_then_funding_nonnegative": 0,
+  "still_negative_after_funding": 7,
+  "hold_under_15m_and_price_pp_under_0.05": 0,
+  "median_price_pp": 0.5035,
+  "median_price_plus_funding_pp": 0.2476,
+  "median_full_pp_when_fee_known": -0.0515,
+  "median_positive_full_pp": 0.15439999999999998,
+  "variant_near_kept": 20,
+  "variant_near_price_plus_funding_pp_sum": 3.9667,
+  "variant_hurdle_known": 15,
+  "variant_hurdle_kept": 14,
+  "variant_hurdle_price_plus_funding_pp_sum": 1.7924,
+  "sign_check": {
+    "checked": 56,
+    "fee_rate_same_sign_as_public": 0,
+    "fee_rate_flipped_vs_public": 56,
+    "unmatched_public": 2,
+    "cash_matches_row_formula": 56,
+    "cash_matches_standard_public": 56
+  },
+  "funding_wiped_positive_price": 5,
+  "public_bybit_points": 1075,
+  "public_okx_points": 1045,
+  "denominator": "entry Bybit fill price × Bybit filled qty, percent = USDT / that notional × 100",
+  "manual_labels_not_applied": {
+    "funding_converged_losses": 12,
+    "short_spread": 5,
+    "normal_profit": 9,
+    "normal_median_pct": 0.15
+  }
+}

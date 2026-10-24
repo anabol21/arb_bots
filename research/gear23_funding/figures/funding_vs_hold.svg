@@ -1,0 +1,42 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="820" height="460" viewBox="0 0 820 460">
+<rect width="820" height="460" fill="#f8fafc"/>
+<text x="48" y="32" font-family="ui-sans-serif,sans-serif" font-size="16" fill="#0f172a">Фактический funding внутри удержания</text>
+<text x="410" y="440" text-anchor="middle" font-family="ui-sans-serif,sans-serif" font-size="12" fill="#334155">Удержание, часы</text>
+<text x="18" y="230" transform="rotate(-90 18 230)" text-anchor="middle" font-family="ui-sans-serif,sans-serif" font-size="12" fill="#334155">Funding обеих ног, % одного номинала</text>
+<line x1="64" y1="76.0" x2="790" y2="76.0" stroke="#94a3b8"/>
+<circle cx="135.1" cy="76.0" r="5" fill="#0f766e"/>
+<circle cx="790.0" cy="140.9" r="5" fill="#b45309"/>
+<text x="796.0" y="134.9" font-size="11" font-family="ui-sans-serif,sans-serif" fill="#334155">TRUST</text>
+<circle cx="330.5" cy="82.7" r="5" fill="#b45309"/>
+<circle cx="124.3" cy="76.0" r="5" fill="#0f766e"/>
+<circle cx="71.6" cy="76.0" r="5" fill="#0f766e"/>
+<circle cx="98.6" cy="111.5" r="5" fill="#b45309"/>
+<circle cx="420.0" cy="174.6" r="5" fill="#b45309"/>
+<text x="426.0" y="168.6" font-size="11" font-family="ui-sans-serif,sans-serif" fill="#334155">RSR</text>
+<circle cx="216.0" cy="123.3" r="5" fill="#b45309"/>
+<text x="222.0" y="117.3" font-size="11" font-family="ui-sans-serif,sans-serif" fill="#334155">WAL</text>
+<circle cx="84.1" cy="76.0" r="5" fill="#0f766e"/>
+<circle cx="164.2" cy="148.8" r="5" fill="#b45309"/>
+<text x="170.2" y="142.8" font-size="11" font-family="ui-sans-serif,sans-serif" fill="#334155">RSR</text>
+<circle cx="104.8" cy="115.9" r="5" fill="#b45309"/>
+<circle cx="73.3" cy="76.0" r="5" fill="#0f766e"/>
+<circle cx="72.5" cy="76.0" r="5" fill="#0f766e"/>
+<circle cx="155.0" cy="126.6" r="5" fill="#b45309"/>
+<text x="161.0" y="120.6" font-size="11" font-family="ui-sans-serif,sans-serif" fill="#334155">BLUR</text>
+<circle cx="117.7" cy="96.3" r="5" fill="#b45309"/>
+<circle cx="218.0" cy="135.6" r="5" fill="#b45309"/>
+<text x="224.0" y="129.6" font-size="11" font-family="ui-sans-serif,sans-serif" fill="#334155">SAND</text>
+<circle cx="121.8" cy="98.4" r="5" fill="#b45309"/>
+<circle cx="196.7" cy="91.0" r="5" fill="#b45309"/>
+<circle cx="86.5" cy="142.5" r="5" fill="#b45309"/>
+<text x="92.5" y="136.5" font-size="11" font-family="ui-sans-serif,sans-serif" fill="#334155">MEW</text>
+<circle cx="97.6" cy="76.0" r="5" fill="#0f766e"/>
+<circle cx="174.9" cy="376.0" r="5" fill="#b45309"/>
+<text x="180.9" y="370.0" font-size="11" font-family="ui-sans-serif,sans-serif" fill="#334155">DOOD</text>
+<circle cx="97.6" cy="304.5" r="5" fill="#b45309"/>
+<text x="103.6" y="298.5" font-size="11" font-family="ui-sans-serif,sans-serif" fill="#334155">IOST</text>
+<circle cx="70.2" cy="76.0" r="5" fill="#0f766e"/>
+<circle cx="73.3" cy="76.0" r="5" fill="#0f766e"/>
+<circle cx="229.3" cy="142.7" r="5" fill="#b45309"/>
+<text x="235.3" y="136.7" font-size="11" font-family="ui-sans-serif,sans-serif" fill="#334155">IOST</text>
+</svg>

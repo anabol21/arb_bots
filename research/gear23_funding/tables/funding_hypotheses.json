@@ -1,0 +1,2240 @@
+{
+  "self_check": {
+    "ok": true,
+    "pearson_identical": 1.0,
+    "spearman_reversed": -1.0,
+    "median_1_2_3_4": 2.5,
+    "mad_1_2_3_4_5": 1.0
+  },
+  "window_start_utc": "2026-07-20",
+  "method": "research/gear23_funding/METHOD.md",
+  "min_per_coin": 30,
+  "min_pooled": 200,
+  "H4": {
+    "status": "not_run",
+    "reason": "spread_long needs backup ticks. Local parquet under research/testdata is only 2026-08-08. Backup was not copied."
+  },
+  "H7": {
+    "status": "not_run",
+    "reason": "spread_long needs backup ticks. Local parquet under research/testdata is only 2026-08-08. Backup was not copied."
+  },
+  "slices": {
+    "collector": {
+      "n_coins_requested": 337,
+      "n_coins_with_rows": 335,
+      "n_rows": 138520,
+      "coins_without_series": [
+        "ICX",
+        "LRC"
+      ],
+      "coins_absent_from_slice": [
+        "ICX",
+        "LRC"
+      ],
+      "coins_with_rows": [
+        {
+          "coin": "0G",
+          "n": 564
+        },
+        {
+          "coin": "1INCH",
+          "n": 281
+        },
+        {
+          "coin": "2Z",
+          "n": 564
+        },
+        {
+          "coin": "A",
+          "n": 564
+        },
+        {
+          "coin": "AAOI",
+          "n": 281
+        },
+        {
+          "coin": "AAPL",
+          "n": 281
+        },
+        {
+          "coin": "AAVE",
+          "n": 281
+        },
+        {
+          "coin": "ACH",
+          "n": 564
+        },
+        {
+          "coin": "ACT",
+          "n": 564
+        },
+        {
+          "coin": "ACU",
+          "n": 564
+        },
+        {
+          "coin": "ADA",
+          "n": 281
+        },
+        {
+          "coin": "ADBE",
+          "n": 281
+        },
+        {
+          "coin": "AERO",
+          "n": 564
+        },
+        {
+          "coin": "AEVO",
+          "n": 564
+        },
+        {
+          "coin": "AGLD",
+          "n": 282
+        },
+        {
+          "coin": "AIXBT",
+          "n": 564
+        },
+        {
+          "coin": "ALAB",
+          "n": 281
+        },
+        {
+          "coin": "ALGO",
+          "n": 281
+        },
+        {
+          "coin": "ALLO",
+          "n": 564
+        },
+        {
+          "coin": "AMAT",
+          "n": 281
+        },
+        {
+          "coin": "AMZN",
+          "n": 281
+        },
+        {
+          "coin": "ANIME",
+          "n": 564
+        },
+        {
+          "coin": "APE",
+          "n": 281
+        },
+        {
+          "coin": "API3",
+          "n": 564
+        },
+        {
+          "coin": "APR",
+          "n": 564
+        },
+        {
+          "coin": "APT",
+          "n": 281
+        },
+        {
+          "coin": "AR",
+          "n": 281
+        },
+        {
+          "coin": "ARB",
+          "n": 281
+        },
+        {
+          "coin": "ARKM",
+          "n": 281
+        },
+        {
+          "coin": "ARM",
+          "n": 281
+        },
+        {
+          "coin": "ARX",
+          "n": 564
+        },
+        {
+          "coin": "ASML",
+          "n": 281
+        },
+        {
+          "coin": "ASTER",
+          "n": 564
+        },
+        {
+          "coin": "ASTS",
+          "n": 281
+        },
+        {
+          "coin": "AT",
+          "n": 564
+        },
+        {
+          "coin": "ATH",
+          "n": 564
+        },
+        {
+          "coin": "ATOM",
+          "n": 281
+        },
+        {
+          "coin": "AUCTION",
+          "n": 564
+        },
+        {
+          "coin": "AVAX",
+          "n": 281
+        },
+        {
+          "coin": "AVGO",
+          "n": 281
+        },
+        {
+          "coin": "AVNT",
+          "n": 564
+        },
+        {
+          "coin": "AXS",
+          "n": 282
+        },
+        {
+          "coin": "AXTI",
+          "n": 281
+        },
+        {
+          "coin": "AZTEC",
+          "n": 564
+        },
+        {
+          "coin": "BABY",
+          "n": 564
+        },
+        {
+          "coin": "BAND",
+          "n": 281
+        },
+        {
+          "coin": "BARD",
+          "n": 564
+        },
+        {
+          "coin": "BASED",
+          "n": 564
+        },
+        {
+          "coin": "BAT",
+          "n": 281
+        },
+        {
+          "coin": "BCH",
+          "n": 281
+        },
+        {
+          "coin": "BE",
+          "n": 281
+        },
+        {
+          "coin": "BEAT",
+          "n": 564
+        },
+        {
+          "coin": "BERA",
+          "n": 564
+        },
+        {
+          "coin": "BICO",
+          "n": 281
+        },
+        {
+          "coin": "BIGTIME",
+          "n": 564
+        },
+        {
+          "coin": "BILL",
+          "n": 564
+        },
+        {
+          "coin": "BIO",
+          "n": 564
+        },
+        {
+          "coin": "BLEND",
+          "n": 564
+        },
+        {
+          "coin": "BLUR",
+          "n": 282
+        },
+        {
+          "coin": "BMNR",
+          "n": 281
+        },
+        {
+          "coin": "BNB",
+          "n": 281
+        },
+        {
+          "coin": "BOME",
+          "n": 564
+        },
+        {
+          "coin": "BOT",
+          "n": 281
+        },
+        {
+          "coin": "BRETT",
+          "n": 564
+        },
+        {
+          "coin": "BREV",
+          "n": 564
+        },
+        {
+          "coin": "BSB",
+          "n": 564
+        },
+        {
+          "coin": "BSP",
+          "n": 281
+        },
+        {
+          "coin": "BTC",
+          "n": 281
+        },
+        {
+          "coin": "BZ",
+          "n": 282
+        },
+        {
+          "coin": "CAP",
+          "n": 564
+        },
+        {
+          "coin": "CBRS",
+          "n": 281
+        },
+        {
+          "coin": "CC",
+          "n": 564
+        },
+        {
+          "coin": "CELO",
+          "n": 281
+        },
+        {
+          "coin": "CFX",
+          "n": 281
+        },
+        {
+          "coin": "CHIP",
+          "n": 564
+        },
+        {
+          "coin": "CHZ",
+          "n": 281
+        },
+        {
+          "coin": "CIEN",
+          "n": 281
+        },
+        {
+          "coin": "CL",
+          "n": 336
+        },
+        {
+          "coin": "COAI",
+          "n": 564
+        },
+        {
+          "coin": "COHR",
+          "n": 281
+        },
+        {
+          "coin": "COIN",
+          "n": 281
+        },
+        {
+          "coin": "COMP",
+          "n": 281
+        },
+        {
+          "coin": "CORE",
+          "n": 281
+        },
+        {
+          "coin": "COST",
+          "n": 281
+        },
+        {
+          "coin": "CRCL",
+          "n": 281
+        },
+        {
+          "coin": "CRDO",
+          "n": 281
+        },
+        {
+          "coin": "CRO",
+          "n": 281
+        },
+        {
+          "coin": "CRV",
+          "n": 281
+        },
+        {
+          "coin": "CRWD",
+          "n": 281
+        },
+        {
+          "coin": "CRWV",
+          "n": 281
+        },
+        {
+          "coin": "CSCO",
+          "n": 281
+        },
+        {
+          "coin": "CVX",
+          "n": 564
+        },
+        {
+          "coin": "DASH",
+          "n": 282
+        },
+        {
+          "coin": "DATA",
+          "n": 564
+        },
+        {
+          "coin": "DELL",
+          "n": 281
+        },
+        {
+          "coin": "DOGE",
+          "n": 281
+        },
+        {
+          "coin": "DOOD",
+          "n": 564
+        },
+        {
+          "coin": "DOT",
+          "n": 281
+        },
+        {
+          "coin": "DRAM",
+          "n": 281
+        },
+        {
+          "coin": "DYDX",
+          "n": 281
+        },
+        {
+          "coin": "EDEN",
+          "n": 564
+        },
+        {
+          "coin": "EDGE",
+          "n": 564
+        },
+        {
+          "coin": "EGLD",
+          "n": 281
+        },
+        {
+          "coin": "EIGEN",
+          "n": 564
+        },
+        {
+          "coin": "ENA",
+          "n": 524
+        },
+        {
+          "coin": "ENJ",
+          "n": 282
+        },
+        {
+          "coin": "ENS",
+          "n": 281
+        },
+        {
+          "coin": "ENSO",
+          "n": 564
+        },
+        {
+          "coin": "ESP",
+          "n": 564
+        },
+        {
+          "coin": "ETC",
+          "n": 281
+        },
+        {
+          "coin": "ETH",
+          "n": 281
+        },
+        {
+          "coin": "ETHFI",
+          "n": 564
+        },
+        {
+          "coin": "EWJ",
+          "n": 281
+        },
+        {
+          "coin": "EWT",
+          "n": 281
+        },
+        {
+          "coin": "EWY",
+          "n": 281
+        },
+        {
+          "coin": "F",
+          "n": 564
+        },
+        {
+          "coin": "FARTCOIN",
+          "n": 564
+        },
+        {
+          "coin": "FIL",
+          "n": 281
+        },
+        {
+          "coin": "FLNC",
+          "n": 281
+        },
+        {
+          "coin": "FLOW",
+          "n": 282
+        },
+        {
+          "coin": "FOGO",
+          "n": 564
+        },
+        {
+          "coin": "GALA",
+          "n": 281
+        },
+        {
+          "coin": "GAS",
+          "n": 564
+        },
+        {
+          "coin": "GEV",
+          "n": 281
+        },
+        {
+          "coin": "GIGGLE",
+          "n": 564
+        },
+        {
+          "coin": "GLM",
+          "n": 564
+        },
+        {
+          "coin": "GLW",
+          "n": 281
+        },
+        {
+          "coin": "GMT",
+          "n": 282
+        },
+        {
+          "coin": "GMX",
+          "n": 281
+        },
+        {
+          "coin": "GOOGL",
+          "n": 281
+        },
+        {
+          "coin": "GPS",
+          "n": 564
+        },
+        {
+          "coin": "GRAM",
+          "n": 564
+        },
+        {
+          "coin": "GRASS",
+          "n": 564
+        },
+        {
+          "coin": "GRT",
+          "n": 281
+        },
+        {
+          "coin": "H",
+          "n": 564
+        },
+        {
+          "coin": "HBAR",
+          "n": 281
+        },
+        {
+          "coin": "HIMS",
+          "n": 281
+        },
+        {
+          "coin": "HMSTR",
+          "n": 564
+        },
+        {
+          "coin": "HOME",
+          "n": 564
+        },
+        {
+          "coin": "HOOD",
+          "n": 281
+        },
+        {
+          "coin": "HPE",
+          "n": 281
+        },
+        {
+          "coin": "HUMA",
+          "n": 564
+        },
+        {
+          "coin": "HYPE",
+          "n": 281
+        },
+        {
+          "coin": "HYUNDAI",
+          "n": 281
+        },
+        {
+          "coin": "IBM",
+          "n": 281
+        },
+        {
+          "coin": "ICP",
+          "n": 281
+        },
+        {
+          "coin": "IMX",
+          "n": 564
+        },
+        {
+          "coin": "INIT",
+          "n": 564
+        },
+        {
+          "coin": "INJ",
+          "n": 281
+        },
+        {
+          "coin": "INTC",
+          "n": 281
+        },
+        {
+          "coin": "IOST",
+          "n": 319
+        },
+        {
+          "coin": "IOTA",
+          "n": 281
+        },
+        {
+          "coin": "IREN",
+          "n": 281
+        },
+        {
+          "coin": "IRYS",
+          "n": 564
+        },
+        {
+          "coin": "IWM",
+          "n": 281
+        },
+        {
+          "coin": "JELLYJELLY",
+          "n": 564
+        },
+        {
+          "coin": "JTO",
+          "n": 564
+        },
+        {
+          "coin": "JUP",
+          "n": 564
+        },
+        {
+          "coin": "KAITO",
+          "n": 564
+        },
+        {
+          "coin": "KAT",
+          "n": 564
+        },
+        {
+          "coin": "KGEN",
+          "n": 564
+        },
+        {
+          "coin": "KITE",
+          "n": 564
+        },
+        {
+          "coin": "KLAC",
+          "n": 281
+        },
+        {
+          "coin": "KMNO",
+          "n": 564
+        },
+        {
+          "coin": "KORU",
+          "n": 281
+        },
+        {
+          "coin": "KSM",
+          "n": 282
+        },
+        {
+          "coin": "LA",
+          "n": 564
+        },
+        {
+          "coin": "LAB",
+          "n": 564
+        },
+        {
+          "coin": "LDO",
+          "n": 281
+        },
+        {
+          "coin": "LIGHT",
+          "n": 564
+        },
+        {
+          "coin": "LINEA",
+          "n": 564
+        },
+        {
+          "coin": "LINK",
+          "n": 281
+        },
+        {
+          "coin": "LIT",
+          "n": 564
+        },
+        {
+          "coin": "LITE",
+          "n": 281
+        },
+        {
+          "coin": "LLY",
+          "n": 281
+        },
+        {
+          "coin": "LPT",
+          "n": 564
+        },
+        {
+          "coin": "LQTY",
+          "n": 281
+        },
+        {
+          "coin": "LRCX",
+          "n": 281
+        },
+        {
+          "coin": "LTC",
+          "n": 281
+        },
+        {
+          "coin": "MAGIC",
+          "n": 564
+        },
+        {
+          "coin": "MANA",
+          "n": 281
+        },
+        {
+          "coin": "MASK",
+          "n": 281
+        },
+        {
+          "coin": "ME",
+          "n": 564
+        },
+        {
+          "coin": "MEGA",
+          "n": 564
+        },
+        {
+          "coin": "MEME",
+          "n": 564
+        },
+        {
+          "coin": "MERL",
+          "n": 282
+        },
+        {
+          "coin": "MET",
+          "n": 564
+        },
+        {
+          "coin": "META",
+          "n": 281
+        },
+        {
+          "coin": "METIS",
+          "n": 564
+        },
+        {
+          "coin": "MEW",
+          "n": 564
+        },
+        {
+          "coin": "MINA",
+          "n": 564
+        },
+        {
+          "coin": "MMT",
+          "n": 564
+        },
+        {
+          "coin": "MON",
+          "n": 282
+        },
+        {
+          "coin": "MOODENG",
+          "n": 564
+        },
+        {
+          "coin": "MORPHO",
+          "n": 564
+        },
+        {
+          "coin": "MOVE",
+          "n": 564
+        },
+        {
+          "coin": "MRVL",
+          "n": 281
+        },
+        {
+          "coin": "MSFT",
+          "n": 281
+        },
+        {
+          "coin": "MSTR",
+          "n": 281
+        },
+        {
+          "coin": "MU",
+          "n": 281
+        },
+        {
+          "coin": "MUBARAK",
+          "n": 564
+        },
+        {
+          "coin": "MUU",
+          "n": 281
+        },
+        {
+          "coin": "MVLL",
+          "n": 281
+        },
+        {
+          "coin": "NBIS",
+          "n": 281
+        },
+        {
+          "coin": "NEAR",
+          "n": 281
+        },
+        {
+          "coin": "NEO",
+          "n": 281
+        },
+        {
+          "coin": "NFLX",
+          "n": 281
+        },
+        {
+          "coin": "NIGHT",
+          "n": 564
+        },
+        {
+          "coin": "NMR",
+          "n": 578
+        },
+        {
+          "coin": "NOT",
+          "n": 564
+        },
+        {
+          "coin": "NOW",
+          "n": 281
+        },
+        {
+          "coin": "NVDA",
+          "n": 281
+        },
+        {
+          "coin": "O",
+          "n": 564
+        },
+        {
+          "coin": "OKB",
+          "n": 564
+        },
+        {
+          "coin": "ONDO",
+          "n": 524
+        },
+        {
+          "coin": "ONDS",
+          "n": 281
+        },
+        {
+          "coin": "ONT",
+          "n": 564
+        },
+        {
+          "coin": "OP",
+          "n": 281
+        },
+        {
+          "coin": "OPG",
+          "n": 564
+        },
+        {
+          "coin": "OPN",
+          "n": 564
+        },
+        {
+          "coin": "ORCL",
+          "n": 281
+        },
+        {
+          "coin": "ORDER",
+          "n": 282
+        },
+        {
+          "coin": "ORDI",
+          "n": 564
+        },
+        {
+          "coin": "PARTI",
+          "n": 564
+        },
+        {
+          "coin": "PENDLE",
+          "n": 282
+        },
+        {
+          "coin": "PENGU",
+          "n": 564
+        },
+        {
+          "coin": "PEOPLE",
+          "n": 281
+        },
+        {
+          "coin": "PIEVERSE",
+          "n": 564
+        },
+        {
+          "coin": "PIPPIN",
+          "n": 564
+        },
+        {
+          "coin": "PLTR",
+          "n": 281
+        },
+        {
+          "coin": "PLUME",
+          "n": 564
+        },
+        {
+          "coin": "PNUT",
+          "n": 564
+        },
+        {
+          "coin": "POET",
+          "n": 281
+        },
+        {
+          "coin": "POL",
+          "n": 564
+        },
+        {
+          "coin": "POPCAT",
+          "n": 564
+        },
+        {
+          "coin": "PROVE",
+          "n": 564
+        },
+        {
+          "coin": "PYTH",
+          "n": 564
+        },
+        {
+          "coin": "QCOM",
+          "n": 281
+        },
+        {
+          "coin": "QQQ",
+          "n": 281
+        },
+        {
+          "coin": "QTUM",
+          "n": 282
+        },
+        {
+          "coin": "RAVE",
+          "n": 564
+        },
+        {
+          "coin": "RDW",
+          "n": 281
+        },
+        {
+          "coin": "RE",
+          "n": 564
+        },
+        {
+          "coin": "RECALL",
+          "n": 564
+        },
+        {
+          "coin": "RENDER",
+          "n": 564
+        },
+        {
+          "coin": "RESOLV",
+          "n": 564
+        },
+        {
+          "coin": "RIVER",
+          "n": 564
+        },
+        {
+          "coin": "RKLB",
+          "n": 281
+        },
+        {
+          "coin": "ROBO",
+          "n": 564
+        },
+        {
+          "coin": "RSR",
+          "n": 313
+        },
+        {
+          "coin": "RVN",
+          "n": 407
+        },
+        {
+          "coin": "S",
+          "n": 564
+        },
+        {
+          "coin": "SAHARA",
+          "n": 564
+        },
+        {
+          "coin": "SAMSUNG",
+          "n": 281
+        },
+        {
+          "coin": "SAND",
+          "n": 304
+        },
+        {
+          "coin": "SAPIEN",
+          "n": 564
+        },
+        {
+          "coin": "SEI",
+          "n": 282
+        },
+        {
+          "coin": "SENT",
+          "n": 564
+        },
+        {
+          "coin": "SHAZ",
+          "n": 281
+        },
+        {
+          "coin": "SHELL",
+          "n": 564
+        },
+        {
+          "coin": "SIGN",
+          "n": 564
+        },
+        {
+          "coin": "SKHY",
+          "n": 281
+        },
+        {
+          "coin": "SKHYNIX",
+          "n": 281
+        },
+        {
+          "coin": "SKY",
+          "n": 564
+        },
+        {
+          "coin": "SLX",
+          "n": 564
+        },
+        {
+          "coin": "SMCI",
+          "n": 281
+        },
+        {
+          "coin": "SMH",
+          "n": 281
+        },
+        {
+          "coin": "SNDK",
+          "n": 281
+        },
+        {
+          "coin": "SNX",
+          "n": 281
+        },
+        {
+          "coin": "SNXX",
+          "n": 281
+        },
+        {
+          "coin": "SOL",
+          "n": 281
+        },
+        {
+          "coin": "SONY",
+          "n": 281
+        },
+        {
+          "coin": "SOON",
+          "n": 564
+        },
+        {
+          "coin": "SOPH",
+          "n": 578
+        },
+        {
+          "coin": "SOXL",
+          "n": 281
+        },
+        {
+          "coin": "SPACE",
+          "n": 564
+        },
+        {
+          "coin": "SPCX",
+          "n": 281
+        },
+        {
+          "coin": "SPK",
+          "n": 564
+        },
+        {
+          "coin": "SPX",
+          "n": 564
+        },
+        {
+          "coin": "SPY",
+          "n": 281
+        },
+        {
+          "coin": "SQQQ",
+          "n": 281
+        },
+        {
+          "coin": "SSV",
+          "n": 281
+        },
+        {
+          "coin": "STABLE",
+          "n": 564
+        },
+        {
+          "coin": "STRK",
+          "n": 564
+        },
+        {
+          "coin": "STX",
+          "n": 281
+        },
+        {
+          "coin": "SUI",
+          "n": 281
+        },
+        {
+          "coin": "SUSHI",
+          "n": 281
+        },
+        {
+          "coin": "SYRUP",
+          "n": 564
+        },
+        {
+          "coin": "TAO",
+          "n": 281
+        },
+        {
+          "coin": "TER",
+          "n": 281
+        },
+        {
+          "coin": "THETA",
+          "n": 281
+        },
+        {
+          "coin": "TIA",
+          "n": 564
+        },
+        {
+          "coin": "TQQQ",
+          "n": 281
+        },
+        {
+          "coin": "TRB",
+          "n": 564
+        },
+        {
+          "coin": "TRIA",
+          "n": 564
+        },
+        {
+          "coin": "TRUMP",
+          "n": 564
+        },
+        {
+          "coin": "TRUST",
+          "n": 564
+        },
+        {
+          "coin": "TRUTH",
+          "n": 564
+        },
+        {
+          "coin": "TRX",
+          "n": 281
+        },
+        {
+          "coin": "TSLA",
+          "n": 281
+        },
+        {
+          "coin": "TSM",
+          "n": 281
+        },
+        {
+          "coin": "TTWO",
+          "n": 281
+        },
+        {
+          "coin": "UB",
+          "n": 564
+        },
+        {
+          "coin": "UMA",
+          "n": 564
+        },
+        {
+          "coin": "UNI",
+          "n": 281
+        },
+        {
+          "coin": "USAR",
+          "n": 281
+        },
+        {
+          "coin": "USELESS",
+          "n": 564
+        },
+        {
+          "coin": "UVXY",
+          "n": 281
+        },
+        {
+          "coin": "VANA",
+          "n": 564
+        },
+        {
+          "coin": "VIRTUAL",
+          "n": 564
+        },
+        {
+          "coin": "VRT",
+          "n": 281
+        },
+        {
+          "coin": "VVV",
+          "n": 564
+        },
+        {
+          "coin": "W",
+          "n": 564
+        },
+        {
+          "coin": "WAL",
+          "n": 564
+        },
+        {
+          "coin": "WCT",
+          "n": 564
+        },
+        {
+          "coin": "WDC",
+          "n": 281
+        },
+        {
+          "coin": "WET",
+          "n": 564
+        },
+        {
+          "coin": "WIF",
+          "n": 564
+        },
+        {
+          "coin": "WLD",
+          "n": 281
+        },
+        {
+          "coin": "WLFI",
+          "n": 564
+        },
+        {
+          "coin": "WOO",
+          "n": 281
+        },
+        {
+          "coin": "XAG",
+          "n": 281
+        },
+        {
+          "coin": "XAU",
+          "n": 281
+        },
+        {
+          "coin": "XBI",
+          "n": 281
+        },
+        {
+          "coin": "XLE",
+          "n": 281
+        },
+        {
+          "coin": "XLM",
+          "n": 281
+        },
+        {
+          "coin": "XPL",
+          "n": 564
+        },
+        {
+          "coin": "XRP",
+          "n": 281
+        },
+        {
+          "coin": "XTZ",
+          "n": 281
+        },
+        {
+          "coin": "YB",
+          "n": 564
+        },
+        {
+          "coin": "YFI",
+          "n": 281
+        },
+        {
+          "coin": "YGG",
+          "n": 564
+        },
+        {
+          "coin": "ZAMA",
+          "n": 564
+        },
+        {
+          "coin": "ZBT",
+          "n": 564
+        },
+        {
+          "coin": "ZEC",
+          "n": 281
+        }
+      ],
+      "estimable_pooled": true,
+      "estimable_per_coin": true,
+      "status": null,
+      "H1": {
+        "same_sign_share": 0.840131389,
+        "correlation": {
+          "n_points": 138520,
+          "n_coins_with_pairs": 335,
+          "per_coin": {
+            "min_n": 30,
+            "n_coins": 335,
+            "n_pearson": 333,
+            "n_spearman": 333,
+            "median_pearson": 0.4943992767,
+            "median_spearman": 0.4310714684,
+            "share_pearson_positive": 0.993993994,
+            "share_spearman_positive": 0.990990991
+          },
+          "pooled": {
+            "n": 138520,
+            "min_n": 200,
+            "estimable": true,
+            "pearson": 0.8260813601,
+            "spearman": 0.5919309768
+          }
+        }
+      },
+      "H2": {
+        "bybit": {
+          "n": 138520,
+          "mean": 0.0001201968,
+          "median": 0.01,
+          "mad": 0.0,
+          "mean_over_mad": null
+        },
+        "okx": {
+          "n": 138520,
+          "mean": 0.0004713278,
+          "median": 0.01,
+          "mad": 0.0,
+          "mean_over_mad": null
+        },
+        "gap": {
+          "n": 138520,
+          "mean": -0.000351131,
+          "median": 0.0,
+          "mad": 0.0,
+          "mean_over_mad": null
+        },
+        "description": {
+          "note": "Доля строк, где ставка равна 0.01 и где gap равен 0. Описание массы в точке, не замена MAD.",
+          "share_bybit_rate_eq_0_01": 0.5898065261,
+          "share_okx_rate_eq_0_01": 0.557298585,
+          "share_gap_eq_0": 0.6015521224
+        }
+      },
+      "H3": {
+        "autocorr": {
+          "n_points": 138185,
+          "n_coins_with_pairs": 335,
+          "per_coin": {
+            "min_n": 30,
+            "n_coins": 335,
+            "n_pearson": 335,
+            "n_spearman": 335,
+            "median_pearson": 0.2630970366,
+            "median_spearman": 0.3105037338,
+            "share_pearson_positive": 0.9313432836,
+            "share_spearman_positive": 0.9880597015
+          },
+          "pooled": {
+            "n": 138185,
+            "min_n": 200,
+            "estimable": true,
+            "pearson": 0.3269980404,
+            "spearman": 0.4640593635
+          }
+        },
+        "corr_gap_with_next_change": {
+          "n_points": 138185,
+          "n_coins_with_pairs": 335,
+          "per_coin": {
+            "min_n": 30,
+            "n_coins": 335,
+            "n_pearson": 335,
+            "n_spearman": 335,
+            "median_pearson": -0.6062377438,
+            "median_spearman": -0.5023082531,
+            "share_pearson_positive": 0.0,
+            "share_spearman_positive": 0.0
+          },
+          "pooled": {
+            "n": 138185,
+            "min_n": 200,
+            "estimable": true,
+            "pearson": -0.5799621322,
+            "spearman": -0.4182185724
+          }
+        }
+      },
+      "H8": {
+        "autocorr": {
+          "n_points": 138185,
+          "n_coins_with_pairs": 335,
+          "per_coin": {
+            "min_n": 30,
+            "n_coins": 335,
+            "n_pearson": 335,
+            "n_spearman": 335,
+            "median_pearson": 0.2630970366,
+            "median_spearman": 0.3105037338,
+            "share_pearson_positive": 0.9313432836,
+            "share_spearman_positive": 0.9880597015
+          },
+          "pooled": {
+            "n": 138185,
+            "min_n": 200,
+            "estimable": true,
+            "pearson": 0.3269980404,
+            "spearman": 0.4640593635
+          }
+        },
+        "n_pairs": 138185,
+        "median_abs_change": 0.000618,
+        "description_share_abs_change_eq_0": 0.4827658574
+      },
+      "H9": {
+        "median_abs_gap": 0.0,
+        "median_abs_bybit": 0.01,
+        "median_abs_okx": 0.01,
+        "compare_abs_gap_to_0_20": "below",
+        "compare_abs_gap_to_0_30": "below"
+      },
+      "H10": {
+        "gap_vs_bybit": {
+          "n_points": 138520,
+          "n_coins_with_pairs": 335,
+          "per_coin": {
+            "min_n": 30,
+            "n_coins": 335,
+            "n_pearson": 333,
+            "n_spearman": 333,
+            "median_pearson": 0.6288149378,
+            "median_spearman": 0.4809130725,
+            "share_pearson_positive": 0.9399399399,
+            "share_spearman_positive": 0.951951952
+          },
+          "pooled": {
+            "n": 138520,
+            "min_n": 200,
+            "estimable": true,
+            "pearson": 0.8056699911,
+            "spearman": 0.4558251177
+          }
+        },
+        "gap_vs_okx": {
+          "n_points": 138520,
+          "n_coins_with_pairs": 335,
+          "per_coin": {
+            "min_n": 30,
+            "n_coins": 335,
+            "n_pearson": 335,
+            "n_spearman": 335,
+            "median_pearson": -0.3155363941,
+            "median_spearman": -0.4356348999,
+            "share_pearson_positive": 0.2089552239,
+            "share_spearman_positive": 0.0507462687
+          },
+          "pooled": {
+            "n": 138520,
+            "min_n": 200,
+            "estimable": true,
+            "pearson": 0.3317213526,
+            "spearman": -0.2600034868
+          }
+        }
+      }
+    },
+    "trades": {
+      "n_coins_requested": 11,
+      "n_coins_with_rows": 11,
+      "n_rows": 4729,
+      "coins_without_series": [],
+      "coins_absent_from_slice": [],
+      "coins_with_rows": [
+        {
+          "coin": "API3",
+          "n": 564
+        },
+        {
+          "coin": "TRUST",
+          "n": 564
+        },
+        {
+          "coin": "WAL",
+          "n": 564
+        },
+        {
+          "coin": "LA",
+          "n": 564
+        },
+        {
+          "coin": "RSR",
+          "n": 313
+        },
+        {
+          "coin": "BLUR",
+          "n": 282
+        },
+        {
+          "coin": "SAND",
+          "n": 304
+        },
+        {
+          "coin": "CT",
+          "n": 127
+        },
+        {
+          "coin": "MEW",
+          "n": 564
+        },
+        {
+          "coin": "IOST",
+          "n": 319
+        },
+        {
+          "coin": "DOOD",
+          "n": 564
+        }
+      ],
+      "estimable_pooled": true,
+      "estimable_per_coin": true,
+      "status": null,
+      "H1": {
+        "same_sign_share": 0.8638189892,
+        "correlation": {
+          "n_points": 4729,
+          "n_coins_with_pairs": 11,
+          "per_coin": {
+            "min_n": 30,
+            "n_coins": 11,
+            "n_pearson": 11,
+            "n_spearman": 11,
+            "median_pearson": 0.9479601592,
+            "median_spearman": 0.6107728291,
+            "share_pearson_positive": 1.0,
+            "share_spearman_positive": 1.0
+          },
+          "pooled": {
+            "n": 4729,
+            "min_n": 200,
+            "estimable": true,
+            "pearson": 0.7707882796,
+            "spearman": 0.8516377096
+          }
+        }
+      },
+      "H2": {
+        "bybit": {
+          "n": 4729,
+          "mean": -0.0646732056,
+          "median": 0.01,
+          "mad": 0.0,
+          "mean_over_mad": null
+        },
+        "okx": {
+          "n": 4729,
+          "mean": -0.0581811385,
+          "median": 0.01,
+          "mad": 0.0,
+          "mean_over_mad": null
+        },
+        "gap": {
+          "n": 4729,
+          "mean": -0.0064920671,
+          "median": 0.0,
+          "mad": 0.0,
+          "mean_over_mad": null
+        },
+        "description": {
+          "note": "Доля строк, где ставка равна 0.01 и где gap равен 0. Описание массы в точке, не замена MAD.",
+          "share_bybit_rate_eq_0_01": 0.7105096215,
+          "share_okx_rate_eq_0_01": 0.6986677945,
+          "share_gap_eq_0": 0.6020300275
+        }
+      },
+      "H3": {
+        "autocorr": {
+          "n_points": 4718,
+          "n_coins_with_pairs": 11,
+          "per_coin": {
+            "min_n": 30,
+            "n_coins": 11,
+            "n_pearson": 11,
+            "n_spearman": 11,
+            "median_pearson": 0.196132306,
+            "median_spearman": 0.3467770701,
+            "share_pearson_positive": 0.7272727273,
+            "share_spearman_positive": 1.0
+          },
+          "pooled": {
+            "n": 4718,
+            "min_n": 200,
+            "estimable": true,
+            "pearson": 0.0904571722,
+            "spearman": 0.5753022622
+          }
+        },
+        "corr_gap_with_next_change": {
+          "n_points": 4718,
+          "n_coins_with_pairs": 11,
+          "per_coin": {
+            "min_n": 30,
+            "n_coins": 11,
+            "n_pearson": 11,
+            "n_spearman": 11,
+            "median_pearson": -0.6339825278,
+            "median_spearman": -0.4558258193,
+            "share_pearson_positive": 0.0,
+            "share_spearman_positive": 0.0
+          },
+          "pooled": {
+            "n": 4718,
+            "min_n": 200,
+            "estimable": true,
+            "pearson": -0.6742214835,
+            "spearman": -0.3574728532
+          }
+        }
+      },
+      "H8": {
+        "autocorr": {
+          "n_points": 4718,
+          "n_coins_with_pairs": 11,
+          "per_coin": {
+            "min_n": 30,
+            "n_coins": 11,
+            "n_pearson": 11,
+            "n_spearman": 11,
+            "median_pearson": 0.196132306,
+            "median_spearman": 0.3467770701,
+            "share_pearson_positive": 0.7272727273,
+            "share_spearman_positive": 1.0
+          },
+          "pooled": {
+            "n": 4718,
+            "min_n": 200,
+            "estimable": true,
+            "pearson": 0.0904571722,
+            "spearman": 0.5753022622
+          }
+        },
+        "n_pairs": 4718,
+        "median_abs_change": 0.0,
+        "description_share_abs_change_eq_0": 0.5084781687
+      },
+      "H9": {
+        "median_abs_gap": 0.0,
+        "median_abs_bybit": 0.01,
+        "median_abs_okx": 0.01,
+        "compare_abs_gap_to_0_20": "below",
+        "compare_abs_gap_to_0_30": "below"
+      },
+      "H10": {
+        "gap_vs_bybit": {
+          "n_points": 4729,
+          "n_coins_with_pairs": 11,
+          "per_coin": {
+            "min_n": 30,
+            "n_coins": 11,
+            "n_pearson": 11,
+            "n_spearman": 11,
+            "median_pearson": 0.6927435897,
+            "median_spearman": 0.1776462506,
+            "share_pearson_positive": 0.9090909091,
+            "share_spearman_positive": 0.9090909091
+          },
+          "pooled": {
+            "n": 4729,
+            "min_n": 200,
+            "estimable": true,
+            "pearson": 0.8151192984,
+            "spearman": 0.5122339571
+          }
+        },
+        "gap_vs_okx": {
+          "n_points": 4729,
+          "n_coins_with_pairs": 11,
+          "per_coin": {
+            "min_n": 30,
+            "n_coins": 11,
+            "n_pearson": 11,
+            "n_spearman": 11,
+            "median_pearson": 0.2815027189,
+            "median_spearman": -0.2895053501,
+            "share_pearson_positive": 0.8181818182,
+            "share_spearman_positive": 0.0
+          },
+          "pooled": {
+            "n": 4729,
+            "min_n": 200,
+            "estimable": true,
+            "pearson": 0.2592217419,
+            "spearman": 0.1884849696
+          }
+        }
+      }
+    },
+    "trades_inside_hold": {
+      "n_coins_requested": 11,
+      "n_coins_with_rows": 9,
+      "n_rows": 35,
+      "coins_without_series": [],
+      "coins_absent_from_slice": [
+        "API3",
+        "LA"
+      ],
+      "coins_with_rows": [
+        {
+          "coin": "TRUST",
+          "n": 8
+        },
+        {
+          "coin": "WAL",
+          "n": 6
+        },
+        {
+          "coin": "RSR",
+          "n": 8
+        },
+        {
+          "coin": "BLUR",
+          "n": 1
+        },
+        {
+          "coin": "SAND",
+          "n": 2
+        },
+        {
+          "coin": "CT",
+          "n": 2
+        },
+        {
+          "coin": "MEW",
+          "n": 1
+        },
+        {
+          "coin": "IOST",
+          "n": 5
+        },
+        {
+          "coin": "DOOD",
+          "n": 2
+        }
+      ],
+      "estimable_pooled": false,
+      "estimable_per_coin": false,
+      "status": "на сделках не измерено",
+      "H1": {
+        "same_sign_share": 0.8,
+        "correlation": {
+          "n_points": 35,
+          "n_coins_with_pairs": 9,
+          "per_coin": {
+            "min_n": 30,
+            "n_coins": 0,
+            "n_pearson": 0,
+            "n_spearman": 0,
+            "median_pearson": null,
+            "median_spearman": null,
+            "share_pearson_positive": null,
+            "share_spearman_positive": null
+          },
+          "pooled": {
+            "n": 35,
+            "min_n": 200,
+            "estimable": false,
+            "pearson": null,
+            "spearman": null
+          }
+        }
+      },
+      "H2": {
+        "bybit": {
+          "n": 35,
+          "mean": -2.1806752857,
+          "median": -1.311032,
+          "mad": 1.03384,
+          "mean_over_mad": -2.1092966859
+        },
+        "okx": {
+          "n": 35,
+          "mean": -1.4010585163,
+          "median": -1.03254281,
+          "mad": 0.75438517,
+          "mean_over_mad": -1.85721906
+        },
+        "gap": {
+          "n": 35,
+          "mean": -0.7796167694,
+          "median": -0.247642,
+          "mad": 0.247642,
+          "mean_over_mad": -3.1481605278
+        },
+        "description": {
+          "note": "Доля строк, где ставка равна 0.01 и где gap равен 0. Описание массы в точке, не замена MAD.",
+          "share_bybit_rate_eq_0_01": 0.0285714286,
+          "share_okx_rate_eq_0_01": 0.2,
+          "share_gap_eq_0": 0.0285714286
+        }
+      },
+      "H3": {
+        "autocorr": {
+          "n_points": 26,
+          "n_coins_with_pairs": 7,
+          "per_coin": {
+            "min_n": 30,
+            "n_coins": 0,
+            "n_pearson": 0,
+            "n_spearman": 0,
+            "median_pearson": null,
+            "median_spearman": null,
+            "share_pearson_positive": null,
+            "share_spearman_positive": null
+          },
+          "pooled": {
+            "n": 26,
+            "min_n": 200,
+            "estimable": false,
+            "pearson": null,
+            "spearman": null
+          }
+        },
+        "corr_gap_with_next_change": {
+          "n_points": 26,
+          "n_coins_with_pairs": 7,
+          "per_coin": {
+            "min_n": 30,
+            "n_coins": 0,
+            "n_pearson": 0,
+            "n_spearman": 0,
+            "median_pearson": null,
+            "median_spearman": null,
+            "share_pearson_positive": null,
+            "share_spearman_positive": null
+          },
+          "pooled": {
+            "n": 26,
+            "min_n": 200,
+            "estimable": false,
+            "pearson": null,
+            "spearman": null
+          }
+        }
+      },
+      "H8": {
+        "autocorr": {
+          "n_points": 26,
+          "n_coins_with_pairs": 7,
+          "per_coin": {
+            "min_n": 30,
+            "n_coins": 0,
+            "n_pearson": 0,
+            "n_spearman": 0,
+            "median_pearson": null,
+            "median_spearman": null,
+            "share_pearson_positive": null,
+            "share_spearman_positive": null
+          },
+          "pooled": {
+            "n": 26,
+            "min_n": 200,
+            "estimable": false,
+            "pearson": null,
+            "spearman": null
+          }
+        },
+        "n_pairs": 26,
+        "median_abs_change": 0.25220082,
+        "description_share_abs_change_eq_0": 0.0
+      },
+      "H9": {
+        "median_abs_gap": 0.30690355,
+        "median_abs_bybit": 1.311032,
+        "median_abs_okx": 1.03254281,
+        "compare_abs_gap_to_0_20": "not_below",
+        "compare_abs_gap_to_0_30": "at_or_above"
+      },
+      "H10": {
+        "gap_vs_bybit": {
+          "n_points": 35,
+          "n_coins_with_pairs": 9,
+          "per_coin": {
+            "min_n": 30,
+            "n_coins": 0,
+            "n_pearson": 0,
+            "n_spearman": 0,
+            "median_pearson": null,
+            "median_spearman": null,
+            "share_pearson_positive": null,
+            "share_spearman_positive": null
+          },
+          "pooled": {
+            "n": 35,
+            "min_n": 200,
+            "estimable": false,
+            "pearson": null,
+            "spearman": null
+          }
+        },
+        "gap_vs_okx": {
+          "n_points": 35,
+          "n_coins_with_pairs": 9,
+          "per_coin": {
+            "min_n": 30,
+            "n_coins": 0,
+            "n_pearson": 0,
+            "n_spearman": 0,
+            "median_pearson": null,
+            "median_spearman": null,
+            "share_pearson_positive": null,
+            "share_spearman_positive": null
+          },
+          "pooled": {
+            "n": 35,
+            "min_n": 200,
+            "estimable": false,
+            "pearson": null,
+            "spearman": null
+          }
+        }
+      }
+    },
+    "trades_outside_hold": {
+      "n_coins_requested": 11,
+      "n_coins_with_rows": 11,
+      "n_rows": 4694,
+      "coins_without_series": [],
+      "coins_absent_from_slice": [],
+      "coins_with_rows": [
+        {
+          "coin": "API3",
+          "n": 564
+        },
+        {
+          "coin": "TRUST",
+          "n": 556
+        },
+        {
+          "coin": "WAL",
+          "n": 558
+        },
+        {
+          "coin": "LA",
+          "n": 564
+        },
+        {
+          "coin": "RSR",
+          "n": 305
+        },
+        {
+          "coin": "BLUR",
+          "n": 281
+        },
+        {
+          "coin": "SAND",
+          "n": 302
+        },
+        {
+          "coin": "CT",
+          "n": 125
+        },
+        {
+          "coin": "MEW",
+          "n": 563
+        },
+        {
+          "coin": "IOST",
+          "n": 314
+        },
+        {
+          "coin": "DOOD",
+          "n": 562
+        }
+      ],
+      "estimable_pooled": true,
+      "estimable_per_coin": true,
+      "status": null,
+      "H1": {
+        "same_sign_share": 0.8642948445,
+        "correlation": {
+          "n_points": 4694,
+          "n_coins_with_pairs": 11,
+          "per_coin": {
+            "min_n": 30,
+            "n_coins": 11,
+            "n_pearson": 11,
+            "n_spearman": 11,
+            "median_pearson": 0.9163515615,
+            "median_spearman": 0.6056967598,
+            "share_pearson_positive": 1.0,
+            "share_spearman_positive": 1.0
+          },
+          "pooled": {
+            "n": 4694,
+            "min_n": 200,
+            "estimable": true,
+            "pearson": 0.765227495,
+            "spearman": 0.8538131169
+          }
+        }
+      },
+      "H2": {
+        "bybit": {
+          "n": 4694,
+          "mean": -0.0488956017,
+          "median": 0.01,
+          "mad": 0.0,
+          "mean_over_mad": null
+        },
+        "okx": {
+          "n": 4694,
+          "mean": -0.0481682054,
+          "median": 0.01,
+          "mad": 0.0,
+          "mean_over_mad": null
+        },
+        "gap": {
+          "n": 4694,
+          "mean": -0.0007273963,
+          "median": 0.0,
+          "mad": 0.0,
+          "mean_over_mad": null
+        },
+        "description": {
+          "note": "Доля строк, где ставка равна 0.01 и где gap равен 0. Описание массы в точке, не замена MAD.",
+          "share_bybit_rate_eq_0_01": 0.7155943758,
+          "share_okx_rate_eq_0_01": 0.7023860247,
+          "share_gap_eq_0": 0.6063059225
+        }
+      },
+      "H3": {
+        "autocorr": {
+          "n_points": 4683,
+          "n_coins_with_pairs": 11,
+          "per_coin": {
+            "min_n": 30,
+            "n_coins": 11,
+            "n_pearson": 11,
+            "n_spearman": 11,
+            "median_pearson": 0.149330086,
+            "median_spearman": 0.3467708599,
+            "share_pearson_positive": 0.8181818182,
+            "share_spearman_positive": 1.0
+          },
+          "pooled": {
+            "n": 4683,
+            "min_n": 200,
+            "estimable": true,
+            "pearson": 0.0565075407,
+            "spearman": 0.5733609127
+          }
+        },
+        "corr_gap_with_next_change": {
+          "n_points": 4683,
+          "n_coins_with_pairs": 11,
+          "per_coin": {
+            "min_n": 30,
+            "n_coins": 11,
+            "n_pearson": 11,
+            "n_spearman": 11,
+            "median_pearson": -0.652186007,
+            "median_spearman": -0.4681539761,
+            "share_pearson_positive": 0.0,
+            "share_spearman_positive": 0.0
+          },
+          "pooled": {
+            "n": 4683,
+            "min_n": 200,
+            "estimable": true,
+            "pearson": -0.6865987281,
+            "spearman": -0.3282979488
+          }
+        }
+      },
+      "H8": {
+        "autocorr": {
+          "n_points": 4683,
+          "n_coins_with_pairs": 11,
+          "per_coin": {
+            "min_n": 30,
+            "n_coins": 11,
+            "n_pearson": 11,
+            "n_spearman": 11,
+            "median_pearson": 0.149330086,
+            "median_spearman": 0.3467708599,
+            "share_pearson_positive": 0.8181818182,
+            "share_spearman_positive": 1.0
+          },
+          "pooled": {
+            "n": 4683,
+            "min_n": 200,
+            "estimable": true,
+            "pearson": 0.0565075407,
+            "spearman": 0.5733609127
+          }
+        },
+        "n_pairs": 4683,
+        "median_abs_change": 0.0,
+        "description_share_abs_change_eq_0": 0.512278454
+      },
+      "H9": {
+        "median_abs_gap": 0.0,
+        "median_abs_bybit": 0.01,
+        "median_abs_okx": 0.01,
+        "compare_abs_gap_to_0_20": "below",
+        "compare_abs_gap_to_0_30": "below"
+      },
+      "H10": {
+        "gap_vs_bybit": {
+          "n_points": 4694,
+          "n_coins_with_pairs": 11,
+          "per_coin": {
+            "min_n": 30,
+            "n_coins": 11,
+            "n_pearson": 11,
+            "n_spearman": 11,
+            "median_pearson": 0.6303774397,
+            "median_spearman": 0.1632104341,
+            "share_pearson_positive": 0.8181818182,
+            "share_spearman_positive": 0.9090909091
+          },
+          "pooled": {
+            "n": 4694,
+            "min_n": 200,
+            "estimable": true,
+            "pearson": 0.7700689225,
+            "spearman": 0.4630830276
+          }
+        },
+        "gap_vs_okx": {
+          "n_points": 4694,
+          "n_coins_with_pairs": 11,
+          "per_coin": {
+            "min_n": 30,
+            "n_coins": 11,
+            "n_pearson": 11,
+            "n_spearman": 11,
+            "median_pearson": 0.1525357898,
+            "median_spearman": -0.3741646587,
+            "share_pearson_positive": 0.7272727273,
+            "share_spearman_positive": 0.0
+          },
+          "pooled": {
+            "n": 4694,
+            "min_n": 200,
+            "estimable": true,
+            "pearson": 0.1785843606,
+            "spearman": 0.1579870279
+          }
+        }
+      }
+    }
+  }
+}

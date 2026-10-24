@@ -1,0 +1,50 @@
+{
+  "study": "gear23-funding-day1",
+  "branch": "research/gear23-funding-day1",
+  "executed_at_utc": "2026-10-22T12:40:00Z",
+  "places": {
+    "code_read_and_private_get": "VPS root@38.180.94.108, read-only GET, no files written",
+    "ledger_math_and_artifacts": "local /Users/mishatrubik/Desktop/spread/research/gear23_funding",
+    "live_process": {
+      "pid": 543732,
+      "started_utc": "2026-10-18T17:45:33Z",
+      "cwd": "/root/b-private-b-exp/response-manager-code/gear23-b2.3-tw-deque-20261010-tradeobs-20261018T1741Z",
+      "data_root": "/root/b-private-b-exp/response-manager/20261005T194200Z-gear22-longrun/data",
+      "note": "The data root started 2026-10-05. The Oct 18 process is a restart into that root. Hashes below are the Oct 18 snapshot, not a proof that every earlier fill was produced by those bytes."
+    }
+  },
+  "live_config_observed": {
+    "BBOT_PROFILE": "gear22_live_canary",
+    "BBOT_THETA_POLICY": "gear22",
+    "policy_id_in_decision_context": "gear22_frozen_v1",
+    "frozen_params": {"theta_open": 0.50, "p50_open": 0.60, "min_profit_pp": 0.20, "fee_round_trip_pp": 0.30, "min_theta_close": 0.05},
+    "BBOT_NOTIONAL_USDT": "10",
+    "BBOT_SLOT_K": "1",
+    "BBOT_TRADE_LAT_MS": "100",
+    "coins": ["KAITO", "HOME", "WAL", "RVN", "ONT", "2Z", "BICO", "HMSTR", "CAP", "BLEND", "EDEN", "KMNO", "GPS", "ME", "ZBT", "MOVE", "COAI", "AZTEC", "APR", "YB", "AT", "H", "MUBARAK", "ACU", "LA", "BEAT", "PARTI", "SIGN", "GIGGLE"]
+  },
+  "source_sha256": {
+    "snapshot app/policy/trade_manager.py": "92bfbd9ff81db54e08f51a155ac30b4ffe4bcdec8b8c404ff05bba577e2666f5",
+    "snapshot research/gear22_backtest/params_frozen.py": "c881fe1d95050b860e5c37d5d59c6b10b63df3eaa9dc432b063407c4ba4bad4b",
+    "snapshot research/gear22_backtest/policy.py": "c7f04f33e25e708ec4628d304f9bb249fed1c1cf819ba9ebe1a50b4de095612d",
+    "snapshot app/bot/theta_trade_manager.py": "9e8c549b2dded1dab8c54d2beb6c4fc41645bb4e2d570c4184378d24893ae680",
+    "snapshot app/bot/runtime.py": "4d8529c89d47923c407be3d50c380731e7140fcd2abb0ba9333342758b75026b",
+    "snapshot app/bot/private/trade_history.py": "55600a41f2127b10e6edfa819048047e6965c0ae9eb124ad069bbefd716e22c1",
+    "would_send_prod HEAD": "8f942d23ed32317bb3c62581ad3a174baa1a2a4e"
+  },
+  "artifact_sha256": {
+    "day1_funding_audit.py": "65d39ca9ed19c5266ead76d98c3696c2b63e20aba5077ba7a64dc8fa999595bd",
+    "data/account_cashflows.jsonl": "0f66889b3b22f1c21af58daa275e6bc7462b95543c15ce60983d570c05985599",
+    "data/okx_trade_fees.jsonl": "503cf027ba42865ed448d3b58d435e0a8e4b76371f12f943ec875e396340771e",
+    "tables/round_trips.csv": "4a31d266dc21daad5a9098be4df3e4275b39fcedc6b5a9a00acaa232ca375b48"
+  },
+  "private_pull": {
+    "window_utc": ["2026-10-05", "2026-10-23"],
+    "bybit": "GET /v5/account/transaction-log type=SETTLEMENT and type=TRADE, UNIFIED, linear, USDT",
+    "okx": "GET /api/v5/account/bills-archive instType=SWAP type=8 and type=2",
+    "truncated": false,
+    "counts": {"bybit_settlement": 58, "bybit_trade": 86, "okx_funding": 42, "okx_trade_bills": 149}
+  },
+  "reproduce_local": "python3 research/gear23_funding/day1_funding_audit.py",
+  "preset_filters_not_tuned": {"near_settlement_minutes": 30, "fee_model_pp": 0.30, "min_profit_pp": 0.20}
+}

@@ -1,0 +1,63 @@
+{
+  "experiment": "exp2_funding_timing",
+  "seed": 20260810,
+  "m": 10000,
+  "t0": 1786320000,
+  "t1": 1789299899,
+  "n_trades": 49,
+  "slack_s": 2444422,
+  "actual_funding_pp": -9.71868909,
+  "mode_A": {
+    "m": 10000,
+    "mean": -0.05296806074899999,
+    "median": -0.00704345499999998,
+    "std": 0.5213659968873102,
+    "q025": -1.3512763542500001,
+    "q05": -1.0046299095,
+    "q50": -0.00704345499999998,
+    "q95": 0.7211217775000001,
+    "q975": 0.8958432999999999,
+    "actual": -9.71868909,
+    "delta_actual_minus_median": -9.711645635,
+    "n_le_actual": 0,
+    "p_add_one": 9.999000099990002e-05,
+    "tail_frequency": 0.0,
+    "tail_frequency_se": 0.0,
+    "share_negative": 0.5087,
+    "distribution": "independent uniform open seconds; overlaps allowed",
+    "rejected": 0
+  },
+  "mode_B": {
+    "m": 10000,
+    "mean": -0.048158623050999994,
+    "median": -0.0009372349999999911,
+    "std": 0.5279161308894217,
+    "q025": -1.4013958807500002,
+    "q05": -1.0202988879999997,
+    "q50": -0.0009372349999999911,
+    "q95": 0.7348714424999999,
+    "q975": 0.9044577585000001,
+    "actual": -9.71868909,
+    "delta_actual_minus_median": -9.717751855,
+    "n_le_actual": 0,
+    "p_add_one": 9.999000099990002e-05,
+    "tail_frequency": 0.0,
+    "tail_frequency_se": 0.0,
+    "share_negative": 0.5013,
+    "distribution": "uniform over integer-second K=1 schedules: uniform order times uniform gap composition",
+    "rejected": 0,
+    "draws": 10000
+  },
+  "series_starting_after_t0": [
+    {
+      "coin": "BICO",
+      "venue": "bybit",
+      "first_ts": 1786320000,
+      "last_ts": 1789286400,
+      "n": 104,
+      "max_gap_s": 28800,
+      "covers_window": false
+    }
+  ],
+  "max_gap_s": 28800
+}

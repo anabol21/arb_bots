@@ -1,0 +1,5 @@
+venue,instrument,ts_utc,funding,size,side,reason
+bybit,RVNUSDT,2026-10-05 20:00:00,-0.02074342,4040,Sell,no_unique_open_interval
+bybit,RVNUSDT,2026-10-05 16:00:00,-0.04218517,4040,Sell,no_unique_open_interval
+okx,RVN-USDT-SWAP,2026-10-05 20:00:01,0.0210854684829408,404,174,no_unique_open_interval
+okx,RVN-USDT-SWAP,2026-10-05 16:00:04,0.0408016537460344,404,174,no_unique_open_interval

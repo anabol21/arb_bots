@@ -1,0 +1,508 @@
+{
+  "self_check": {
+    "ok": true,
+    "pearson_identical": 1.0,
+    "spearman_reversed": -1.0,
+    "median_1_2_3_4": 2.5,
+    "mad_1_2_3_4_5": 1.0
+  },
+  "window_start_utc": "2026-07-20",
+  "window_end_utc_exclusive": "2026-10-23",
+  "price_rule": "close of the 1h candle that ends at the settlement timestamp",
+  "H5": "corr(rate_per_8h_t - rate_per_8h_prev, price return over that same interval, scaled to 8h)",
+  "H6": "corr(rate_per_8h printed at t, price return from t to the next settlement, scaled to 8h)",
+  "coverage_complete_for_coins_with_funding_or_price_files": true,
+  "download_errors": [],
+  "comparison_abs_pooled_pearson": {
+    "collector": {
+      "bybit": {
+        "H5_pooled_pearson": -0.0455637009,
+        "H6_pooled_pearson": 0.1063038635,
+        "abs_H5": 0.0455637009,
+        "abs_H6": 0.1063038635,
+        "larger_abs_pooled_pearson": "H6"
+      },
+      "okx": {
+        "H5_pooled_pearson": -0.098859664,
+        "H6_pooled_pearson": 0.0849179706,
+        "abs_H5": 0.098859664,
+        "abs_H6": 0.0849179706,
+        "larger_abs_pooled_pearson": "H5"
+      }
+    },
+    "trades": {
+      "bybit": {
+        "H5_pooled_pearson": -0.0780266366,
+        "H6_pooled_pearson": 0.2572387964,
+        "abs_H5": 0.0780266366,
+        "abs_H6": 0.2572387964,
+        "larger_abs_pooled_pearson": "H6"
+      },
+      "okx": {
+        "H5_pooled_pearson": -0.2676133392,
+        "H6_pooled_pearson": 0.2465621992,
+        "abs_H5": 0.2676133392,
+        "abs_H6": 0.2465621992,
+        "larger_abs_pooled_pearson": "H5"
+      }
+    }
+  },
+  "ordering_same_on_collector_and_trades": {
+    "bybit": true,
+    "okx": true
+  },
+  "exchanges": {
+    "bybit": {
+      "coverage": {
+        "coins_requested": 336,
+        "coins_with_funding": 336,
+        "coins_with_price": 336,
+        "coins_with_both": 336,
+        "settlements_in_window": 142025,
+        "settlements_with_rate": 142024,
+        "settlements_with_price": 142024,
+        "missing_price": [],
+        "missing_funding": []
+      },
+      "slices": {
+        "collector": {
+          "H5": {
+            "status": null,
+            "n_coins_with_pairs": 335,
+            "correlation": {
+              "n_points": 141562,
+              "n_coins_with_pairs": 335,
+              "per_coin": {
+                "min_n": 30,
+                "n_coins": 335,
+                "n_pearson": 333,
+                "n_spearman": 333,
+                "median_pearson": 0.0407717508,
+                "median_spearman": 0.061668646,
+                "share_pearson_positive": 0.6306306306,
+                "share_spearman_positive": 0.7507507508
+              },
+              "pooled": {
+                "n": 141562,
+                "min_n": 200,
+                "estimable": true,
+                "pearson": -0.0455637009,
+                "spearman": 0.0489714582
+              }
+            }
+          },
+          "H6": {
+            "status": null,
+            "n_coins_with_pairs": 335,
+            "correlation": {
+              "n_points": 141562,
+              "n_coins_with_pairs": 335,
+              "per_coin": {
+                "min_n": 30,
+                "n_coins": 335,
+                "n_pearson": 333,
+                "n_spearman": 333,
+                "median_pearson": 0.0154347829,
+                "median_spearman": 0.012155471,
+                "share_pearson_positive": 0.5975975976,
+                "share_spearman_positive": 0.5735735736
+              },
+              "pooled": {
+                "n": 141562,
+                "min_n": 200,
+                "estimable": true,
+                "pearson": 0.1063038635,
+                "spearman": 0.0064429186
+              }
+            }
+          }
+        },
+        "trades": {
+          "H5": {
+            "status": null,
+            "n_coins_with_pairs": 11,
+            "correlation": {
+              "n_points": 5119,
+              "n_coins_with_pairs": 11,
+              "per_coin": {
+                "min_n": 30,
+                "n_coins": 11,
+                "n_pearson": 11,
+                "n_spearman": 11,
+                "median_pearson": -0.1069924769,
+                "median_spearman": -0.0741397533,
+                "share_pearson_positive": 0.0909090909,
+                "share_spearman_positive": 0.0909090909
+              },
+              "pooled": {
+                "n": 5119,
+                "min_n": 200,
+                "estimable": true,
+                "pearson": -0.0780266366,
+                "spearman": -0.0583947733
+              }
+            }
+          },
+          "H6": {
+            "status": null,
+            "n_coins_with_pairs": 11,
+            "correlation": {
+              "n_points": 5119,
+              "n_coins_with_pairs": 11,
+              "per_coin": {
+                "min_n": 30,
+                "n_coins": 11,
+                "n_pearson": 11,
+                "n_spearman": 11,
+                "median_pearson": 0.1395606247,
+                "median_spearman": 0.0773338799,
+                "share_pearson_positive": 0.9090909091,
+                "share_spearman_positive": 0.9090909091
+              },
+              "pooled": {
+                "n": 5119,
+                "min_n": 200,
+                "estimable": true,
+                "pearson": 0.2572387964,
+                "spearman": 0.0718222468
+              }
+            }
+          }
+        },
+        "trades_inside_hold": {
+          "H5": {
+            "status": "на сделках не измерено",
+            "n_coins_with_pairs": 9,
+            "correlation": {
+              "n_points": 56,
+              "n_coins_with_pairs": 9,
+              "per_coin": {
+                "min_n": 30,
+                "n_coins": 0,
+                "n_pearson": 0,
+                "n_spearman": 0,
+                "median_pearson": null,
+                "median_spearman": null,
+                "share_pearson_positive": null,
+                "share_spearman_positive": null
+              },
+              "pooled": {
+                "n": 56,
+                "min_n": 200,
+                "estimable": false,
+                "pearson": null,
+                "spearman": null
+              }
+            }
+          },
+          "H6": {
+            "status": "на сделках не измерено",
+            "n_coins_with_pairs": 9,
+            "correlation": {
+              "n_points": 56,
+              "n_coins_with_pairs": 9,
+              "per_coin": {
+                "min_n": 30,
+                "n_coins": 0,
+                "n_pearson": 0,
+                "n_spearman": 0,
+                "median_pearson": null,
+                "median_spearman": null,
+                "share_pearson_positive": null,
+                "share_spearman_positive": null
+              },
+              "pooled": {
+                "n": 56,
+                "min_n": 200,
+                "estimable": false,
+                "pearson": null,
+                "spearman": null
+              }
+            }
+          }
+        },
+        "trades_outside_hold": {
+          "H5": {
+            "status": null,
+            "n_coins_with_pairs": 11,
+            "correlation": {
+              "n_points": 5063,
+              "n_coins_with_pairs": 11,
+              "per_coin": {
+                "min_n": 30,
+                "n_coins": 11,
+                "n_pearson": 11,
+                "n_spearman": 11,
+                "median_pearson": -0.1069924769,
+                "median_spearman": -0.0806499738,
+                "share_pearson_positive": 0.1818181818,
+                "share_spearman_positive": 0.0909090909
+              },
+              "pooled": {
+                "n": 5063,
+                "min_n": 200,
+                "estimable": true,
+                "pearson": -0.1054726283,
+                "spearman": -0.0830780849
+              }
+            }
+          },
+          "H6": {
+            "status": null,
+            "n_coins_with_pairs": 11,
+            "correlation": {
+              "n_points": 5063,
+              "n_coins_with_pairs": 11,
+              "per_coin": {
+                "min_n": 30,
+                "n_coins": 11,
+                "n_pearson": 11,
+                "n_spearman": 11,
+                "median_pearson": 0.0802441446,
+                "median_spearman": 0.0764229203,
+                "share_pearson_positive": 0.7272727273,
+                "share_spearman_positive": 0.9090909091
+              },
+              "pooled": {
+                "n": 5063,
+                "min_n": 200,
+                "estimable": true,
+                "pearson": 0.257166738,
+                "spearman": 0.0635246399
+              }
+            }
+          }
+        }
+      }
+    },
+    "okx": {
+      "coverage": {
+        "coins_requested": 336,
+        "coins_with_funding": 336,
+        "coins_with_price": 336,
+        "coins_with_both": 336,
+        "settlements_in_window": 144010,
+        "settlements_with_rate": 143674,
+        "settlements_with_price": 144010,
+        "missing_price": [],
+        "missing_funding": []
+      },
+      "slices": {
+        "collector": {
+          "H5": {
+            "status": null,
+            "n_coins_with_pairs": 335,
+            "correlation": {
+              "n_points": 143200,
+              "n_coins_with_pairs": 335,
+              "per_coin": {
+                "min_n": 30,
+                "n_coins": 335,
+                "n_pearson": 335,
+                "n_spearman": 335,
+                "median_pearson": 0.0257607986,
+                "median_spearman": 0.0568479176,
+                "share_pearson_positive": 0.6029850746,
+                "share_spearman_positive": 0.7194029851
+              },
+              "pooled": {
+                "n": 143200,
+                "min_n": 200,
+                "estimable": true,
+                "pearson": -0.098859664,
+                "spearman": 0.0511456829
+              }
+            }
+          },
+          "H6": {
+            "status": null,
+            "n_coins_with_pairs": 335,
+            "correlation": {
+              "n_points": 143200,
+              "n_coins_with_pairs": 335,
+              "per_coin": {
+                "min_n": 30,
+                "n_coins": 335,
+                "n_pearson": 335,
+                "n_spearman": 335,
+                "median_pearson": 0.012228145,
+                "median_spearman": 0.0074636626,
+                "share_pearson_positive": 0.5731343284,
+                "share_spearman_positive": 0.5432835821
+              },
+              "pooled": {
+                "n": 143200,
+                "min_n": 200,
+                "estimable": true,
+                "pearson": 0.0849179706,
+                "spearman": 0.0058055651
+              }
+            }
+          }
+        },
+        "trades": {
+          "H5": {
+            "status": null,
+            "n_coins_with_pairs": 11,
+            "correlation": {
+              "n_points": 5228,
+              "n_coins_with_pairs": 11,
+              "per_coin": {
+                "min_n": 30,
+                "n_coins": 11,
+                "n_pearson": 11,
+                "n_spearman": 11,
+                "median_pearson": -0.3194969614,
+                "median_spearman": -0.0454972558,
+                "share_pearson_positive": 0.0909090909,
+                "share_spearman_positive": 0.2727272727
+              },
+              "pooled": {
+                "n": 5228,
+                "min_n": 200,
+                "estimable": true,
+                "pearson": -0.2676133392,
+                "spearman": -0.0111932141
+              }
+            }
+          },
+          "H6": {
+            "status": null,
+            "n_coins_with_pairs": 11,
+            "correlation": {
+              "n_points": 5228,
+              "n_coins_with_pairs": 11,
+              "per_coin": {
+                "min_n": 30,
+                "n_coins": 11,
+                "n_pearson": 11,
+                "n_spearman": 11,
+                "median_pearson": 0.202287697,
+                "median_spearman": 0.0546860414,
+                "share_pearson_positive": 0.7272727273,
+                "share_spearman_positive": 0.8181818182
+              },
+              "pooled": {
+                "n": 5228,
+                "min_n": 200,
+                "estimable": true,
+                "pearson": 0.2465621992,
+                "spearman": 0.0709782133
+              }
+            }
+          }
+        },
+        "trades_inside_hold": {
+          "H5": {
+            "status": "на сделках не измерено",
+            "n_coins_with_pairs": 9,
+            "correlation": {
+              "n_points": 40,
+              "n_coins_with_pairs": 9,
+              "per_coin": {
+                "min_n": 30,
+                "n_coins": 0,
+                "n_pearson": 0,
+                "n_spearman": 0,
+                "median_pearson": null,
+                "median_spearman": null,
+                "share_pearson_positive": null,
+                "share_spearman_positive": null
+              },
+              "pooled": {
+                "n": 40,
+                "min_n": 200,
+                "estimable": false,
+                "pearson": null,
+                "spearman": null
+              }
+            }
+          },
+          "H6": {
+            "status": "на сделках не измерено",
+            "n_coins_with_pairs": 9,
+            "correlation": {
+              "n_points": 40,
+              "n_coins_with_pairs": 9,
+              "per_coin": {
+                "min_n": 30,
+                "n_coins": 0,
+                "n_pearson": 0,
+                "n_spearman": 0,
+                "median_pearson": null,
+                "median_spearman": null,
+                "share_pearson_positive": null,
+                "share_spearman_positive": null
+              },
+              "pooled": {
+                "n": 40,
+                "min_n": 200,
+                "estimable": false,
+                "pearson": null,
+                "spearman": null
+              }
+            }
+          }
+        },
+        "trades_outside_hold": {
+          "H5": {
+            "status": null,
+            "n_coins_with_pairs": 11,
+            "correlation": {
+              "n_points": 5188,
+              "n_coins_with_pairs": 11,
+              "per_coin": {
+                "min_n": 30,
+                "n_coins": 11,
+                "n_pearson": 11,
+                "n_spearman": 11,
+                "median_pearson": -0.2345282075,
+                "median_spearman": -0.0458828573,
+                "share_pearson_positive": 0.0909090909,
+                "share_spearman_positive": 0.3636363636
+              },
+              "pooled": {
+                "n": 5188,
+                "min_n": 200,
+                "estimable": true,
+                "pearson": -0.2545604939,
+                "spearman": -0.0156613594
+              }
+            }
+          },
+          "H6": {
+            "status": null,
+            "n_coins_with_pairs": 11,
+            "correlation": {
+              "n_points": 5188,
+              "n_coins_with_pairs": 11,
+              "per_coin": {
+                "min_n": 30,
+                "n_coins": 11,
+                "n_pearson": 11,
+                "n_spearman": 11,
+                "median_pearson": 0.1218889599,
+                "median_spearman": 0.0436642061,
+                "share_pearson_positive": 0.6363636364,
+                "share_spearman_positive": 0.7272727273
+              },
+              "pooled": {
+                "n": 5188,
+                "min_n": 200,
+                "estimable": true,
+                "pearson": 0.1339871186,
+                "spearman": 0.0532663497
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "H4": {
+    "status": "not_run"
+  },
+  "H7": {
+    "status": "not_run"
+  }
+}
