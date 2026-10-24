@@ -3721,6 +3721,13 @@ class BotRuntime:
                 )
             raise
 
+        # Startup extras are registered before private warmup. Enable one-shot
+        # 1x jobs only after those guards have passed (same contract as 7f9b801).
+        if self._gear23_hot_add_set_leverage:
+            self._gear23_leverage_ready = True
+            for coin in self.coins:
+                self._gear23_schedule_hot_add_leverage(coin)
+
         delta_path = bbot_hot_add_delta_path(self.data_root)
         drop_path = bbot_hot_add_drop_path(self.data_root)
         hist = self._hot_add_history_root
