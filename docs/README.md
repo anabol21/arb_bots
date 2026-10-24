@@ -38,6 +38,7 @@
 | [`vps-validation-checklist.md`](vps-validation-checklist.md) | Чеклист проверки |
 | [`compaction-backup-runbook.md`](compaction-backup-runbook.md) | Уплотнение и выгрузка D |
 | [`hot-add-new-coins.md`](hot-add-new-coins.md) | HOT_ADD |
+| [`gear23-pool-dyn.md`](gear23-pool-dyn.md) | Gear 2.3 canary append-only pool expansion (own delta, 10:10 MSK) |
 | [`prod-unit-snippets.md`](prod-unit-snippets.md) | Фрагменты юнитов |
 | [`local-lean-collector.md`](local-lean-collector.md) | Локальный lean, не prod |
 | [`NOW.md`](NOW.md) | Указатель на корневой [`../NOW.md`](../NOW.md). Снимок живёт там, не в этой заглушке |
