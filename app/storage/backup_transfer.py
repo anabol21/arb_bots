@@ -297,6 +297,14 @@ def _sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
+def _md5_file(path: Path) -> str:
+    digest = hashlib.md5()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
 def _transfer_progress(stderr: str) -> tuple[str | None, int | None]:
     lines = [line.strip() for line in stderr.replace("\r", "\n").splitlines()]
     progress_line = next(
@@ -590,8 +598,12 @@ class BackupTransfer:
     def _remote_size(
         self, remote: str, expected_size: int, operation: str
     ) -> int | None:
+        # Point stat of the exact object. `rclone size <file>` on SFTP lists the
+        # whole parent directory (~25k entries, >3 min), which tripped the
+        # watchdog; `lsjson --stat` is a single SFTP stat (~4 s). Exit 3 means
+        # the object does not exist, same as before.
         result = self._run_rclone(
-            ["size", "--json", remote],
+            ["lsjson", "--stat", "--no-mimetype", "--no-modtime", remote],
             expected_size,
             operation,
             allowed_returncodes=(0, 3),
@@ -602,10 +614,9 @@ class BackupTransfer:
             payload = json.loads(result.stdout)
         except json.JSONDecodeError as exc:
             raise TransferError(f"{operation} returned invalid JSON") from exc
-        if isinstance(payload, dict):
-            size = payload.get("bytes")
-            count = payload.get("count")
-            if isinstance(size, int) and count == 1:
+        if isinstance(payload, dict) and not payload.get("IsDir", False):
+            size = payload.get("Size")
+            if isinstance(size, int) and size >= 0:
                 return size
         return None
 
@@ -626,26 +637,44 @@ class BackupTransfer:
                 skip_sha_verify_below_bytes=threshold,
             )
             return
-        verify_dir = self.config.compacted_dir / ".state" / "verify"
-        verify_dir.mkdir(parents=True, exist_ok=True)
-        downloaded = verify_dir / f".{source.name}.{os.getpid()}.verify"
-        downloaded.unlink(missing_ok=True)
+        # Server-side MD5 instead of downloading the object back: reads from the
+        # backup host run at ~8-56 KiB/s, so a download+SHA verify of a 5-8 MB
+        # file takes minutes and trips the watchdog. `lsjson --stat --hash`
+        # stats the exact path and runs the remote's md5sum_command (~5 s).
+        result = self._run_rclone(
+            [
+                "lsjson",
+                "--stat",
+                "--no-mimetype",
+                "--no-modtime",
+                "--hash",
+                "--hash-type",
+                "MD5",
+                remote,
+            ],
+            expected_size,
+            "remote_md5_verify",
+        )
         try:
-            self._run_rclone(
-                ["copyto", remote, str(downloaded)],
-                expected_size,
-                "download_verify",
+            payload = json.loads(result.stdout)
+        except json.JSONDecodeError as exc:
+            raise TransferError("remote_md5_verify returned invalid JSON") from exc
+        hashes = payload.get("Hashes") if isinstance(payload, dict) else None
+        remote_md5 = hashes.get("md5") if isinstance(hashes, dict) else None
+        if not isinstance(remote_md5, str) or not re.fullmatch(
+            r"[0-9a-f]{32}", remote_md5.strip().lower()
+        ):
+            raise TransferError(
+                f"remote_md5_verify returned no MD5 for {source.name}"
             )
-            if not downloaded.is_file() or downloaded.stat().st_size != expected_size:
-                raise TransferError(
-                    f"downloaded remote size mismatch for {source.name}"
-                )
-            if _sha256_file(downloaded) != _sha256_file(source):
-                raise TransferError(
-                    f"remote content checksum mismatch for {source.name}"
-                )
-        finally:
-            downloaded.unlink(missing_ok=True)
+        if payload.get("Size") != expected_size:
+            raise TransferError(
+                f"downloaded remote size mismatch for {source.name}"
+            )
+        if remote_md5.strip().lower() != _md5_file(source):
+            raise TransferError(
+                f"remote content checksum mismatch for {source.name}"
+            )
 
     def _move_confirmed_source(self, relative_key: str, expected_size: int) -> None:
         source = self.config.compacted_dir / relative_key

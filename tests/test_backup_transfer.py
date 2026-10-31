@@ -46,6 +46,24 @@ if command == "size":
     if not path.exists():
         sys.exit(3)
     print(json.dumps({"count": 1, "bytes": path.stat().st_size}))
+elif command == "lsjson":
+    target = next(arg for arg in sys.argv[2:] if ":" in arg)
+    path = remote_path(target)
+    if not path.exists():
+        sys.exit(3)
+    item = {
+        "Path": path.name,
+        "Name": path.name,
+        "Size": -1 if path.is_dir() else path.stat().st_size,
+        "IsDir": path.is_dir(),
+    }
+    if "--hash" in sys.argv and not path.is_dir():
+        import hashlib
+        data = path.read_bytes()
+        if mode == "md5mismatch":
+            data += b"x"
+        item["Hashes"] = {"md5": hashlib.md5(data).hexdigest()}
+    print(json.dumps(item))
 elif command == "copyto":
     source_arg = sys.argv[2]
     destination_arg = sys.argv[3]
@@ -171,7 +189,7 @@ class BackupTransferTests(unittest.TestCase):
             self.assertIn("--sftp-chunk-size", argv)
             self.assertEqual(argv[argv.index("--sftp-chunk-size") + 1], "128k")
 
-    def test_download_verify_omits_sftp_tuning_flags(self) -> None:
+    def test_remote_md5_verify_omits_sftp_tuning_flags(self) -> None:
         source = self.compacted / "spread_verify.parquet"
         source.write_bytes(b"verify-safe")
         transfer = BackupTransfer(self.config())
@@ -179,7 +197,8 @@ class BackupTransferTests(unittest.TestCase):
 
         self.assertEqual(transfer.run(), 0)
 
-        verify = next(c for c in commands if c["operation"] == "download_verify")
+        verify = next(c for c in commands if c["operation"] == "remote_md5_verify")
+        self.assertIn("--hash", verify["command"])
         argv = verify["command"]
         self.assertNotIn("--sftp-concurrency", argv)
         self.assertNotIn("--sftp-chunk-size", argv)
@@ -188,9 +207,17 @@ class BackupTransferTests(unittest.TestCase):
             if payload["operation"].startswith("stat_") or payload[
                 "operation"
             ].startswith("verify_"):
-                if payload["operation"] == "download_verify":
-                    continue
                 self.assertNotIn("--sftp-concurrency", payload["command"])
+
+    def test_remote_md5_mismatch_keeps_source(self) -> None:
+        source = self.compacted / "spread_md5.parquet"
+        source.write_bytes(b"md5-check")
+        os.environ["FAKE_RCLONE_MODE"] = "md5mismatch"
+        transfer = BackupTransfer(self.config())
+
+        self.assertEqual(transfer.run(), 1)
+        self.assertTrue(source.exists())
+        self.assertFalse((self.compacted / "sent" / source.name).exists())
 
     def test_sftp_tuning_disabled_when_concurrency_zero(self) -> None:
         source = self.compacted / "spread_untuned.parquet"
