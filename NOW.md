@@ -6,16 +6,17 @@
 
 ## would_send (стратег)
 
-Симуляция гира 2.2, `would_send`, `send=false`. Живых ордеров нет. Sentry env `gear22-would-send-canary`.
+Симуляция гира 2.2, `would_send`, `send=false`. Живых ордеров нет. **Сейчас остановлена.**
 
-- Юнит `spread-bbot-would-send-prod`, данные `/data/bbot-would-send-prod` (`theta/`, `tw_p50/`, `theta_trades/`, `floor/`); active с 10.10 23:06 МСК, PID 3261154, NRestarts=0, `CPUQuota=100%`, `MemoryMax=2G`.
-- Checkout на хосте `/root/spread_bbot_theta_top10_canary` (симлинк `/root/spread_bbot_would_send_prod`) = `8f942d2` **+ незакоммиченные правки Codex A/B** (`runtime.py`, `theta_screener.py`, `theta_trade_manager.py`, `tw_p50_watcher.py` и тесты). Прод ≠ main. Не делать `git checkout`/`reset` на хосте.
-- Статус 20.10.2026 10:40 МСК: пул 71 (база 29 + 42 экстра), expand-only ротация 10:00 МСК (20.10 добавлены METIS, OPG, `history_seed_done rc=0`, drop пуст); потолок экстра `BBOT_HOT_ADD_MAX_EXTRA=48` (макс. 77). Heartbeat свежий, `pending=None`, `position=None`; по `theta_trades` flat.
-- Память: MemoryCurrent ~1.24 GiB, но это в основном page cache (~0.94 GiB file); RSS процесса ~310 MiB (anon ~300), рост ~1–6 MiB/сутки, пропорционален пулу, утечки не видно. Рестарт по памяти не нужен.
-- Гейты: θ_open 0.50, p50_open 0.60, min_profit 0.20, fee 0.30, K=1, notional 20 USDT; tick AGE/SKEW 10000 мс; size gate off (`BBOT_SIZE_GATE=0`); `send=false` (broker stub).
-- `theta/` и `tw_p50/` закрытых дней сжимаются в `metrics.jsonl.zst` на смене UTC (`BBOT_METRICS_ROTATE_COMPRESS=1`); 19.10 сжат.
-- Следит: Sentry-рутина стратега.
-- Не трогать Contour B, `/data/live`, collector, чужие юниты. Рестарт только когда flat по `theta_trades` (не по heartbeat `position`).
+- Юнит `spread-bbot-would-send-prod` — inactive/disabled. Данные `/data/bbot-would-send-prod` (`theta/`, `tw_p50/`, `theta_trades/`, `floor/`, 5.8G) сохранены, не чистить.
+- Checkout на хосте `/root/spread_bbot_would_send_prod` = `8f942d2` **+ незакоммиченные правки Codex A/B** (10 файлов в `git status`). Прод ≠ main. Не делать `git checkout`/`reset` на хосте.
+- Статус: остановлен и выключен по команде Миши 22.10.2026 14:43 МСК во flat (последняя сделка IOST long `fada8207` закрыта 22.10 07:38 МСК). Последний пул 77 (база 29 + 48 экстра, потолок `BBOT_HOT_ADD_MAX_EXTRA=48`).
+- Rotate-таймер `spread-bbot-would-send-prod-rotate` всё ещё active/enabled и срабатывает в 10:00 МСК: дописывает экстра в `hot_add_delta.csv`/`driver/rotate_state.json` (31.10 +WET, сейчас 56 экстра > потолка 48), SIGHUP падает (юнит не запущен) — ожидаемо.
+- Гейты без изменений: θ_open 0.50, p50_open 0.60, min_profit 0.20, K=1, notional 20 USDT, AGE/SKEW 10 s, `BBOT_SIZE_GATE=0`, `send=false`.
+- Открытый вопрос: у OKX `ct_val` = null для новых монет (MEW/IOST/DOOD) — плановый размер vs глубина L1 в неверных единицах; починить до любого запуска.
+- Запуск: `systemctl enable --now spread-bbot-would-send-prod` только по команде Миши; экстра-монеты прогреваются из устаревшей истории на старте.
+- Следит: никто — Sentry- и утренняя pool-рутины стратега на паузе.
+- Не трогать Contour B, `/data/live`, collector, чужие юниты, данные и checkout would_send.
 
 ## Contour B (бот)
 
