@@ -11,10 +11,10 @@
 - Юнит `spread-bbot-would-send-prod` — inactive/disabled. Данные `/data/bbot-would-send-prod` (`theta/`, `tw_p50/`, `theta_trades/`, `floor/`, 5.8G) сохранены, не чистить.
 - Checkout на хосте `/root/spread_bbot_would_send_prod` = `8f942d2` **+ незакоммиченные правки Codex A/B** (10 файлов в `git status`). Прод ≠ main. Не делать `git checkout`/`reset` на хосте.
 - Статус: остановлен и выключен по команде Миши 22.10.2026 14:43 МСК во flat (последняя сделка IOST long `fada8207` закрыта 22.10 07:38 МСК). Последний пул 77 (база 29 + 48 экстра, потолок `BBOT_HOT_ADD_MAX_EXTRA=48`).
-- Rotate-таймер `spread-bbot-would-send-prod-rotate` всё ещё active/enabled и срабатывает в 10:00 МСК: дописывает экстра в `hot_add_delta.csv`/`driver/rotate_state.json` (31.10 +WET, сейчас 56 экстра > потолка 48), SIGHUP падает (юнит не запущен) — ожидаемо.
+- Rotate-таймер `spread-bbot-would-send-prod-rotate` выключен (inactive/disabled) с 31.10.2026 11:47 МСК по команде Миши. За время простоя он дописал экстра в `driver/rotate_state.json` (56 > потолка 48) — решить перед запуском.
 - Гейты без изменений: θ_open 0.50, p50_open 0.60, min_profit 0.20, K=1, notional 20 USDT, AGE/SKEW 10 s, `BBOT_SIZE_GATE=0`, `send=false`.
 - Открытый вопрос: у OKX `ct_val` = null для новых монет (MEW/IOST/DOOD) — плановый размер vs глубина L1 в неверных единицах; починить до любого запуска.
-- Запуск: `systemctl enable --now spread-bbot-would-send-prod` только по команде Миши; экстра-монеты прогреваются из устаревшей истории на старте.
+- Запуск: `systemctl enable --now spread-bbot-would-send-prod spread-bbot-would-send-prod-rotate.timer` только по команде Миши; экстра-монеты прогреваются из устаревшей истории на старте.
 - Следит: никто — Sentry- и утренняя pool-рутины стратега на паузе.
 - Не трогать Contour B, `/data/live`, collector, чужие юниты, данные и checkout would_send.
 
