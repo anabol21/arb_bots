@@ -19,20 +19,13 @@
 
 ## Contour B (бот)
 
-Контур гира 2.3 (динамический пул) на real net, `send=true`, номинал 10 USDT. Live canary gear23 (B2.3), запущен standalone (не systemd). Планы и вектор — в [roadmap.md](roadmap.md), здесь только состояние.
-
-- Статус 22.10.2026 ~22:30 МСК: PID 1163920 с 22.10 22:19:50 МСК (до этого PID 543732 с 18.10 20:45 МСК), standalone `python -m app.bot`, лаунчер `/tmp/gear23-pool12-launch.sh`, runroot `/root/b-private-b-exp/response-manager/20261005T194200Z-gear22-longrun`, лог `bbot-gear23-b2.3.log` (время в логе UTC). Сейчас flat.
-- Код без изменений: дерево `/root/b-private-b-exp/response-manager-code/gear23-b2.3-tw-deque-20261010-tradeobs-20261018T1741Z` (tradeobs: `place_send.py`, `trade_history.py`, `theta_trade_manager.py` + тесты trade-observation).
-- Пул сокращён 77 → 12 по решению Миши (только монеты со сделками 05–22.10): база `BBOT_COINS=WAL,RVN,LA` + 9 hot-add из замороженной копии `$RUNROOT/state/pool12/hot_add_delta_pool12.csv` (API3, BLUR, CT, DOOD, IOST, MEW, RSR, SAND, TRUST), `MAX_EXTRA=9`. Прод `/data/bbot-would-send-prod/hot_add_delta.csv` не менялся; новые монеты из ротации would_send в канарейку больше не приезжают. Откат на 77: `/tmp/gear23-rollback77-launch.sh` через `/root/pool12/restart_with_fix1.sh`.
-- Остальное без изменений: hot-add с плечом 1x, AGE/SKEW 10 s, flat non-resume, Sentry trade events. Гейты: θ_open 0.50, p50_open 0.60, min_profit 0.20, fee 0.30, min_θ_close 0.05, K=1; `terminal_private`, policy gear22.
-- Сделки после рестарта 18.10:
-  - SAND long `d6d91247` закрыт 19.10 09:33 МСК, net +$0.015; CT long `57ae1236` 19.10 10:43 → 16:34 МСК, net +$0.031.
-  - MEW long `5d423ce8` 21.10 10:01 → 11:00 МСК.
-  - 21–22.10: IOST long `44d96435` (12:43 → 14:12 МСК), DOOD long `9e1d3768`, IOST short `88b3522a`, IOST long `7e290c36`, `3cfb536a`, `5a403dbd`. Последняя — IOST long `5a403dbd`, закрыта 22.10 07:46 МСК, net −$0.023 с фандингом.
-- Итог 05–22.10: 28 открытий / 28 закрытий по 12 монетам; net без фандинга +$0.57, с записанным фандингом −$0.07 (фандинг пишется только с 19.10). Отчёт: `/workspace/pool_signal_distribution_20261022` (на машине бота).
-- Открытые вопросы: journal fill ~+1.05 с после сигнала при биржевом исполнении +25–40 мс (повторный фрейм Bybit private, `wait_fill` ждёт его); после рестарта `ws_tasks_started n=26` при `expect=24` — наблюдаем.
-- Метрики сжимает `spread-bbot-gear23-metrics-compact.timer` раз в сутки в 03:15 МСК (Parquet, JSONL удаляется); работает ежедневно.
-- Слежу я (бот): часовой watch в :47 МСК + Sentry-рутина, дашборд после каждой сделки. Не трогать без явного OK Миши: процесс, лаунчер, runroot, плечи на биржах. Контур не пишет в `/data/live` и в данные would_send-prod.
+- gear23 / B2.3 live canary, PID 1614324, работает с 25.10 13:58 МСК, рестартов и halts нет.
+- Пул 35 из 60 (3 базовые + 32 extras), ротация ежедневно в 10:10 МСК; 31.10 добавлены WET, ESP, DNA, 30.10 — PARTI, SOPH, LQTY. Нет подтверждения 1x в логе у APR и BLEND.
+- Позиция на 31.10 ~11:40 МСК: WET long ed510209 (вход 10:23).
+- completed_cycles 28 на конец 30.10.
+- За 29.10: 4 сделки, net +$0.1979. За 30.10: 3 сделки, net +$0.0293. Funding Bybit сходится с closedPnl.
+- Мониторинг: вместо уведомлений по каждой сделке утренний дайджест ~10:30 МСК (учёт в %, задержки, спреды, пул-репорт). Остальные watch на паузе.
+- size_check только по L1. REST бирж только для разовой сверки funding/PnL.
 
 ## Ops / collector (голова)
 
