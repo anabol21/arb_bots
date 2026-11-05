@@ -1,6 +1,6 @@
 # NOW
 
-Снимок на 2026-11-04 ~09:35 МСК. Каждая секция — зона своего агента, чужие секции не переписывать.
+Снимок на 2026-11-05 ~09:40 МСК. Каждая секция — зона своего агента, чужие секции не переписывать.
 
 Вектор развития: [roadmap.md](roadmap.md). Этот файл — снимок, не план.
 
@@ -34,13 +34,13 @@
 
 - Вектор: держать D зелёным (collector/compact/backup) как базу под would_send canary → 2.2 → **2.3** → 2.4… из [roadmap.md](roadmap.md); параллельно крутится gear23 live (бот, динамический пул).
 - Юнит `spread-collector-next`, код `/root/spread_staging`, данные `/data/live`. SHA нет: `/root/spread_staging` не git-checkout, крутится задеплоенное дерево (innovation-фикс discovery = main `aae6695`, backup_transfer = main `0cb24c1`). Старый `spread-collector` inactive/disabled.
-- Изменения на хосте за сутки: деплоев и рестартов юнитов нет, gear23 тот же PID 1614324. Пул gear23 38 → 40 (03.11: CORE, ACU).
-- Статус 04.11 ~09:35 МСК: active с 22.09 14:07 МСК (PID 4176949, NRestarts=0, MemoryCurrent ~2.2 GiB, в основном page cache), heartbeat 203 пары, `collect_bars=false`, `failures=0`, `rejected_records=0`, queue=0. В `/data/live` 609 новых parquet за 5 мин.
-- Backup (rclone в `backup1tb:spread-compacted`) по факту доставки: за 24ч 288 ok / 0 fail (норма ~9). В `/data/compacted` неотправленных нет, последний успешный transfer 04.11 09:32 МСК.
-- Compactor по таймеру без ошибок. Ночной compact 03:15 МСК: gear23 `days_compacted=3 skipped=106 errors=0`; θ K=1 `days_compacted=0 skipped=76 errors=0`. Топ-10 volatile 04.11 отработал 09:10–09:11 МСК, окно полное (286/289 слотов). Таймеры compact/backup/discovery/ops-metrics/top10/gear23-metrics-compact/theta-k1-metrics-compact/canary-pool-dyn-append active.
+- Изменения на хосте за сутки: деплоев и рестартов юнитов нет, gear23 тот же PID 1614324. Пул gear23 40 → 41 (04.11: AERO); 05.11 pool-dyn append без новых монет.
+- Статус 05.11 ~09:40 МСК: active с 22.09 14:07 МСК (PID 4176949, NRestarts=0, MemoryCurrent ~2.0 GiB, в основном page cache), heartbeat 203 пары, `collect_bars=false`, `failures=0`, `rejected_records=0`, queue=0. В `/data/live` 609 новых parquet за 5 мин.
+- Backup (rclone в `backup1tb:spread-compacted`) по факту доставки: за 24ч 287 ok / 2 fail (норма ~9; оба fail 04.11 16:16–16:21 МСК, copyto watchdog 120s, тот же файл, дальше ok). В `/data/compacted` 1 pending ~3 мин, последний успешный transfer 05.11 09:35 МСК.
+- Compactor по таймеру без ошибок. Ночной compact 03:15 МСК: gear23 `days_compacted=3 skipped=109 errors=0`; θ K=1 `days_compacted=0 skipped=76 errors=0`. Топ-10 volatile 05.11 отработал 09:10–09:11 МСК, окно полное (287/289 слотов). Таймеры compact/backup/discovery/ops-metrics/top10/gear23-metrics-compact/theta-k1-metrics-compact/canary-pool-dyn-append active.
 - В `systemctl --failed` только старые one-shot/canary хвосты (`spread-bars-compactor`, `spread-bars-compacted-backup-transfer` с 13.08; `spread-bbot-ev2-10/11/12` с 21–23.09; `gear23-shadow-end-one-hour-20261024t1219` с 24.10). Не чищу без OK.
-- Соседи на хосте (не веду): `spread-bbot-would-send-prod` inactive/disabled (данные `/data/bbot-would-send-prod` 5.8G); gear23 live PID 1614324 standalone с 25.10 13:58 МСК, база `WAL,RVN,LA` + 37 hot-add (`MAX_EXTRA=57`), открыта позиция AXIS long 10 USDT с 04.11 09:27 МСК; θ K=1 canary inactive/disabled, oneshot не запускал.
-- Ops 24h: CPU ср. 6% / пик 27%, load сейчас ~0.3, RAM 2.2 / пик 2.9 из 16 GiB (свободно ≥12.7 GiB), egress 6.5 GiB / пик 3.4 Mbit/s.
-- Лимиты collector: skew/age 2000 мс, HOT_ADD max_extra=8, bars off. Диск 40/79G (53%), свободно ~36G; `/data` 18G, `/tmp` 4.9G, `/var/log` 5.4G. Данные впервые материализуются в `/data/live`, затем compact в `/data/compacted`, резервная копия — `backup1tb:spread-compacted`.
+- Соседи на хосте (не веду): `spread-bbot-would-send-prod` inactive/disabled (данные `/data/bbot-would-send-prod` 5.8G); gear23 live PID 1614324 standalone с 25.10 13:58 МСК, база `WAL,RVN,LA` + 38 hot-add (`MAX_EXTRA=57`), позиция flat (AXIS long ff2912de закрыта 04.11 17:48 МСК); θ K=1 canary inactive/disabled, oneshot не запускал.
+- Ops 24h: CPU ср. 7% / пик 25%, load сейчас ~0.3, RAM 2.2 / пик 3.1 из 16 GiB (свободно ≥13 GiB), egress 6.7 GiB / пик 4.0 Mbit/s.
+- Лимиты collector: skew/age 2000 мс, HOT_ADD max_extra=8, bars off. Диск 41/79G (54%), свободно ~36G; `/data` 18G, `/tmp` 4.9G, `/var/log` 5.8G. Данные впервые материализуются в `/data/live`, затем compact в `/data/compacted`, резервная копия — `backup1tb:spread-compacted`.
 - Слежу я (голова), утренний дайджест ~9:32 МСК. @бот — Contour B / gear23 live, @стратег — would_send. Sentry ops отдельно, не эта секция.
 - Не поднимать старый collector. Чужие data root не чищу без явного OK. Утренний ops-снимок NOW.md коммичу сразу в main. Прочий патч в NOW.md и на сервер — только после явного «да».
