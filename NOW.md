@@ -20,11 +20,11 @@
 
 ## Contour B (бот)
 
-- gear23 / B2.3 live canary, PID 1614324, работает с 25.10 13:58 МСК (~11 сут), рестартов и halts нет, новых ERROR/Traceback нет.
-- Пул 44 из 60 (3 базовые WAL, RVN, LA + 41 extras); 03.11 добавлены CORE, ACU, 04.11 — AERO, 05.11 — HUMA, EWT, ARX (1x подтверждён, EWT и HUMA копят историю для floor). AKE из топ-10 пропускается (no_complete_meta). Нет подтверждения 1x в логе у APR, BLEND, ACU, PARTI.
-- Позиций нет (heartbeat 05.11 10:38 МСК: position=None).
+- gear23 / B2.3 live canary, PID 1614324, работает с 25.10 13:58 МСК (~11.8 сут), рестартов и halts нет, новых ERROR/Traceback нет.
+- Пул 46 из 60 (3 базовые WAL, RVN, LA + 43 extras); 04.11 добавлен AERO, 05.11 — HUMA, EWT, ARX, 06.11 (10:10 МСК) — XTZ, SPACE. SPACE: прогрет, 1x подтверждён; XTZ: 1x подтверждён, но история для floor пока не накоплена (history_missing, gate floor_warm). AKE из топ-10 по-прежнему не в пуле (ранее no_complete_meta, сегодня причину в событии сайдкара не проверял). Нет подтверждения 1x в логе у APR, BLEND, ACU, PARTI.
+- Позиций нет (heartbeat 06.11 10:33 МСК: position=None).
 - completed_cycles 35.
-- 04.11: 3 сделки AXIS long, net +$0.0731 (гросс +$0.1750, комиссии −$0.0971, funding −$0.0049); funding сходится с closedPnl Bybit и pnl OKX.
+- 05.11: сделок нет, net $0; ERROR/Traceback за сутки 0; funding проверять нечего.
 - Мониторинг: утренний дайджест ~10:30 МСК, эта секция обновляется после дайджеста.
 - size_check только по L1. REST бирж только для разовой сверки funding/PnL.
 
