@@ -20,11 +20,11 @@
 
 ## Contour B (бот)
 
-- gear23 / B2.3 live canary, PID 1614324, работает с 25.10 13:58 МСК (~11.8 сут), рестартов и halts нет, новых ERROR/Traceback нет.
-- Пул 46 из 60 (3 базовые WAL, RVN, LA + 43 extras); 04.11 добавлен AERO, 05.11 — HUMA, EWT, ARX, 06.11 (10:10 МСК) — XTZ, SPACE. SPACE: прогрет, 1x подтверждён; XTZ: 1x подтверждён, но история для floor пока не накоплена (history_missing, gate floor_warm). AKE из топ-10 по-прежнему не в пуле (ранее no_complete_meta, сегодня причину в событии сайдкара не проверял). Нет подтверждения 1x в логе у APR, BLEND, ACU, PARTI.
-- Позиций нет (heartbeat 06.11 10:33 МСК: position=None).
+- gear23 / B2.3 live canary, PID 1614324, работает с 25.10 13:58 МСК (~12.9 сут), рестартов и halts нет, новых ERROR/Traceback нет.
+- Пул 46 из 60 (3 базовые WAL, RVN, LA + 43 extras); 05.11 добавлены HUMA, EWT, ARX, 06.11 — XTZ, SPACE; 07.11 ротация в 10:10 МСК ничего не добавила (9 из топ-10 уже в пуле, AKE пропущен: no_complete_meta). XTZ: 1x подтверждён, но после hot-add warm не прошёл (history_missing, gate floor_warm), повторного warm в логе нет. Нет подтверждения 1x в логе у APR, BLEND, ACU, PARTI.
+- Позиций нет (heartbeat 07.11 10:31 МСК: position=None).
 - completed_cycles 35.
-- 05.11: сделок нет, net $0; ERROR/Traceback за сутки 0; funding проверять нечего.
+- 06.11: сделок нет, net $0; ERROR/Traceback за сутки 0; funding проверять нечего.
 - Мониторинг: утренний дайджест ~10:30 МСК, эта секция обновляется после дайджеста.
 - size_check только по L1. REST бирж только для разовой сверки funding/PnL.
 
