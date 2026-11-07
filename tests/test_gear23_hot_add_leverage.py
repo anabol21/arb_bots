@@ -4,6 +4,7 @@ import asyncio
 import logging
 import time
 import unittest
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -473,6 +474,199 @@ class HotAddLeverageTests(unittest.TestCase):
                     get_fn=get,
                 )
             self.assertEqual(posts, [])
+
+    def test_run_enables_extra_leverage_after_private_warmup(self) -> None:
+        text = Path("app/bot/runtime.py").read_text(encoding="utf-8")
+        warm_idx = text.find("private_or_synthetic_warm_failed")
+        ready_idx = text.find("self._gear23_leverage_ready = True")
+        self.assertGreater(warm_idx, 0)
+        self.assertGreater(ready_idx, warm_idx)
+        enable = text[ready_idx : ready_idx + 280]
+        self.assertIn("self._gear23_schedule_hot_add_leverage(coin)", enable)
+
+
+class LeverageFailureLogTests(unittest.TestCase):
+    SECRET_CREDS = LiveCredentials("LEAK_KEY_XYZ", "LEAK_SECRET_XYZ", "LEAK_PASS_XYZ")
+
+    def _target(self) -> LeverageTarget:
+        return LeverageTarget("DOOD", "DOOD-USDT-SWAP", "DOODUSDT")
+
+    def _flat_get(self, target: LeverageTarget, *, okx_lever: str = "1"):
+        def get(url, _headers, *, timeout_sec):
+            self.assertEqual(timeout_sec, 15.0)
+            if "/api/v5/account/positions" in url:
+                return {"code": "0", "data": []}
+            if "/api/v5/trade/orders-pending" in url:
+                return {"code": "0", "data": []}
+            if "/api/v5/account/leverage-info" in url:
+                return {"code": "0", "data": [{
+                    "instId": target.okx_symbol, "lever": okx_lever, "mgnMode": "cross",
+                }]}
+            if "/v5/order/realtime" in url:
+                return {"retCode": 0, "result": {"list": []}}
+            return {"retCode": 0, "result": {"list": [{
+                "symbol": target.bybit_symbol, "leverage": "1",
+                "buyLeverage": "1", "sellLeverage": "1", "size": "0",
+                "positionIdx": 0, "positionStatus": "Normal",
+                "updatedTime": "1791640000000",
+            }]}}
+        return get
+
+    def _success_post(self):
+        def post(url, _headers, _body):
+            if "okx" in url:
+                return 200, {"code": "0", "msg": "", "data": [{"lever": "1", "mgnMode": "cross"}]}
+            return 200, {"retCode": 0, "retMsg": "OK", "result": {}}
+        return post
+
+    def _verify(self, target, post, get):
+        return set_and_verify_leverage_one(
+            target,
+            okx_credentials=self.SECRET_CREDS,
+            bybit_credentials=self.SECRET_CREDS,
+            endpoints=endpoints_for_venue("live"),
+            post_fn=post,
+            get_fn=get,
+        )
+
+    def test_okx_set_unconfirmed_logs_venue_step_code_and_msg(self) -> None:
+        target = self._target()
+
+        def post(url, headers, _body):
+            self.assertIn("OK-ACCESS-KEY", headers)
+            if "okx" in url:
+                return 429, {"code": "50011", "msg": "Rate limit reached"}
+            return 200, {"retCode": 0, "result": {}}
+
+        with self.assertLogs("bbot.private.leverage_one", level="WARNING") as logs:
+            with self.assertRaisesRegex(RuntimeError, "^leverage_set_unconfirmed$"):
+                self._verify(target, post, self._flat_get(target))
+        text = "\n".join(logs.output)
+        self.assertIn("leverage_one_step_failed", text)
+        self.assertIn("venue=okx", text)
+        self.assertIn("step=set", text)
+        self.assertIn("symbol=DOOD-USDT-SWAP", text)
+        self.assertIn("coin=DOOD", text)
+        self.assertIn("reason=set_unconfirmed", text)
+        self.assertIn("http_status=429", text)
+        self.assertIn("code=50011", text)
+        self.assertIn("msg=Rate limit reached", text)
+        self.assertIn("requested_leverage=1", text)
+        self.assertIn("requested_mgn_mode=cross", text)
+        self.assertNotIn("LEAK_KEY_XYZ", text)
+        self.assertNotIn("LEAK_SECRET_XYZ", text)
+        self.assertNotIn("LEAK_PASS_XYZ", text)
+        self.assertNotIn("OK-ACCESS", text)
+        self.assertNotIn("X-BAPI", text)
+
+    def test_set_exception_logs_type_and_cause_text(self) -> None:
+        target = self._target()
+
+        def post(url, _headers, _body):
+            if "okx" in url:
+                raise RuntimeError("leverage_set_failed") from TimeoutError("timed out")
+            return 200, {"retCode": 0, "result": {}}
+
+        with self.assertLogs("bbot.private.leverage_one", level="WARNING") as logs:
+            with self.assertRaisesRegex(RuntimeError, "^leverage_set_unconfirmed$"):
+                self._verify(target, post, self._flat_get(target))
+        text = "\n".join(logs.output)
+        self.assertIn("venue=okx", text)
+        self.assertIn("step=set", text)
+        self.assertIn("reason=set_exception", text)
+        self.assertIn("exc_type=RuntimeError/TimeoutError", text)
+        self.assertIn("exc=timed out", text)
+
+    def test_bybit_set_unconfirmed_logs_retcode(self) -> None:
+        target = self._target()
+
+        def post(url, _headers, _body):
+            if "okx" in url:
+                return 200, {"code": "0", "data": [{"lever": "1", "mgnMode": "cross"}]}
+            return 200, {"retCode": 10006, "retMsg": "Too many visits!"}
+
+        with self.assertLogs("bbot.private.leverage_one", level="WARNING") as logs:
+            with self.assertRaisesRegex(RuntimeError, "^leverage_set_unconfirmed$"):
+                self._verify(target, post, self._flat_get(target))
+        text = "\n".join(logs.output)
+        self.assertIn("venue=bybit", text)
+        self.assertIn("step=set", text)
+        self.assertIn("code=10006", text)
+        self.assertIn("msg=Too many visits!", text)
+        self.assertIn("requested_leverage=1", text)
+
+    def test_bybit_already_set_still_confirms_without_failure_log(self) -> None:
+        target = self._target()
+        records: list[str] = []
+
+        def post(url, _headers, _body):
+            if "okx" in url:
+                return 200, {"code": "0", "data": [{"lever": "1", "mgnMode": "cross"}]}
+            return 200, {"retCode": 110043, "retMsg": "leverage not modified"}
+
+        class _Capture(logging.Handler):
+            def emit(self, record: logging.LogRecord) -> None:
+                records.append(record.getMessage())
+
+        log = logging.getLogger("bbot.private.leverage_one")
+        handler = _Capture()
+        log.addHandler(handler)
+        try:
+            self.assertTrue(self._verify(target, post, self._flat_get(target)))
+        finally:
+            log.removeHandler(handler)
+        self.assertFalse(any("leverage_one_step_failed" in line for line in records))
+
+    def test_okx_readback_unconfirmed_logs_observed_leverage(self) -> None:
+        target = self._target()
+        with self.assertLogs("bbot.private.leverage_one", level="WARNING") as logs:
+            with self.assertRaisesRegex(RuntimeError, "^leverage_readback_unconfirmed$"):
+                self._verify(target, self._success_post(), self._flat_get(target, okx_lever="5"))
+        text = "\n".join(logs.output)
+        self.assertIn("venue=okx", text)
+        self.assertIn("step=readback", text)
+        self.assertIn("reason=readback_unconfirmed", text)
+        self.assertIn("code=0", text)
+        self.assertIn("requested_leverage=1", text)
+        self.assertIn("requested_mgn_mode=cross", text)
+        self.assertIn("observed_leverage=5", text)
+        self.assertIn("observed_mgn_mode=cross", text)
+
+    def test_readback_exception_logs_venue_and_exception(self) -> None:
+        target = self._target()
+
+        def get(url, _headers, *, timeout_sec):
+            if "/api/v5/account/leverage-info" in url:
+                raise RuntimeError("leverage_readback_failed") from TimeoutError("read timed out")
+            return self._flat_get(target)(url, _headers, timeout_sec=timeout_sec)
+
+        with self.assertLogs("bbot.private.leverage_one", level="WARNING") as logs:
+            with self.assertRaisesRegex(RuntimeError, "^leverage_readback_failed$"):
+                self._verify(target, self._success_post(), get)
+        text = "\n".join(logs.output)
+        self.assertIn("venue=okx", text)
+        self.assertIn("step=readback", text)
+        self.assertIn("reason=readback_failed", text)
+        self.assertIn("exc_type=RuntimeError/TimeoutError", text)
+        self.assertIn("exc=read timed out", text)
+
+    def test_preflight_not_flat_logs_venue_and_step(self) -> None:
+        target = self._target()
+
+        def get(url, _headers, *, timeout_sec):
+            if "/v5/position/list" in url:
+                return {"retCode": 0, "result": {"list": [{
+                    "symbol": target.bybit_symbol, "size": "0.01", "positionIdx": 0,
+                }]}}
+            return self._flat_get(target)(url, _headers, timeout_sec=timeout_sec)
+
+        with self.assertLogs("bbot.private.leverage_one", level="WARNING") as logs:
+            with self.assertRaisesRegex(RuntimeError, "^leverage_preflight_not_flat$"):
+                self._verify(target, self._success_post(), get)
+        text = "\n".join(logs.output)
+        self.assertIn("venue=bybit", text)
+        self.assertIn("step=preflight", text)
+        self.assertIn("reason=not_flat", text)
 
 
 if __name__ == "__main__":
