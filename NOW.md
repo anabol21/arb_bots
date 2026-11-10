@@ -20,11 +20,11 @@
 
 ## Contour B (бот)
 
-- gear23 / B2.3 live canary, PID 1614324, работает с 25.10 13:58 МСК (~14.9 сут), рестартов и halts нет, новых ERROR/Traceback нет.
-- Пул 47 из 60 (3 базовые WAL, RVN, LA + 44 extras); 09.11 10:10 МСК добавлен AZTEC (warm ok, подтверждения 1x в журнале пока нет), остальные 9 из топ-10 уже в пуле; ранее 05.11 HUMA, EWT, ARX, 06.11 XTZ, SPACE. XTZ: 1x подтверждён, warm не прошёл (history_missing).
-- Позиций нет (BLEND long `a8fcc753` закрыта 08.11 17:00 МСК).
-- completed_cycles 36.
-- 08.11: 1 сделка (BLEND long), net $+0.0097; Bybit funding сверен с private WS и биржевым closedPnl, сходится; ERROR/Traceback за сутки 0.
+- gear23 / B2.3 live canary, PID 1614324, работает с 25.10 13:58 МСК (~15.9 сут), рестартов и halts нет, новых ERROR/Traceback нет.
+- Пул 47 из 60 (3 базовые WAL, RVN, LA + 44 extras); 10.11 10:10 МСК сайдкар ничего не добавил (новых событий append нет), предыдущее добавление 09.11 AZTEC (warm ok, подтверждения 1x в журнале нет); AKE в топ-10, но в пуле его нет, причина в логах не найдена.
+- Открыта INIT long `c0080e92` (с 09.11 20:01 МСК, 10 USD ноционал).
+- completed_cycles 37.
+- 09.11: 1 сделка (INIT long `9f63340d`, 11:22→16:35), net $-0.0061 (funding Bybit -0.0365 съел плюс); Bybit funding сверен с private WS и closedPnl, сходится; ERROR/Traceback за сутки 0.
 - Мониторинг: утренний дайджест ~10:30 МСК, эта секция обновляется после дайджеста.
 - size_check только по L1. REST бирж только для разовой сверки funding/PnL.
 
