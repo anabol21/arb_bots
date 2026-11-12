@@ -32,7 +32,7 @@
 
 Сервер, утренний снимок, скрипты юнитов. Живые ордера и would_send не веду. Архитектура: `docs/`.
 
-- Вектор: держать D зелёным (collector/compact/backup) как базу под would_send canary → 2.2 → **2.3** → 2.4… из [roadmap.md](roadmap.md); параллельно крутится gear23 live (бот, динамический пул).
+- Вектор: держать D зелёным (collector/compact/backup) как базу под would_send canary → 2.2 → 2.3 (готово) → **3** → 3.4… из [roadmap.md](roadmap.md); параллельно крутится gear23 live (бот, динамический пул).
 - Юнит `spread-collector-next`, код `/root/spread_staging`, данные `/data/live`. SHA нет: `/root/spread_staging` не git-checkout, крутится задеплоенное дерево (innovation-фикс discovery = main `aae6695`, backup_transfer = main `0cb24c1`). Старый `spread-collector` inactive/disabled.
 - Изменения на хосте за сутки: рестартов юнитов и деплоев кода нет, collector тот же PID 4176949, gear23 тот же PID 1614324. Изменён только unit `spread-bbot-gear23-metrics-compact.service` (11.11 23:23 МСК, флаг `--merge-late-rows`, по «да» Миши). На main за сутки только docs: `810da2a` (ops-снимок 11.11) и `7db4e24` (секция Contour B).
 - Статус 12.11 ~09:45 МСК: collector active с 22.09 14:07 МСК (PID 4176949, heartbeat 203 пары, `failures=0`, MemoryCurrent ~2.0 GiB — в основном page cache).

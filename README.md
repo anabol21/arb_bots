@@ -50,7 +50,7 @@
 | `2` | охват: несколько монет, та же модель 1.0 — **закрыт (контур; 2.2 вне scope)** |
 | `2.2` | наблюдение на истории, замороженные ручки — **закрыт** в треке M |
 
-Дальше проект идёт не по этой лестнице. Актуальные патчи — would_send canary как prod-базис, bot-контур 2.2, затем 2.3, 2.4, 2.5, 2.7 и 3 — в [`roadmap.md`](roadmap.md).
+Дальше проект идёт не по этой лестнице. Актуальные патчи — would_send canary как prod-базис, bot-контур 2.2, динамический пул 2.3 (сделан), гир 3, затем 3.4, 3.5, 3.6 и 3.7 — в [`roadmap.md`](roadmap.md).
 
 Гир **2.2 закрыт как наблюдение**: потребитель [`research/gear22_backtest/`](research/gear22_backtest/) (`policy.decide`, прогон `replay.py` с часами 1 Гц и `K=1`, `SLOT_MODE=global`, ручки в `params_frozen.py`); таблица признаков `gear22_bt_features_v1`. Заполнение — `spread_last` той секунды, не `Trade_Lat`. `combined_mark` — метка наблюдения, не прибыль. Ручки: `theta_open=0.50`, `p50_open=0.60`, `min_profit_pp=0.20`, `min_theta_close=0.05` (включён; `0` ≠ `None`), `min_spread_open=None`, `fee_round_trip_pp=0.30`, `SLOT_MODE=global`.
 
