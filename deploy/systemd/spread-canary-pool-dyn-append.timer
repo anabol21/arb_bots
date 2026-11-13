@@ -1,0 +1,10 @@
+[Unit]
+Description=Daily 10:10 MSK canary pool expansion from top-10 volatile (after 09:10 render + 10:00 shared rotate)
+
+[Timer]
+OnCalendar=*-*-* 10:10:00 Europe/Moscow
+Persistent=false
+AccuracySec=30s
+
+[Install]
+WantedBy=timers.target

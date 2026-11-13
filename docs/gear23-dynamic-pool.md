@@ -125,9 +125,13 @@ unchanged.
 The B2.3 branch is based on the validated preB2.2 bot plus Gear 2.3 patches A/B
 and the reviewed close-PnL correction (`170f832`). Its runtime is the
 Gear 2.3-enabled canary implementation. Production would-send and the
-expand-only daily selector continue running from the separate main contour;
-B2.3 reads that contour's cumulative CSV as an input and does not deploy or
-start another selector. Main's collector and storage changes remain on main
+expand-only daily selector continue running from the separate main contour
+and still own `/data/bbot-would-send-prod/hot_add_delta.csv`. After the 22.10
+12-coin cut the live canary no longer reads that shared file. The 12 coins
+are the starting pool; a canary-owned sidecar appends each morning's top-10
+volatile names that are not already present
+(`docs/gear23-pool-dyn.md`). The bot hot-add poller, 1x gate, and warm path
+are unchanged. Main's collector and storage changes remain on main
 and are not part of this canary code archive.
 
 The active would-send snapshot contains 29 base coins and 30 unique extras
