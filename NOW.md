@@ -20,11 +20,11 @@
 
 ## Contour B (бот)
 
-- gear23 / B2.3 live canary, PID 1614324, работает с 25.10 13:58 МСК (~17.9 сут), рестартов и halts нет, новых ERROR/Traceback нет.
-- Пул 48 из 60 (3 базовые WAL, RVN, LA + 45 extras); 12.11 10:10 МСК сайдкар ничего не добавил (топ-10 уже в пуле), последнее добавление 11.11 UB (1x подтверждён). Без подтверждения 1x в журнале: AZTEC.
-- Открыта BTW long `9efe4366` (с 12.11 08:36 МСК, 10 USD ноционал).
-- completed_cycles 54.
-- 11.11: 15 сделок (INIT), net $-0.3088 (в среднем $-0.0206), funding OKX +0.3030 / Bybit -1.2511; Bybit сверен с private WS и closedPnl, сходится; по `60c4c772` журнал funding не записал (REST: OKX +0.0343, Bybit -0.0727); ERROR/Traceback 0.
+- gear23 / B2.3 live canary, PID 21096, запущен 13.11 09:53 МСК (после ребута VPS 04:53–05:15; патч старых баров floor_watcher, cycles с нуля), рестартов и halts после запуска нет, ERROR/Traceback за 12.11 нет.
+- Пул 50 из 60 (3 базовые WAL, RVN, LA + 47 extras); 13.11 10:10 МСК сайдкар добавил BARD, IMX (1x подтверждён, warm history_missing, гейт floor_warm), остальное из топ-10 уже в пуле. Без подтверждения 1x в журнале с рестарта: ACU, APR, AZTEC, BLEND, PARTI.
+- Открыта INIT long `c381d289` (с 13.11 10:04 МСК, 10 USD ноционал).
+- completed_cycles 55 (до рестарта), у нового PID с нуля.
+- 12.11: 2 сделки (BTW), net $-0.0815 (в среднем $-0.0408), funding OKX +0.1234 / Bybit -0.1874; Bybit сверен с private WS и closedPnl, сходится; ERROR/Traceback 0, обрывов private WS 9, рядом со сделками нет.
 - Мониторинг: утренний дайджест ~10:30 МСК, эта секция обновляется после дайджеста.
 - size_check только по L1. REST бирж только для разовой сверки funding/PnL.
 
