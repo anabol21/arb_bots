@@ -20,11 +20,11 @@
 
 ## Contour B (бот)
 
-- gear23 / B2.3 live canary, PID 69299, запущен 13.11 18:58 МСК, аптайм ~112 ч на 18.11 10:45; рестартов и halts нет, ERROR/Traceback за 17.11 нет (private WS: 24 обрыва, 17 неудачных auth, все с переподключением, рядом со сделками нет).
-- Пул 53 из 60 (3 базовые WAL, RVN, LA + 50 extras); 18.11 10:10 МСК сайдкар добавил BREV (1x подтверждён, warm live_catchup 10:15); 14.11 — BERA, SHELL. Нет подтверждения 1x в логе у APR и BLEND.
-- Открыта AXIS long 49ae6464 с 17.11 12:11 МСК (heartbeat 10:44 МСК 18.11).
-- completed_cycles 22 на конец 17.11 (было 20).
-- 17.11: 2 сделки (INIT×2), net $-0.1644 (среднее $-0.0822), главная потеря — funding Bybit; funding Bybit сходится с closedPnl и private WS. insufficient_size 15 (INIT 11, AXIS 4), send_abort 0.
+- gear23 / B2.3 live canary, PID 69299, запущен 13.11 18:58 МСК, аптайм ~160 ч на 20.11 10:45; рестартов и halts нет, ERROR/Traceback за 19.11 нет (private WS: 4362 обрыва канала, 2 неудачных auth, переподключения есть, рядом со сделками обрывов нет).
+- Пул 55 из 60 (3 базовые WAL, RVN, LA + 52 extras); 20.11 10:10 МСК сайдкар добавил YB (warm live_catchup 10:15, в 10:10 один ERROR gear23_metadata_prefetch_failed по YB, подтверждение 1x в логе не найдено); 19.11 — SENT. Нет подтверждения 1x в логе у APR и BLEND.
+- Открыта INIT long c84f73e7 (heartbeat 10:43 МСК 20.11).
+- completed_cycles 29 на конец 19.11 (было 27).
+- 19.11: 2 сделки (INIT×2), net $-0.1092 (среднее $-0.0546), главная потеря — funding Bybit; funding Bybit сходится с closedPnl и private WS. insufficient_size 8207 (INIT), send_abort 0.
 - Мониторинг: утренний дайджест ~10:30 МСК, эта секция обновляется после дайджеста.
 - size_check только по L1. REST бирж только для разовой сверки funding/PnL.
 
