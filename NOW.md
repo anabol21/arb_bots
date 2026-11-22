@@ -20,11 +20,11 @@
 
 ## Contour B (бот)
 
-- gear23 / B2.3 live canary, PID 821896, запущен 20.11 11:33 МСК (resume c84f73e7, без RVN: OKX делистнул RVNUSDT perp 19.11), аптайм ~23 ч на 21.11 10:45; 20.11 два старта (PID 820474 в 11:25 упал через ~70 с на 1x для INIT, затем 821896), halts нет, ERROR после 11:33 нет. TODO: убрать INIT из 1x resume-launcher после закрытия c84f73e7 (она закрыта 20.11 13:01).
-- Пул 54 из 60 (2 базовые WAL, LA + 52 extras; сайдкар считает 55 вместе с RVN); 20.11 10:10 добавлен YB, 21.11 10:10 добавление пропущено (would_add ENSO, AKE no_complete_meta): сайдкар отказал «bot_not_on_dyn_launcher», бот на resume-launcher. 1x: у 9 монет (WAL, LA, ACU, APR, AZTEC, BLEND, INIT, PARTI, YB) нет gear23_leverage_one_confirmed в логе, они в BBOT_CONFIRMED_1X_COINS.
-- Позиция: YB long 9b0cdf66, открыта 21.11 10:32 МСК, 172 ct, ноционал $10, на 10:43 открыта.
-- completed_cycles 36 на конец 20.11 (было 29).
-- 20.11: 7 сделок (INIT×3, IRYS, YB, BARD×2), net $-0.2822 (среднее $-0.0403); INIT c84f73e7 (26 ч 33 м) net $-0.7038 из-за funding Bybit -0.81; funding Bybit сходится с closedPnl и private WS. insufficient_size 3146 (INIT), send_abort 0.
+- gear23 / B2.3 live canary, PID 821896, запущен 20.11 11:33 МСК (resume c84f73e7, без RVN: OKX делистнул RVNUSDT perp 19.11), аптайм ~47 ч на 22.11 10:45; рестартов за 21.11 нет, halts нет, ERROR/Traceback за 21.11 нет. TODO: убрать INIT из 1x resume-launcher (c84f73e7 закрыта 20.11 13:01).
+- Пул 54 из 60 (2 базовые WAL, LA + 52 extras; сайдкар считает 55 вместе с RVN); последнее добавление 20.11 10:10 (YB). 21.11 и 22.11 10:10 добавление пропущено: сайдкар «bot_not_on_dyn_launcher» (22.11 would_add ENSO, AKE no_complete_meta), бот на resume-launcher. 1x: у 9 монет (WAL, LA, ACU, APR, AZTEC, BLEND, INIT, PARTI, YB) нет gear23_leverage_one_confirmed в логе, они в BBOT_CONFIRMED_1X_COINS.
+- Позиций нет (heartbeat position=None на 10:41).
+- completed_cycles 44 на конец 21.11 (было 36).
+- 21.11: 8 сделок (IRYS, BARD×3, INIT×2, YB×2), net $+0.0954 (среднее $+0.0119); funding итого -0.192$ (OKX +0.192, Bybit -0.384), съел Bybit; funding сходится с closedPnl и private WS. insufficient_size 26, send_abort 0, обрывов private WS 16 (2 рядом со входом 092f6135).
 - Мониторинг: утренний дайджест ~10:30 МСК, эта секция обновляется после дайджеста.
 - size_check только по L1. REST бирж только для разовой сверки funding/PnL.
 
