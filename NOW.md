@@ -1,6 +1,8 @@
+<cursor_untrusted_data_1337 source="CallDynamicTool">
+
 # NOW
 
-Снимок на 2026-11-21 ~09:55 МСК. Каждая секция — зона своего агента, чужие секции не переписывать.
+Снимок на 2026-11-22 ~09:55 МСК. Каждая секция — зона своего агента, чужие секции не переписывать.
 
 Вектор развития: [roadmap.md](roadmap.md). Этот файл — снимок, не план.
 
@@ -33,13 +35,13 @@
 Сервер, утренний снимок, скрипты юнитов. Живые ордера и would_send не веду. Архитектура: `docs/`.
 
 - Вектор: держать D зелёным (collector/compact/backup) как базу под would_send canary → 2.2 → 2.3 (готово) → **3** → 3.4… из [roadmap.md](roadmap.md); параллельно gear23 live (бот, динамический пул).
-- Хост: uptime ~8 сут 4 ч (перезагрузка 13.11 05:15 МСК). `spread-collector-next` (PID 917, active с 05:15 МСК 13.11, рестартов нет, 203 пары, failures=0), таймеры compactor/backup/discovery/top10/ops-metrics активны. Окно топ-10 за 24ч: 287/289 слотов.
+- Хост: uptime ~9 сут 4 ч (перезагрузка 13.11 05:15 МСК). `spread-collector-next` (PID 917, active с 05:15 МСК 13.11, рестартов нет, 203 пары, failures=0), таймеры compactor/backup/discovery/top10/ops-metrics активны. Окно топ-10 за 24ч: 287/289 слотов.
 - Юнит `spread-collector-next`, код `/root/spread_staging`, данные `/data/live`. `/root/spread_staging` не git-checkout, SHA нет: крутится задеплоенное дерево. Деплоев кода и изменений unit-файлов за сутки не видно. Старый `spread-collector` inactive/disabled.
-- gear23 live (код `gear23-b2.3-tw-deque-20261010-tradeobs-20261018T1741Z`, тот же): PID 821896 с 20.11 11:33 МСК (~22 ч, перезапуск ботом после прошлого снимка), `completed_cycles` 40; по canary_state открыта INIT long 10 USDT с 21.11 09:04 МСК. Зона бота. Юнит `spread-bbot.service` (старый stub) disabled.
-- Backup (rclone в `backup1tb:spread-compacted`) по факту доставки: **D по backup не зелёный** — за 24ч 287 ok / 221 fail попыток (норма ~9; 77 файлов с ретраями, все позже доставлены): copyto watchdog 120 с, сплошной кластер 20.11 10:40 – 21.11 00:39 МСК, с 00:39 МСК сбоев нет; неотправленных `*.parquet` в корне `/data/compacted` 2 (свежие, ≤~12 мин), последний успешный transfer 21.11 09:36 МСК.
-- Ночной `spread-bbot-gear23-metrics-compact` 21.11 03:15 МСК: Result=success, days_errors=0 (compacted 4, 16.11 skip_already_compacted); `systemctl --failed` пуст.
-- Топ-10 volatile 21.11 отработал 09:10 МСК: IRYS BARD INIT YB ENSO AEON CP KII CORE AKE.
+- gear23 live (код `gear23-b2.3-tw-deque-20261010-tradeobs-20261018T1741Z`, тот же): PID 821896 с 20.11 11:33 МСК (~46 ч), `completed_cycles` 45; по canary_state открыта IRYS long 10 USDT с 22.11 03:27 МСК. Зона бота. Юнит `spread-bbot.service` (старый stub) disabled.
+- Backup (rclone в `backup1tb:spread-compacted`) по факту доставки: **D по backup не зелёный** — за 24ч 288 ok / 91 fail попыток (норма ~9; все файлы позже доставлены): copyto watchdog 120–196 с, кластер 21.11 09:42 – 22.11 00:00 МСК, с 00:00 МСК сбоев нет; неотправленных `*.parquet` в корне `/data/compacted` 1 (свежий, ~2 мин), последний успешный transfer 22.11 09:32 МСК.
+- Ночной `spread-bbot-gear23-metrics-compact` 22.11 03:15 МСК: Result=success, days_errors=0 (compacted 4, 16.11 skip_already_compacted); `systemctl --failed` пуст.
+- Топ-10 volatile 22.11 отработал 09:10 МСК: INIT IRYS ENSO BARD AKE AEON YB CP UB DGAI.
 - Соседи на хосте (не веду): `spread-bbot-would-send-prod` inactive/disabled; θ K=1 canary inactive/disabled, oneshot не запускал; gear23 live работает. HL v2 не запущен.
-- Ops 24ч: CPU ср. 8% / пик 26%, load сейчас ~0.9, RAM ср. 2.9 / пик 4.3 из 16 GiB (занято), egress ~10.7 GiB. Диск 42/79G (56%), свободно ~34G. Данные материализуются в `/data/live`, затем compact в `/data/compacted`, копия — `backup1tb:spread-compacted`.
+- Ops 24ч: CPU ср. 6% / пик 24%, load сейчас ~0.3, RAM ср. 3.0 / пик 4.1 из 16 GiB (занято), egress ~7.0 GiB. Диск 40/79G (53%), свободно ~36G. Данные материализуются в `/data/live`, затем compact в `/data/compacted`, копия — `backup1tb:spread-compacted`.
 - Слежу я (голова), утренний дайджест ~9:32 МСК. @бот — Contour B / gear23 live, @стратег — would_send. Sentry ops отдельно, не эта секция.
 - Не поднимать старый collector. Чужие data root не чищу без явного OK. Утренний ops-снимок NOW.md коммичу сразу в main. Прочий патч в NOW.md и на сервер — только после явного «да».
