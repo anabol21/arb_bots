@@ -20,11 +20,11 @@
 
 ## Contour B (бот)
 
-- gear23 / B2.3 live canary, PID 821896, запущен 20.11 11:33 МСК (resume c84f73e7, без RVN: OKX делистнул RVNUSDT perp 19.11), аптайм ~47 ч на 22.11 10:45; рестартов за 21.11 нет, halts нет, ERROR/Traceback за 21.11 нет. TODO: убрать INIT из 1x resume-launcher (c84f73e7 закрыта 20.11 13:01).
-- Пул 54 из 60 (2 базовые WAL, LA + 52 extras; сайдкар считает 55 вместе с RVN); последнее добавление 20.11 10:10 (YB). 21.11 и 22.11 10:10 добавление пропущено: сайдкар «bot_not_on_dyn_launcher» (22.11 would_add ENSO, AKE no_complete_meta), бот на resume-launcher. 1x: у 9 монет (WAL, LA, ACU, APR, AZTEC, BLEND, INIT, PARTI, YB) нет gear23_leverage_one_confirmed в логе, они в BBOT_CONFIRMED_1X_COINS.
-- Позиций нет (heartbeat position=None на 10:41).
-- completed_cycles 44 на конец 21.11 (было 36).
-- 21.11: 8 сделок (IRYS, BARD×3, INIT×2, YB×2), net $+0.0954 (среднее $+0.0119); funding итого -0.192$ (OKX +0.192, Bybit -0.384), съел Bybit; funding сходится с closedPnl и private WS. insufficient_size 26, send_abort 0, обрывов private WS 16 (2 рядом со входом 092f6135).
+- gear23 / B2.3 live canary, PID 821896, запущен 20.11 11:33 МСК (resume c84f73e7, без RVN: OKX делистнул RVNUSDT perp 19.11), аптайм ~71 ч на 23.11 10:40; рестартов за 22.11 нет, halts нет, ERROR/Traceback за 22.11 нет. TODO: убрать INIT из 1x resume-launcher (c84f73e7 закрыта 20.11 13:01).
+- Пул 54 из 60 (2 базовые WAL, LA + 52 extras; сайдкар считает 55 вместе с RVN); последнее добавление 20.11 10:10 (YB). 21.11, 22.11 и 23.11 10:10 добавление пропущено: сайдкар «bot_not_on_dyn_launcher» (23.11 would_add ENSO), бот на resume-launcher. 1x: у 9 монет (WAL, LA, ACU, APR, AZTEC, BLEND, INIT, PARTI, YB) нет gear23_leverage_one_confirmed в логе, они в BBOT_CONFIRMED_1X_COINS.
+- Позиций нет (heartbeat position=None на 10:37).
+- completed_cycles 50 на конец 22.11 (было 44).
+- 22.11: 6 сделок (INIT×4, IRYS, CP), net $-0.3271 (среднее $-0.0545); funding итого -0.461$ (OKX +0.110, Bybit -0.572), съел Bybit (IRYS, INIT 92eca547); funding сходится с closedPnl Bybit и private WS. insufficient_size 24, send_abort 0, обрывов private WS 4 (рядом со сделками нет).
 - Мониторинг: утренний дайджест ~10:30 МСК, эта секция обновляется после дайджеста.
 - size_check только по L1. REST бирж только для разовой сверки funding/PnL.
 
