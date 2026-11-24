@@ -20,11 +20,11 @@
 
 ## Contour B (бот)
 
-- gear23 / B2.3 live canary, PID 821896, запущен 20.11 11:33 МСК (resume c84f73e7, без RVN: OKX делистнул RVNUSDT perp 19.11), аптайм ~71 ч на 23.11 10:40; рестартов за 22.11 нет, halts нет, ERROR/Traceback за 22.11 нет. TODO: убрать INIT из 1x resume-launcher (c84f73e7 закрыта 20.11 13:01).
-- Пул 54 из 60 (2 базовые WAL, LA + 52 extras; сайдкар считает 55 вместе с RVN); последнее добавление 20.11 10:10 (YB). 21.11, 22.11 и 23.11 10:10 добавление пропущено: сайдкар «bot_not_on_dyn_launcher» (23.11 would_add ENSO), бот на resume-launcher. 1x: у 9 монет (WAL, LA, ACU, APR, AZTEC, BLEND, INIT, PARTI, YB) нет gear23_leverage_one_confirmed в логе, они в BBOT_CONFIRMED_1X_COINS.
-- Позиций нет (heartbeat position=None на 10:37).
-- completed_cycles 50 на конец 22.11 (было 44).
-- 22.11: 6 сделок (INIT×4, IRYS, CP), net $-0.3271 (среднее $-0.0545); funding итого -0.461$ (OKX +0.110, Bybit -0.572), съел Bybit (IRYS, INIT 92eca547); funding сходится с closedPnl Bybit и private WS. insufficient_size 24, send_abort 0, обрывов private WS 4 (рядом со сделками нет).
+- gear23 / B2.3 live canary, pool11 dyn-лаунчер, обёртка PID 1222650, бот 1222651, запущен 23.11 17:38 МСК (аптайм ~17 ч на 24.11 10:42); рестарт 23.11 осознанный (переход на pool11), halts нет, ERROR/Traceback за 23.11 нет.
+- Пул 18 из 60 (база 7: INIT, BARD, IRYS, YB, BREV, SOPH, HUMA + 11 extras: AXIS, BTW, CP, KII seed и 24.11 10:10 добавлены SAHARA, AEON, DOS, ACU, ENSO, SAPIEN, DNA); WAL, LA, RVN вне базы. 1x подтверждён у всех 7 новых; у монет базы/seed подтверждение в логе не проверялось.
+- Позиций нет (heartbeat position=None на 10:42 МСК).
+- completed_cycles 1 после рестарта (до рестарта 50).
+- 23.11: 5 сделок (все INIT long), net $-0.2918 (среднее $-0.0584); funding итого -0.419$ (OKX +0.081, Bybit -0.500), съел Bybit; funding Bybit сходится с closedPnl и private WS. insufficient_size 8, send_abort 0, обрывов private WS 4 (рядом со сделками нет).
 - Мониторинг: утренний дайджест ~10:30 МСК, эта секция обновляется после дайджеста.
 - size_check только по L1. REST бирж только для разовой сверки funding/PnL.
 
