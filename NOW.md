@@ -1,6 +1,6 @@
 # NOW
 
-Снимок на 2026-11-23 ~09:45 МСК. Каждая секция — зона своего агента, чужие секции не переписывать.
+Снимок на 2026-11-24 ~09:45 МСК. Каждая секция — зона своего агента, чужие секции не переписывать.
 
 Вектор развития: [roadmap.md](roadmap.md). Этот файл — снимок, не план.
 
@@ -33,13 +33,13 @@
 Сервер, утренний снимок, скрипты юнитов. Живые ордера и would_send не веду. Архитектура: `docs/`.
 
 - Вектор: держать D зелёным (collector/compact/backup) как базу под would_send canary → 2.2 → 2.3 (готово) → **3** → 3.4… из [roadmap.md](roadmap.md); параллельно gear23 live (бот, динамический пул).
-- Хост: uptime ~10 сут 4 ч (перезагрузка 13.11 05:15 МСК). `spread-collector-next` (PID 917, active с 05:15 МСК 13.11, рестартов нет, 204 пары в heartbeat, failures=0), таймеры compactor/backup/discovery/top10/ops-metrics активны. Окно топ-10 за 24ч: 285/289 слотов.
-- Юнит `spread-collector-next`, код `/root/spread_staging`, данные `/data/live`. `/root/spread_staging` не git-checkout, SHA нет: крутится задеплоенное дерево. Деплоев кода и изменений unit-файлов за сутки не видно. Старый `spread-collector` inactive/disabled.
-- gear23 live (код `gear23-b2.3-tw-deque-20261010-tradeobs-20261018T1741Z`, тот же): PID 821896 с 20.11 11:33 МСК (~71 ч), `completed_cycles` 53; по canary_state позиции нет. Зона бота. Юнит `spread-bbot.service` (старый stub) disabled.
-- Backup (rclone в `backup1tb:spread-compacted`) по факту доставки: **D по backup не зелёный** — за 24ч 286 ok / 71 fail попыток (23 уникальных файла, норма ~9; все позже доставлены): copyto watchdog 128–196 с, кластер 22.11 17:06 – 23:55 МСК (пик 20–23 ч), с 00:00 МСК сбоев нет; неотправленных `*.parquet` в корне `/data/compacted` 1 (свежий, меньше минуты), последний успешный transfer 23.11 09:35 МСК.
-- Ночной `spread-bbot-gear23-metrics-compact` 23.11 03:15 МСК: Result=success, days_errors=0 (compacted 4, theta_trades 21.11 rows=381 bad=0); θ K=1 compact: days_errors=0; `systemctl --failed` пуст.
-- Топ-10 volatile 23.11 отработал 09:10 МСК: INIT CP ENSO BREV IRYS AEON DGAI DNA BARD EWT.
+- Хост: uptime ~11 сут 4 ч (перезагрузка 13.11 05:15 МСК). `spread-collector-next` (PID 917, active с 05:15 МСК 13.11, рестартов нет, 204 пары в heartbeat, failures=0), таймеры compactor/backup/discovery/top10/ops-metrics/pool-dyn-append активны. Окно топ-10 за 24ч: 203 монеты в рейтинге.
+- Юнит `spread-collector-next`, код `/root/spread_staging`, данные `/data/live`. `/root/spread_staging` не git-checkout, SHA нет: крутится задеплоенное дерево. Деплоев кода за сутки не видно. Старый `spread-collector` inactive/disabled.
+- gear23 live (зона бота): PID 1222651, запущен 23.11 14:38 МСК (аптайм ~19 ч), heartbeat: 11 монет в пуле (INIT, BARD, IRYS, YB, BREV, SOPH, HUMA, AXIS, BTW, CP, KII), position=None. Юнит `spread-bbot.service` (старый stub) disabled. Таймер `spread-canary-pool-dyn-append` с 23.11 14:38 МСК идёт через drop-in `pool11.conf` (скрипт `/root/pool12/dyn/canary_pool_dyn11_append.py`, откат: удалить drop-in и daemon-reload).
+- Backup (rclone в `backup1tb:spread-compacted`) по факту доставки: **D по backup зелёный** — за 24ч 288 ok / 6 fail попыток (4 уникальных файла, норма ~9; все позже доставлены): copyto watchdog 195–265 с, 23.11 11:47–12:01 и 22:03–22:14 МСК; неотправленных `*.parquet` в корне `/data/compacted` 1 (свежий, ~3 мин), последний успешный transfer 24.11 09:31 МСК.
+- Ночной `spread-bbot-gear23-metrics-compact` 24.11 03:15 МСК: Result=success; `systemctl --failed` пуст.
+- Топ-10 volatile 24.11 отработал 09:10 МСК: INIT SAHARA AEON DOS ACU ENSO SAPIEN CP KII DNA.
 - Соседи на хосте (не веду): `spread-bbot-would-send-prod` inactive/disabled; θ K=1 canary inactive/disabled, oneshot не запускал; gear23 live работает. HL v2 не запущен.
-- Ops 24ч: CPU ср. 5.5% / пик 23%, load сейчас ~0.4, RAM ср. 3.1 / пик 3.9 из 16 GiB (занято), egress ~6.1 GiB tx. Диск 40/79G (53%), свободно ~36G. Данные материализуются в `/data/live`, затем compact в `/data/compacted`, копия — `backup1tb:spread-compacted`.
+- Ops 24ч: CPU ср. 5.5% / пик 25%, load сейчас ~0.2, RAM занято ср. 2.6 / пик 5.1 из 16 GiB, egress ~7.2 GiB tx. Диск 39/79G (52%), свободно ~37G. Данные материализуются в `/data/live`, затем compact в `/data/compacted`, копия — `backup1tb:spread-compacted`.
 - Слежу я (голова), утренний дайджест ~9:32 МСК. @бот — Contour B / gear23 live, @стратег — would_send. Sentry ops отдельно, не эта секция.
 - Не поднимать старый collector. Чужие data root не чищу без явного OK. Утренний ops-снимок NOW.md коммичу сразу в main. Прочий патч в NOW.md и на сервер — только после явного «да».
