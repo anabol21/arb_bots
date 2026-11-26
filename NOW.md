@@ -20,11 +20,11 @@
 
 ## Contour B (бот)
 
-- gear23 / B2.3 live canary, pool11 dyn-лаунчер, обёртка PID 1222650, бот 1222651, запущен 23.11 17:38 МСК (аптайм ~41 ч на 25.11 10:36); рестартов после 23.11 нет, halts нет, ERROR/Traceback за 24.11 нет.
-- Пул 21 из 60 (база 7: INIT, BARD, IRYS, YB, BREV, SOPH, HUMA + 14 extras: AXIS, BTW, CP, KII seed; 24.11 добавлены SAHARA, AEON, DOS, ACU, ENSO, SAPIEN, DNA; 25.11 10:10 МСК добавлены BIGTIME, AT, HMSTR). 1x подтверждён у всех 3 новых; warm live_catchup в логе есть у AT и HMSTR, у BIGTIME строки нет (проверить).
-- Позиция: INIT long bfc63a3a (10 USDT), открыта 00:49 МСК 25.11, на 10:36 МСК открыта.
-- completed_cycles 5 (было 1 после рестарта 23.11).
-- 24.11: 4 сделки (INIT x3, DNA x1), net $+0.0533 (среднее $+0.0133); funding итого -0.0396$ (OKX +0.0568, Bybit -0.0964), съел Bybit; funding Bybit сходится с closedPnl и private WS, OKX funding только по журналу. insufficient_size 5, send_abort 0, обрывов private WS 23 (рядом со сделками нет).
+- gear23 / B2.3 live canary, pool11 dyn-лаунчер, обёртка PID 1222650, бот 1222651, запущен 23.11 17:38 МСК (аптайм ~65 ч на 26.11 10:36); рестартов нет, halts нет, ERROR/Traceback за 25.11 нет.
+- Пул 24 из 60 (база 7 + 17 extras: seed AXIS, BTW, CP, KII; 24.11 SAHARA, AEON, DOS, ACU, ENSO, SAPIEN, DNA; 25.11 BIGTIME, AT, HMSTR; 26.11 10:10 МСК MOVE, ME, CORE). 1x подтверждён у всех новых, монет без подтверждения нет; ошибок hot_add нет.
+- Позиция: MOVE long 3205976b (10 USDT), открыта 26.11 10:15 МСК, открыта.
+- completed_cycles 6 (+1 за 25.11).
+- 25.11: 1 сделка (INIT long bfc63a3a, hold 21ч06м), net $-0.0366; гросс +0.0528, комиссии -0.0310, funding -0.0584 (OKX +0.0167, Bybit -0.0751, съел Bybit); Bybit funding сходится с closedPnl и private WS, OKX только по журналу. insufficient_size 0, send_abort 0, обрывов private WS 8 (рядом со сделками нет).
 - Мониторинг: утренний дайджест ~10:30 МСК, эта секция обновляется после дайджеста.
 - size_check только по L1. REST бирж только для разовой сверки funding/PnL.
 
