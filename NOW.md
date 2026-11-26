@@ -1,6 +1,6 @@
 # NOW
 
-Снимок на 2026-11-25 ~09:45 МСК. Каждая секция — зона своего агента, чужие секции не переписывать.
+Снимок на 2026-11-26 ~09:40 МСК. Каждая секция — зона своего агента, чужие секции не переписывать.
 
 Вектор развития: [roadmap.md](roadmap.md). Этот файл — снимок, не план.
 
@@ -33,13 +33,13 @@
 Сервер, утренний снимок, скрипты юнитов. Живые ордера и would_send не веду. Архитектура: `docs/`.
 
 - Вектор: держать D зелёным (collector/compact/backup) как базу под would_send canary → 2.2 → 2.3 (готово) → **3** → 3.4… из [roadmap.md](roadmap.md); параллельно gear23 live (бот, динамический пул).
-- Хост: uptime ~12 сут 4 ч (перезагрузка 13.11 05:15 МСК). `spread-collector-next` (PID 917, active с 05:15 МСК 13.11, рестартов нет, 204 пары в heartbeat, failures=0), таймеры compactor/backup/discovery/top10/ops-metrics/pool-dyn-append активны. Окно топ-10 за 24ч: 203 монеты в рейтинге.
+- Хост: uptime ~13 сут 4 ч (перезагрузка 13.11 05:15 МСК). `spread-collector-next` (PID 917, active с 05:15 МСК 13.11, рестартов нет, 204 пары в heartbeat, failures=0), таймеры compactor/backup/discovery/top10/ops-metrics/pool-dyn-append активны. Окно топ-10 за 24ч: 203 монеты в рейтинге.
 - Юнит `spread-collector-next`, код `/root/spread_staging`, данные `/data/live`. `/root/spread_staging` не git-checkout, SHA нет: крутится задеплоенное дерево. Деплоев кода за сутки не видно. Старый `spread-collector` inactive/disabled.
-- gear23 live (зона бота): PID 1222651, запущен 23.11 17:38 МСК (аптайм ~40 ч), heartbeat: 18 монет в пуле (INIT, BARD, IRYS, YB, BREV, SOPH, HUMA, AXIS, BTW, CP, KII, ACU, AEON, DNA, DOS, ENSO, SAHARA, SAPIEN), открыта позиция INIT long 10 USDT (с ~03:49 МСК 25.11). Юнит `spread-bbot.service` (старый stub) disabled. Таймер `spread-canary-pool-dyn-append` идёт через drop-in `pool11.conf` (скрипт `/root/pool12/dyn/canary_pool_dyn11_append.py`, откат: удалить drop-in и daemon-reload).
-- Backup (rclone в `backup1tb:spread-compacted`) по факту доставки: **D по backup не зелёный** — за 24ч 288 ok / 24 fail попытки (10 уникальных файлов, норма ~9; все позже доставлены): copyto watchdog ~196 с, 24.11 17:28 и кластер 21:40–23:16 МСК; с 00:00 МСК 25.11 fail нет. Неотправленных `*.parquet` в корне `/data/compacted` 1 (свежий, <1 мин), последний успешный transfer 25.11 09:28 МСК.
-- Ночной `spread-bbot-gear23-metrics-compact` 25.11 03:17 МСК: Result=success; θ compact success; `systemctl --failed` пуст.
-- Топ-10 volatile 25.11 отработал 09:10 МСК (слоты 287/289): INIT IRYS BIGTIME SAHARA DNA AT DOS AEON HMSTR AXIS.
+- gear23 live (зона бота): PID 1222651, запущен 23.11 17:38 МСК (аптайм ~2 сут 15 ч), heartbeat: 21 монета в пуле, позиции нет (flat), completed_cycles 7. Юнит `spread-bbot.service` (старый stub) disabled. Таймер `spread-canary-pool-dyn-append` идёт через drop-in `pool11.conf` (скрипт `/root/pool12/dyn/canary_pool_dyn11_append.py`, откат: удалить drop-in и daemon-reload).
+- Backup (rclone в `backup1tb:spread-compacted`) по факту доставки: **D по backup зелёный** — за 24ч 289 ok / 0 fail, неотправленных `*.parquet` в корне `/data/compacted` 0, последний успешный transfer 26.11 09:32 МСК.
+- Ночной `spread-bbot-gear23-metrics-compact` 26.11 03:15 МСК: Result=success; θ compact success; `systemctl --failed` пуст.
+- Топ-10 volatile 26.11 отработал 09:10 МСК (слоты 287/289): MOVE BIGTIME INIT AEON DOS ME CP AT AXIS CORE.
 - Соседи на хосте (не веду): `spread-bbot-would-send-prod` inactive/disabled; θ K=1 canary inactive/disabled, oneshot не запускал; gear23 live работает. HL v2 не запущен.
-- Ops 24ч: CPU ср. 5.0% / пик 24%, load сейчас ~0.2, RAM занято ср. 2.5 / пик 3.4 из 16 GiB, egress ~6.6 GiB tx. Диск 38/79G (50%), свободно ~39G. Данные материализуются в `/data/live`, затем compact в `/data/compacted`, копия — `backup1tb:spread-compacted`.
+- Ops 24ч: CPU ср. 5.6% / пик 25%, load сейчас ~0.2, RAM занято ср. 2.5 / пик 3.4 из 16 GiB, egress ~7.5 GiB tx. Диск 38/79G (51%), свободно ~38G. Данные материализуются в `/data/live`, затем compact в `/data/compacted`, копия — `backup1tb:spread-compacted`.
 - Слежу я (голова), утренний дайджест ~9:32 МСК. @бот — Contour B / gear23 live, @стратег — would_send. Sentry ops отдельно, не эта секция.
 - Не поднимать старый collector. Чужие data root не чищу без явного OK. Утренний ops-снимок NOW.md коммичу сразу в main. Прочий патч в NOW.md и на сервер — только после явного «да».
