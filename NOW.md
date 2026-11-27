@@ -20,11 +20,11 @@
 
 ## Contour B (бот)
 
-- gear23 / B2.3 live canary, pool11 dyn-лаунчер, обёртка PID 1222650, бот 1222651, запущен 23.11 17:38 МСК (аптайм ~65 ч на 26.11 10:36); рестартов нет, halts нет, ERROR/Traceback за 25.11 нет.
-- Пул 24 из 60 (база 7 + 17 extras: seed AXIS, BTW, CP, KII; 24.11 SAHARA, AEON, DOS, ACU, ENSO, SAPIEN, DNA; 25.11 BIGTIME, AT, HMSTR; 26.11 10:10 МСК MOVE, ME, CORE). 1x подтверждён у всех новых, монет без подтверждения нет; ошибок hot_add нет.
-- Позиция: MOVE long 3205976b (10 USDT), открыта 26.11 10:15 МСК, открыта.
-- completed_cycles 6 (+1 за 25.11).
-- 25.11: 1 сделка (INIT long bfc63a3a, hold 21ч06м), net $-0.0366; гросс +0.0528, комиссии -0.0310, funding -0.0584 (OKX +0.0167, Bybit -0.0751, съел Bybit); Bybit funding сходится с closedPnl и private WS, OKX только по журналу. insufficient_size 0, send_abort 0, обрывов private WS 8 (рядом со сделками нет).
+- gear23 / B2.3 live canary, pool11 dyn-лаунчер, обёртка PID 1222650, бот 1222651, запущен 23.11 17:38 МСК (аптайм ~3 сут 17 ч на 27.11 10:45); рестартов нет, halts нет, ERROR/Traceback за 26.11 нет.
+- Пул 28 из 60 (база 7 + 21 extras: seed AXIS, BTW, CP, KII; 24.11 SAHARA, AEON, DOS, ACU, ENSO, SAPIEN, DNA; 25.11 BIGTIME, AT, HMSTR; 26.11 MOVE, ME, CORE; 27.11 10:10 МСК BABY, KGEN, 0G, TRUST; JCT пропущен: no_complete_meta). 1x подтверждён у всех новых; 0G не прогрет (history_missing, gate floor_warm), ошибок hot_add нет.
+- Позиций нет (heartbeat 27.11 10:44 МСК: position=None).
+- completed_cycles 11 (+5 за 26.11).
+- 26.11: 5 сделок (INIT×2, MOVE, ME×2), net $-0.2142 (среднее -0.0428): гросс +0.5670, комиссии -0.1515, funding -0.6297 (OKX +0.3494, Bybit -0.9791, съел Bybit); Bybit funding сходится с closedPnl и private WS, OKX только по журналу. insufficient_size 10, send_abort 0, обрывов private WS 3 (рядом со сделками нет).
 - Мониторинг: утренний дайджест ~10:30 МСК, эта секция обновляется после дайджеста.
 - size_check только по L1. REST бирж только для разовой сверки funding/PnL.
 
