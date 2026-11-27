@@ -81,6 +81,7 @@ Oneshot + timer (B, isolated prefixes):
 | `spread-bbot-backup-transfer.service` + `.timer` | `python -m app.bot.backup` | `{BBOT_DATA_ROOT}/journal` → rclone `spread-bbot`. |
 | `spread-bbot-gear2-backup-transfer.service` + `.timer` | `python -m app.bot.backup` | same module, prefix `spread-bbot-gear2`. |
 | `spread-bbot-gear23-metrics-compact.service` + `.timer` | shared `compact_metrics_jsonl_to_parquet.py` | Gear 2.3 `theta`, `tw_p50`, `floor`, and `theta_trades` closed UTC-day JSONL → Parquet; keeps source JSONL. |
+| `spread-canary-pool-dyn-append.service` + `.timer` | `app/bot/canary_pool_dyn_append.py --apply` (VPS copy `/root/pool12/dyn/canary_pool_dyn_append.py`) | Daily 10:10 MSK append-only expansion of the gear23 canary-owned delta. Never writes `/data/bbot-would-send-prod/*`. See [`docs/gear23-pool-dyn.md`](docs/gear23-pool-dyn.md). |
 
 No backup units in this tree for `/data/bbot-canary-wal-eden` or `/data/bbot-gear22-live-canary`.
 
@@ -90,6 +91,16 @@ daily compaction timer is separate from the trading process and is scoped to
 that run's `data/` root; it excludes the sibling `private/` journal. It uses
 the VPS-installed theta-k1 compactor script and retains JSONL inputs while
 writing Parquet, so failed or malformed records remain available for review.
+
+The same canary's **pool** is no longer a frozen 12-coin snapshot. WAL,RVN,LA
+plus the nine seed extras are the starting set. A canary-owned sidecar
+(`spread-canary-pool-dyn-append.timer` @ 10:10 Europe/Moscow) appends morning
+top-10 volatile coins that are not already in that set to
+`$RUNROOT/state/pool_dyn/hot_add_delta_dyn.csv` (append-only, total cap 30,
+never-remove). The bot keeps polling that file (`BBOT_HOT_ADD=1`,
+`BBOT_HOT_ADD_MAX_EXTRA=27`). The shared would_send file
+`/data/bbot-would-send-prod/hot_add_delta.csv` stays strategist-owned and is
+read-only for this job. Contract: [`docs/gear23-pool-dyn.md`](docs/gear23-pool-dyn.md).
 
 ### Documented on VPS, **not** in `deploy/systemd/` this rev
 
@@ -357,6 +368,7 @@ Local lean only: `SPREAD_LEAN_PARQUET_ROOT`, `SPREAD_LEAN_BARS_ROOT`, `SPREAD_LE
 | `BBOT_FLOOR_WATCH`, `BBOT_TW_P50_WATCH`, `BBOT_THETA_WATCH`, `BBOT_FLOOR_WARM`, `BBOT_FLOOR_BAR_SAMPLE_CAP` | observers |
 | `BBOT_HOT_ADD`, `BBOT_HOT_ADD_DELTA`, `BBOT_HOT_ADD_MAX_EXTRA`, `BBOT_HOT_ADD_POLL_SEC`, `BBOT_HOT_ADD_WARM`, `BBOT_HOT_ADD_HISTORY_ROOT` | opt-in Gear 2.3 cumulative pool; private additions reuse the active owner session and entries require every readiness gate |
 | `BBOT_HOT_ADD_SET_LEVERAGE` | default-off Gear 2.3 private-extra setup; a supervised off-loop task requires flat positions/no open orders, sets only 1x, and requires matching OKX and Bybit readbacks before admission |
+| `POOL_DYN_*` (sidecar only) | `POOL_DYN_DIR` / `POOL_DYN_DELTA` / `POOL_DYN_MAX_TOTAL` / `POOL_DYN_TOP10` / `POOL_DYN_SHARED_DELTA` / `POOL_DYN_MAX_STD_BPS` (optional, default-off). Own-delta expansion; never points at the shared would_send file. |
 | `BBOT_CHRONOMETRY`, `BBOT_L1_RING` | live canary instrumentation |
 | `BBOT_PRIVATE_DATA_ROOT`, `BBOT_PRIVATE_LOG_PATH`, `BBOT_PRIVATE_ENV_FILE` | private journal / secret **path** |
 | `BBOT_PRIVATE_SEND_PATH`, `BBOT_PRIVATE_W6`, `W6_DUAL_LEG`, `BBOT_PRIVATE_W4`/`W4_POST_ONLY`, `BBOT_PRIVATE_W5`/`W5_MARKET`, `BBOT_PRIVATE_W7`/`W7_PARALLEL_DUAL_LEG` | send-path / experiment flags |
@@ -582,6 +594,7 @@ Local fallback if `/data/bbot` not writable: `<repo>/output/bbot`.
 | Historical gears | `docs/strategy-gears.md`, `model.ipynb`, `research/gear22_backtest/` |
 | Glue block diagram | `docs/b-v0-block-diagram.md` **and this file** in the same change |
 | Isolation / D deny | `app/bot/paths.py`, `app/bot/private/paths.py`, bot systemd `ReadWritePaths` / `InaccessiblePaths` |
+| Gear 2.3 canary pool expansion | `app/bot/canary_pool_dyn_append.py`, `deploy/systemd/spread-canary-pool-dyn-append.*`, `deploy/scripts/gear23-pool-dyn-launch.sh`; contract: `docs/gear23-pool-dyn.md`. Do not edit the shared would_send rotate script or `/data/bbot-would-send-prod/hot_add_delta.csv`. |
 | Validation of journals / D | `validation/check_bbot_*.py`, `check_file_lifecycle.py`, `check_mount.py`, `check_published_parquet.py` |
 
 When you change topology (new process, send path, journal layout, contour boundary): update this file in the same change.
